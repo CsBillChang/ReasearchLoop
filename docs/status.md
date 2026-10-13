@@ -13,11 +13,11 @@
 
 ## 本轮整理与首次发布
 
-本轮范围为文档重整、源码清单、公共配置说明、发布排除规则和GitHub初次上传准备。未执行P0–P3、没有DeepSeek/论文检索/精读调用，没有修改外部简历、生产配置、数据库或重启服务。
+本轮文档重整、源码清单、公共配置说明、发布排除规则和GitHub首次上传已完成。未执行P0–P3、没有DeepSeek/论文检索/精读调用，没有修改外部简历、生产配置、数据库或重启服务。
 
 旧文档逐字存入本机archive；代码保持原目录，实验与历史工具在文件地图中明确分类，避免搬迁破坏import/恢复/冻结脚本。本轮检查：后端392项运行、373通过、19项环境门控跳过；前端9项通过；make check通过。暂存树260文件，发布模式扫描和本机真实凭据值对照均无命中，活动Markdown相对链接无缺失。业务源码hash全部保持。原有2222份材料/记录中仅data/artifacts的目录说明有预期更新，其余hash一致；不将此文件核对称为数据库快照核验。
 
-GitHub上传使用用户指定仓库的授权连接；目标公开范围见publication.md，实际提交以仓库历史为准。未上传.env、data/artifacts原始内容或docs/archive。本机未安装GitHub CLI/HTTPS凭据，采用已有GitHub连接提交，不要求在聊天中提供密钥。
+已上传到用户指定的公开仓库 [CsBillChang/ReasearchLoop](https://github.com/CsBillChang/ReasearchLoop)。[首次完整源码提交](https://github.com/CsBillChang/ReasearchLoop/commit/dca88d12efe1e8b3f34aff3d872f49f276611c59) 包含260个文件，远端Git文件树与审核后的本地暂存树一致；本机main已关联origin/main。公开范围见publication.md，后续状态记录以仓库历史为准。未上传.env、data/artifacts原始内容或docs/archive。本机未安装GitHub CLI/HTTPS凭据，采用已有GitHub连接提交，不要求在聊天中提供密钥。
 
 ## 历史证据索引（本机，不随公开仓库分发）
 
