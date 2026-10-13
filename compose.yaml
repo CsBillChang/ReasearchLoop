@@ -1,0 +1,30 @@
+name: researchloop-agent
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${RESEARCHLOOP_MYSQL_ROOT_PASSWORD:-researchloop_root_local}
+      MYSQL_DATABASE: researchloop
+      MYSQL_USER: researchloop
+      MYSQL_PASSWORD: ${RESEARCHLOOP_MYSQL_PASSWORD:-researchloop_local}
+    ports:
+      - "127.0.0.1:33316:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h localhost -uroot --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+  qdrant:
+    image: qdrant/qdrant:v1.19.1
+    ports:
+      - "127.0.0.1:6339:6333"
+      - "127.0.0.1:6340:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+volumes:
+  mysql_data:
+  qdrant_data:

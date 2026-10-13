@@ -1,0 +1,16 @@
+{
+  "name": "researchloop-web",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node dev-server.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "node --check dev-server.mjs && node --check src/app.js && node --check src/api.js && node --check src/components/reading-list.js && node --check src/components/artifacts.js && node --check src/components/evidence-matrix.js"
+  },
+  "dependencies": {
+    "dompurify": "3.4.16",
+    "katex": "0.19.0",
+    "marked": "18.1.0"
+  }
+}

@@ -1,0 +1,596 @@
+{
+  "version": 1,
+  "created_on": "2026-10-11",
+  "date_window": [
+    "2023-10-11",
+    "2026-10-11"
+  ],
+  "physical_cap": 192,
+  "token_cap": 6000000,
+  "wall_seconds": 14400,
+  "repair_physical_cap": 32,
+  "repair_token_cap": 1000000,
+  "materials": {
+    "od1": {
+      "key": "od1",
+      "paper_id": "cvpr-2024-lin-generative-region-language-pretraining-for-open-ended-object-detection-cvpr-2024-paper",
+      "title": "Generative Region-Language Pretraining for Open-Ended Object Detection",
+      "authors": [
+        "Lin, Chuang",
+        "Jiang, Yi",
+        "Qu, Lizhen",
+        "Yuan, Zehuan",
+        "Cai, Jianfei"
+      ],
+      "abstract": "In recent research significant attention has been devoted to the open-vocabulary object detection task aiming to generalize beyond the limited number of classes labeled during training and detect objects described by arbitrary category names at inference. Compared with conventional object detection open vocabulary object detection largely extends the object detection categories. However it relies on calculating the similarity between image regions and a set of arbitrary category names with a pretrained vision-and-language model. This implies that despite its open-set nature the task still needs the predefined object categories during the inference stage. This raises the question: What if we do not have exact knowledge of object categories during inference? In this paper we call such a new setting as generative open-ended object detection which is a more general and practical problem. To address it we formulate object detection as a generative problem and propose a simple framework named GenerateU which can detect dense objects and generate their names in a free-form way. Particularly we employ Deformable DETR as a region proposal generator with a language model translating visual regions to object names. To assess the free-form object detection task we introduce an evaluation method designed to quantitatively measure the performance of generative outcomes. Extensive experiments demonstrate strong zero-shot detection performance of our GenerateU. For example on the LVIS dataset our GenerateU achieves comparable results to the open-vocabulary object detection method GLIP even though the category names are not seen by GenerateU during inference. Code is available at: https://github.com/FoundationVision/GenerateU.",
+      "source": "cvpr",
+      "published": "2024-06-01",
+      "date_precision": "day",
+      "paper_url": "https://openaccess.thecvf.com/content/CVPR2024/html/Lin_Generative_Region-Language_Pretraining_for_Open-Ended_Object_Detection_CVPR_2024_paper.html",
+      "pdf_url": null,
+      "score": 0.531146645545959,
+      "metadata": {
+        "discovery_backend": "dpr_supabase_rpc",
+        "rpc": "match_cvpr_papers_bm25",
+        "source_raw": "CVPR-2024-Accepted",
+        "published_raw": "2024-06-01T00:00:00+00:00",
+        "categories": [
+          "CVPR-2024"
+        ],
+        "primary_category": "CVPR-2024",
+        "similarity": 0,
+        "date_provenance": "upstream metadata; conference dates may be nominal"
+      },
+      "doi": null,
+      "source_id": "cvpr-2024-lin-generative-region-language-pretraining-for-open-ended-object-detection-cvpr-2024-paper",
+      "version": null,
+      "resolved_pdf_url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Lin_Generative_Region-Language_Pretraining_for_Open-Ended_Object_Detection_CVPR_2024_paper.pdf",
+      "path": "artifacts/ag6-evaluation-20261011/materials/od1.pdf",
+      "sha256": "42bb5af65014ca6d62eebdd37999031e007a96c68fdd764451eee13145ce638b",
+      "pages": 11,
+      "status": "available"
+    },
+    "od2": {
+      "key": "od2",
+      "paper_id": "cvpr-2024-zhao-scene-adaptive-and-region-aware-multi-modal-prompt-for-open-vocabulary-object-detection-cvpr-2024-paper",
+      "title": "Scene-adaptive and Region-aware Multi-modal Prompt for Open Vocabulary Object Detection",
+      "authors": [
+        "Zhao, Xiaowei",
+        "Liu, Xianglong",
+        "Wang, Duorui",
+        "Gao, Yajun",
+        "Liu, Zhide"
+      ],
+      "abstract": "Open Vocabulary Object Detection (OVD) aims to detect objects from novel classes described by text inputs based on the generalization ability of trained classes. Existing methods mainly focus on transferring knowledge from large Vision and Language models (VLM) to detectors through knowledge distillation. However these approaches show weak ability in adapting to diverse classes and aligning between the image-level pre-training and region-level detection thereby impeding effective knowledge transfer. Motivated by the prompt tuning we propose scene-adaptive and region-aware multi-modal prompts to address these issues by effectively adapting class-aware knowledge from VLM to the detector at the region level. Specifically to enhance the adaptability to diverse classes we design a scene-adaptive prompt generator from a scene perspective to consider both the commonality and diversity of the class distributions and formulate a novel selection mechanism to facilitate the acquisition of common knowledge across all classes and specific insights relevant to each scene. Meanwhile to bridge the gap between the pre-trained model and the detector we present a region-aware multi-modal alignment module which employs the region prompt to incorporate the positional information for feature distillation and integrates textual prompts to align visual and linguistic representations. Extensive experimental results demonstrate that the proposed method significantly outperforms the state-of-the-art models on the OV-COCO and OV-LVIS datasets surpassing the current method by 3.0% mAP and 4.6% APr .",
+      "source": "cvpr",
+      "published": "2024-06-01",
+      "date_precision": "day",
+      "paper_url": "https://openaccess.thecvf.com/content/CVPR2024/html/Zhao_Scene-adaptive_and_Region-aware_Multi-modal_Prompt_for_Open_Vocabulary_Object_Detection_CVPR_2024_paper.html",
+      "pdf_url": null,
+      "score": 0.5,
+      "metadata": {
+        "discovery_backend": "dpr_supabase_rpc",
+        "rpc": "match_cvpr_papers_bm25",
+        "source_raw": "CVPR-2024-Accepted",
+        "published_raw": "2024-06-01T00:00:00+00:00",
+        "categories": [
+          "CVPR-2024"
+        ],
+        "primary_category": "CVPR-2024",
+        "similarity": 0,
+        "date_provenance": "upstream metadata; conference dates may be nominal"
+      },
+      "doi": null,
+      "source_id": "cvpr-2024-zhao-scene-adaptive-and-region-aware-multi-modal-prompt-for-open-vocabulary-object-detection-cvpr-2024-paper",
+      "version": null,
+      "resolved_pdf_url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Zhao_Scene-adaptive_and_Region-aware_Multi-modal_Prompt_for_Open_Vocabulary_Object_Detection_CVPR_2024_paper.pdf",
+      "path": "artifacts/ag6-evaluation-20261011/materials/od2.pdf",
+      "sha256": "ff983c440fd59f1a00a5b4db23ef745216cd2106c8d7fedd36151054e129e267",
+      "pages": 10,
+      "status": "available"
+    },
+    "od3": {
+      "key": "od3",
+      "paper_id": "cvpr-2024-li-learning-background-prompts-to-discover-implicit-knowledge-for-open-vocabulary-cvpr-2024-paper",
+      "title": "Learning Background Prompts to Discover Implicit Knowledge for Open Vocabulary Object Detection",
+      "authors": [
+        "Li, Jiaming",
+        "Zhang, Jiacheng",
+        "Li, Jichang",
+        "Li, Ge",
+        "Liu, Si",
+        "Lin, Liang",
+        "Li, Guanbin"
+      ],
+      "abstract": "Open vocabulary object detection (OVD) aims at seeking an optimal object detector capable of recognizing objects from both base and novel categories. Recent advances leverage knowledge distillation to transfer insightful knowledge from pre-trained large-scale vision-language models to the task of object detection significantly generalizing the powerful capabilities of the detector to identify more unknown object categories. However these methods face significant challenges in background interpretation and model overfitting and thus often result in the loss of crucial background knowledge giving rise to sub-optimal inference performance of the detector. To mitigate these issues we present a novel OVD framework termed LBP to propose learning background prompts to harness explored implicit background knowledge thus enhancing the detection performance w.r.t. base and novel categories. Specifically we devise three modules: Background Category-specific Prompt Background Object Discovery and Inference Probability Rectification to empower the detector to discover represent and leverage implicit object knowledge explored from background proposals. Evaluation on two benchmark datasets OV-COCO and OV-LVIS demonstrates the superiority of our proposed method over existing state-of-the-art approaches in handling the OVD tasks.",
+      "source": "cvpr",
+      "published": "2024-06-01",
+      "date_precision": "day",
+      "paper_url": "https://openaccess.thecvf.com/content/CVPR2024/html/Li_Learning_Background_Prompts_to_Discover_Implicit_Knowledge_for_Open_Vocabulary_CVPR_2024_paper.html",
+      "pdf_url": null,
+      "score": 0.5,
+      "metadata": {
+        "discovery_backend": "dpr_supabase_rpc",
+        "rpc": "match_cvpr_papers_bm25",
+        "source_raw": "CVPR-2024-Accepted",
+        "published_raw": "2024-06-01T00:00:00+00:00",
+        "categories": [
+          "CVPR-2024"
+        ],
+        "primary_category": "CVPR-2024",
+        "similarity": 0,
+        "date_provenance": "upstream metadata; conference dates may be nominal"
+      },
+      "doi": null,
+      "source_id": "cvpr-2024-li-learning-background-prompts-to-discover-implicit-knowledge-for-open-vocabulary-cvpr-2024-paper",
+      "version": null,
+      "resolved_pdf_url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Li_Learning_Background_Prompts_to_Discover_Implicit_Knowledge_for_Open_Vocabulary_CVPR_2024_paper.pdf",
+      "path": "artifacts/ag6-evaluation-20261011/materials/od3.pdf",
+      "sha256": "93b404a3755db39e75b5905d307a490acd4e88d75454a34da484154c4c8f810f",
+      "pages": 10,
+      "status": "available"
+    },
+    "mllm1": {
+      "key": "mllm1",
+      "paper_id": "cvpr-2024-li-seed-bench-benchmarking-multimodal-large-language-models-cvpr-2024-paper",
+      "title": "SEED-Bench: Benchmarking Multimodal Large Language Models",
+      "authors": [
+        "Li, Bohao",
+        "Ge, Yuying",
+        "Ge, Yixiao",
+        "Wang, Guangzhi",
+        "Wang, Rui",
+        "Zhang, Ruimao",
+        "Shan, Ying"
+      ],
+      "abstract": "Multimodal large language models (MLLMs) building upon the foundation of powerful large language models (LLMs) have recently demonstrated exceptional capabilities in generating not only texts but also images given interleaved multimodal inputs (acting like a combination of GPT-4V and DALL-E 3). However existing MLLM benchmarks remain limited to assessing only models' comprehension ability of single image-text inputs failing to keep up with the strides made in MLLMs. A comprehensive benchmark is imperative for investigating the progress and uncovering the limitations of current MLLMs. In this work we categorize the capabilities of MLLMs into hierarchical levels from L_0 to L_4 based on the modalities they can accept and generate and propose SEED-Bench a comprehensive benchmark that evaluates the hierarchical capabilities of MLLMs. Specifically SEED-Bench comprises 24K multiple-choice questions with accurate human annotations which spans 27 dimensions including the evaluation of both text and image generation. Multiple-choice questions with groundtruth options derived from human annotation enables an objective and efficient assessment of model performance eliminating the need for human or GPT intervention during evaluation. We further evaluate the performance of 22 prominent open-source MLLMs and summarize valuable observations. By revealing the limitations of existing MLLMs through extensive evaluations we aim for SEED-Bench to provide insights that will motivate future research towards the goal of General Artificial Intelligence.",
+      "source": "cvpr",
+      "published": "2024-06-01",
+      "date_precision": "day",
+      "paper_url": "https://openaccess.thecvf.com/content/CVPR2024/html/Li_SEED-Bench_Benchmarking_Multimodal_Large_Language_Models_CVPR_2024_paper.html",
+      "pdf_url": null,
+      "score": 0.505882382392883,
+      "metadata": {
+        "discovery_backend": "dpr_supabase_rpc",
+        "rpc": "match_cvpr_papers_bm25",
+        "source_raw": "CVPR-2024-Accepted",
+        "published_raw": "2024-06-01T00:00:00+00:00",
+        "categories": [
+          "CVPR-2024"
+        ],
+        "primary_category": "CVPR-2024",
+        "similarity": 0,
+        "date_provenance": "upstream metadata; conference dates may be nominal"
+      },
+      "doi": null,
+      "source_id": "cvpr-2024-li-seed-bench-benchmarking-multimodal-large-language-models-cvpr-2024-paper",
+      "version": null,
+      "resolved_pdf_url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Li_SEED-Bench_Benchmarking_Multimodal_Large_Language_Models_CVPR_2024_paper.pdf",
+      "status": "available",
+      "path": "artifacts/ag6-evaluation-20261011/materials/mllm1.pdf",
+      "sha256": "cc9b2933a2493e56602fb036093d520f0dd204582e2beb7c22640a9cc3f60c78",
+      "pages": 10,
+      "initial_download_error": "peer closed connection without sending complete message body (received 9167732 bytes, expected 9467892)"
+    },
+    "mllm2": {
+      "key": "mllm2",
+      "paper_id": "cvpr-2024-zhang-trins-towards-multimodal-language-models-that-can-read-cvpr-2024-paper",
+      "title": "TRINS: Towards Multimodal Language Models that Can Read",
+      "authors": [
+        "Zhang, Ruiyi",
+        "Zhang, Yanzhe",
+        "Chen, Jian",
+        "Zhou, Yufan",
+        "Gu, Jiuxiang",
+        "Chen, Changyou",
+        "Sun, Tong"
+      ],
+      "abstract": "Large multimodal language models have shown remarkable proficiency in understanding and editing images. However a majority of these visually-tuned models struggle to comprehend the textual content embedded in images primarily due to the limitation of training data. In this work we introduce TRINS: a Text-Rich image1 INStruction dataset with the objective of enhancing the reading ability of the multimodal large language model. TRINS is built upon LAION 2 using hybrid data annotation strategies that include machine-assisted and human-assisted annotation process. It contains 39153 text-rich images captions and 102437 questions. Specifically we show that the number of words per annotation in TRINS is significantly longer than that of related datasets providing new challenges. Furthermore we introduce a simple and effective architecture called a Language-Vision Reading Assistant (LaRA) which is good at understanding textual content within images. LaRA outperforms existing state-of-the-art multimodal large language models on the TRINS dataset as well as other classical benchmarks. Lastly we conducted a comprehensive evaluation with TRINS on various text-rich image understanding and generation tasks demonstrating its effectiveness.",
+      "source": "cvpr",
+      "published": "2024-06-01",
+      "date_precision": "day",
+      "paper_url": "https://openaccess.thecvf.com/content/CVPR2024/html/Zhang_TRINS_Towards_Multimodal_Language_Models_that_Can_Read_CVPR_2024_paper.html",
+      "pdf_url": null,
+      "score": 0.381410360336304,
+      "metadata": {
+        "discovery_backend": "dpr_supabase_rpc",
+        "rpc": "match_cvpr_papers_bm25",
+        "source_raw": "CVPR-2024-Accepted",
+        "published_raw": "2024-06-01T00:00:00+00:00",
+        "categories": [
+          "CVPR-2024"
+        ],
+        "primary_category": "CVPR-2024",
+        "similarity": 0,
+        "date_provenance": "upstream metadata; conference dates may be nominal"
+      },
+      "doi": null,
+      "source_id": "cvpr-2024-zhang-trins-towards-multimodal-language-models-that-can-read-cvpr-2024-paper",
+      "version": null,
+      "resolved_pdf_url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Zhang_TRINS_Towards_Multimodal_Language_Models_that_Can_Read_CVPR_2024_paper.pdf",
+      "path": "artifacts/ag6-evaluation-20261011/materials/mllm2.pdf",
+      "sha256": "af3abb90cd3ca2bed1606838f26fa0d7cad83f3eaaae0c7a75eb6c40742c26f8",
+      "pages": 11,
+      "status": "available"
+    },
+    "mllm3": {
+      "key": "mllm3",
+      "paper_id": "cvpr-2024-zhang-exploring-the-transferability-of-visual-prompting-for-multimodal-large-language-cvpr-2024-paper",
+      "title": "Exploring the Transferability of Visual Prompting for Multimodal Large Language Models",
+      "authors": [
+        "Zhang, Yichi",
+        "Dong, Yinpeng",
+        "Zhang, Siyuan",
+        "Min, Tianzan",
+        "Su, Hang",
+        "Zhu, Jun"
+      ],
+      "abstract": "Although Multimodal Large Language Models (MLLMs) have demonstrated promising versatile capabilities their performance is still inferior to specialized models on downstream tasks which makes adaptation necessary to enhance their utility. However fine-tuning methods require independent training for every model leading to huge computation and memory overheads. In this paper we propose a novel setting where we aim to improve the performance of diverse MLLMs with a group of shared parameters optimized for a downstream task. To achieve this we propose Transferable Visual Prompting (TVP) a simple and effective approach to generate visual prompts that can transfer to different models and improve their performance on downstream tasks after trained on only one model. We introduce two strategies to address the issue of cross-model feature corruption of existing visual prompting methods and enhance the transferability of the learned prompts including 1) Feature Consistency Alignment: which imposes constraints to the prompted feature changes to maintain task-agnostic knowledge; 2) Task Semantics Enrichment: which encourages the prompted images to contain richer task-specific semantics with language guidance. We validate the effectiveness of TVP through extensive experiments with 6 modern MLLMs on a wide variety of tasks ranging from object recognition and counting to multimodal reasoning and hallucination correction.",
+      "source": "cvpr",
+      "published": "2024-06-01",
+      "date_precision": "day",
+      "paper_url": "https://openaccess.thecvf.com/content/CVPR2024/html/Zhang_Exploring_the_Transferability_of_Visual_Prompting_for_Multimodal_Large_Language_CVPR_2024_paper.html",
+      "pdf_url": null,
+      "score": 0.350512832403183,
+      "metadata": {
+        "discovery_backend": "dpr_supabase_rpc",
+        "rpc": "match_cvpr_papers_bm25",
+        "source_raw": "CVPR-2024-Accepted",
+        "published_raw": "2024-06-01T00:00:00+00:00",
+        "categories": [
+          "CVPR-2024"
+        ],
+        "primary_category": "CVPR-2024",
+        "similarity": 0,
+        "date_provenance": "upstream metadata; conference dates may be nominal"
+      },
+      "doi": null,
+      "source_id": "cvpr-2024-zhang-exploring-the-transferability-of-visual-prompting-for-multimodal-large-language-cvpr-2024-paper",
+      "version": null,
+      "resolved_pdf_url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Zhang_Exploring_the_Transferability_of_Visual_Prompting_for_Multimodal_Large_Language_CVPR_2024_paper.pdf",
+      "path": "artifacts/ag6-evaluation-20261011/materials/mllm3.pdf",
+      "sha256": "e2968afc8c913dc54eb57d45ebe2bf067075ea78c1072cfcf6f1c73eab234a6f",
+      "pages": 11,
+      "status": "available"
+    }
+  },
+  "cases": [
+    {
+      "id": "E01",
+      "title": "目标检测简单检索",
+      "request_cap": 12,
+      "save_policy": "deny",
+      "checks": [
+        "topic_date_count",
+        "source_identity",
+        "no_dpr",
+        "no_save"
+      ],
+      "steps": [
+        {
+          "kind": "task",
+          "prompt": "请在CVPR、ECCV中找3篇2023-10-11至2026-10-11的开放词汇目标检测论文。给出标题、年份、来源和每篇一句相关性说明即可。不需要全文比较或精读笔记，不保存文件；不足3篇就如实说明。",
+          "materials": []
+        }
+      ]
+    },
+    {
+      "id": "E02",
+      "title": "多模态大模型来源筛选",
+      "request_cap": 12,
+      "save_policy": "deny",
+      "checks": [
+        "topic_source_count",
+        "metadata_uncertainty",
+        "no_dpr",
+        "no_save"
+      ],
+      "steps": [
+        {
+          "kind": "task",
+          "prompt": "请从CVPR、ICLR中找2篇2023-10-11至2026-10-11研究多模态大模型图像中文字理解的论文，说明各自解决什么问题，并给出原始链接。不需要精读笔记，不保存文件。找不到时说明已查范围，不用其他主题凑数。",
+          "materials": []
+        }
+      ]
+    },
+    {
+      "id": "E03",
+      "title": "澄清数量后继续比较",
+      "request_cap": 24,
+      "save_policy": "deny",
+      "checks": [
+        "clarify_before_search",
+        "resume_same_task",
+        "user_priority",
+        "scope_retention"
+      ],
+      "steps": [
+        {
+          "kind": "task",
+          "prompt": "比较近三年（2023-10-11至2026-10-11）CVPR中的开放词汇目标检测论文如何利用语言信息。请先询问我要比较几篇，得到回答之前不要检索，不要保存文件。",
+          "materials": []
+        },
+        {
+          "kind": "resume",
+          "prompt": "本次只比较2篇，侧重语言信息用于训练还是推理；不需要八点精读笔记，仍不要保存文件。"
+        }
+      ]
+    },
+    {
+      "id": "E04",
+      "title": "三篇全文比较并保存",
+      "request_cap": 36,
+      "save_policy": "allow",
+      "checks": [
+        "actual_reading",
+        "dynamic_delegation",
+        "coverage",
+        "conditions_separated",
+        "save_hash"
+      ],
+      "steps": [
+        {
+          "kind": "task",
+          "prompt": "请比较上传的3篇论文如何利用语言信息：语言输入是什么、在训练或推理哪个阶段使用、各自的适用范围和明确局限。基于实际读取的原文写一份约800字的简短比较报告并保存到项目中，注明出处和未确认之处。不要把不同实验条件直接排名；这不是八点精读任务。",
+          "materials": [
+            "od1",
+            "od2",
+            "od3"
+          ]
+        }
+      ],
+      "representative": true
+    },
+    {
+      "id": "E05",
+      "title": "新PDF八点精读",
+      "request_cap": 20,
+      "save_policy": "allow",
+      "checks": [
+        "deep_reading_requested",
+        "dpr_used",
+        "core_facts",
+        "save_hash"
+      ],
+      "steps": [
+        {
+          "kind": "task",
+          "prompt": "请精读上传的SEED-Bench论文，生成八点精读笔记并保存到项目中。沿用论文已给出的实验和结论，无法从原文确定的内容如实说明。",
+          "materials": [
+            "mllm1"
+          ]
+        }
+      ],
+      "representative": true
+    },
+    {
+      "id": "E06",
+      "title": "论文链接定向问答",
+      "request_cap": 14,
+      "save_policy": "deny",
+      "checks": [
+        "link_acquisition",
+        "specific_question",
+        "source_support",
+        "no_dpr",
+        "no_save"
+      ],
+      "steps": [
+        {
+          "kind": "task",
+          "prompt": "请阅读这个链接的论文，回答视觉提示可迁移性主要比较了哪些设置、作者发现的适用边界是什么，控制在300字左右。没有读到的部分明确说明，不生成精读笔记、不保存文件。 https://openaccess.thecvf.com/content/CVPR2024/html/Zhang_Exploring_the_Transferability_of_Visual_Prompting_for_Multimodal_Large_Language_CVPR_2024_paper.html",
+          "materials": [],
+          "attachments": [
+            {
+              "input_ref": "ag6-mllm-link",
+              "url": "https://openaccess.thecvf.com/content/CVPR2024/html/Zhang_Exploring_the_Transferability_of_Visual_Prompting_for_Multimodal_Large_Language_CVPR_2024_paper.html",
+              "filename": "visual-prompting.pdf"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "E07",
+      "title": "受控疑点Reflection",
+      "request_cap": 24,
+      "save_policy": "deny",
+      "checks": [
+        "independent_review",
+        "evidence_not_impression",
+        "local_revision",
+        "bounded_termination"
+      ],
+      "steps": [
+        {
+          "kind": "task",
+          "prompt": "以下是测试用待核对短稿，不代表作者真实结论：“TRINS是一项只针对语音识别的数据集工作，不处理图像中文字。其贡献与视觉语言阅读无关。”请用上传论文核验这两句，必要时只修正有误部分，并独立复核修订结果。不要扩写成八点精读笔记，不保存文件；若证据不足就交付说明原因的部分结果。",
+          "materials": [
+            "mllm2"
+          ]
+        }
+      ],
+      "controlled_false_claim": true
+    },
+    {
+      "id": "E08",
+      "title": "指定范围缺证",
+      "request_cap": 8,
+      "save_policy": "deny",
+      "checks": [
+        "explicit_page_scope",
+        "no_fabrication",
+        "limited_absence",
+        "no_save"
+      ],
+      "steps": [
+        {
+          "kind": "task",
+          "prompt": "只根据上传论文的物理第1至2页，告诉我作者实验使用的GPU驱动版本号。若这两页没有足够依据，说明无法确认以及实际查看范围即可；不要搜索其他文献，不要读其他页，不保存文件。",
+          "materials": [
+            "mllm1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "E09",
+      "title": "受控下载失败退出",
+      "request_cap": 6,
+      "save_policy": "deny",
+      "checks": [
+        "failure_observation",
+        "bounded_attempts",
+        "honest_exit",
+        "no_save"
+      ],
+      "steps": [
+        {
+          "kind": "task",
+          "prompt": "只分析附件链接指向的这篇论文，告诉我核心方法。不允许替换论文或联网搜索其他论文；若正文无法获取，请报告实际原因，不猜测方法，不保存文件。",
+          "materials": [],
+          "attachments": [
+            {
+              "input_ref": "ag6-unavailable",
+              "url": "https://openaccess.thecvf.com/content/CVPR2024/html/Li_Learning_Background_Prompts_to_Discover_Implicit_Knowledge_for_Open_Vocabulary_CVPR_2024_paper.html",
+              "filename": "controlled-unavailable.pdf"
+            }
+          ]
+        }
+      ],
+      "controlled_pdf_failure": true
+    },
+    {
+      "id": "E10",
+      "title": "追问取消后继续",
+      "request_cap": 12,
+      "save_policy": "deny",
+      "checks": [
+        "same_conversation",
+        "cancel_settlement",
+        "retained_result",
+        "new_instruction",
+        "no_duplicate"
+      ],
+      "steps": [
+        {
+          "kind": "task",
+          "prompt": "请依据上传论文用两句话解释核心方法，不搜索其他论文，不生成精读笔记，不保存文件。",
+          "materials": [
+            "mllm3"
+          ]
+        },
+        {
+          "kind": "cancel_continue",
+          "prompt": "继续根据上一轮论文，对方法细节作较长的进一步说明，不保存文件。",
+          "continuation_prompt": "停止长篇说明。保留已经得到的结果，只用一句中文概括上一轮论文研究的问题，不开展新检索，不保存文件。"
+        }
+      ]
+    },
+    {
+      "id": "E11",
+      "title": "跨会话记忆与撤销",
+      "request_cap": 12,
+      "save_policy": "deny",
+      "checks": [
+        "explicit_preference",
+        "cross_conversation_recall",
+        "temporary_override",
+        "revocation",
+        "no_inherited_save"
+      ],
+      "steps": [
+        {
+          "kind": "task",
+          "prompt": "请记住长期偏好：我长期关注文档理解中的多模态大模型，默认用中文简短回答。这不是一次性任务。只记录偏好，不搜索论文、不读PDF、不写笔记文件。",
+          "materials": []
+        },
+        {
+          "kind": "new_conversation"
+        },
+        {
+          "kind": "task",
+          "prompt": "请回顾我长期关注的研究方向，以及之前AG6任务中是否研究过图像中文字理解。给出记忆来源；如果找不到就说明。这次临时用英文简短回答，不把英文记为长期偏好，不搜索或保存文件。",
+          "materials": []
+        },
+        {
+          "kind": "forget",
+          "contains": "文档理解"
+        },
+        {
+          "kind": "new_conversation"
+        },
+        {
+          "kind": "task",
+          "prompt": "我刚撤销了长期研究方向。请只说明个人画像中还有哪些有效偏好，不恢复被撤销的方向，不把过去任务自动重新记成偏好，不搜索论文、不保存文件。",
+          "materials": []
+        }
+      ]
+    },
+    {
+      "id": "E12",
+      "title": "压缩后补读历史",
+      "request_cap": 12,
+      "save_policy": "deny",
+      "checks": [
+        "compression_observed",
+        "original_readback",
+        "constraints_retained",
+        "no_save"
+      ],
+      "steps": [
+        {
+          "kind": "seed_context",
+          "messages": [
+            "这是受控长对话测试的初始要求：只比较“语言输入位置”和“训练监督信号”两个维度，不保存文件。",
+            "受控历史消息0：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息1：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息2：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息3：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息4：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息5：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息6：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息7：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息8：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息9：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息10：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息11：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息12：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息13：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息14：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息15：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息16：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控历史消息17：中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。中间讨论不增加任何论文事实或新指令。",
+            "受控近期消息：保持原来的两个比较维度。",
+            "已收到，具体维度以最早用户消息为准。"
+          ]
+        },
+        {
+          "kind": "task",
+          "prompt": "请找回本会话最早确定的两个比较维度，并确认文件保存限制。若上下文省略了原句，请补读原始记录，不要猜测。只回答这三点，不搜索论文。",
+          "materials": [],
+          "settings": {
+            "memory_history_tokens": 3000
+          }
+        }
+      ],
+      "controlled_history": true
+    }
+  ],
+  "review_policy": {
+    "central_claims": "all",
+    "other_claims": "first factual sentence of each remaining substantive section",
+    "labels": [
+      "supported",
+      "contradicted",
+      "insufficient",
+      "unassessable"
+    ],
+    "usability_cases": [
+      "E04",
+      "E05"
+    ],
+    "ablation": false,
+    "no_automatic_semantic_pass": true
+  }
+}

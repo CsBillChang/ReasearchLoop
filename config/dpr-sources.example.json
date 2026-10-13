@@ -1,0 +1,123 @@
+{
+  "source_backends": {
+    "arxiv": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_arxiv_papers_bm25"
+    },
+    "biorxiv": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_biorxiv_papers_bm25"
+    },
+    "medrxiv": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_medrxiv_papers_bm25"
+    },
+    "chemrxiv": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_chemrxiv_papers_bm25"
+    },
+    "neurips": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_neurips_openreview_papers_bm25"
+    },
+    "iclr": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_iclr_openreview_papers_bm25"
+    },
+    "icml": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_icml_openreview_papers_bm25"
+    },
+    "acl": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_acl_papers_bm25"
+    },
+    "emnlp": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_emnlp_papers_bm25"
+    },
+    "aaai": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_aaai_papers_bm25"
+    },
+    "cvpr": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_cvpr_papers_bm25"
+    },
+    "eccv": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_eccv_papers_bm25"
+    },
+    "ijcai": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_ijcai_papers_bm25"
+    },
+    "osdi": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_osdi_papers_bm25"
+    },
+    "sosp": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_sosp_papers_bm25"
+    },
+    "ieee_sp": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_ieee_sp_papers_bm25"
+    },
+    "ndss": {
+      "enabled": false,
+      "url": "",
+      "anon_key": "",
+      "schema": "public",
+      "bm25_rpc": "match_ndss_papers_bm25"
+    }
+  }
+}

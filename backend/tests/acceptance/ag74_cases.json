@@ -1,0 +1,37 @@
+{
+  "annotation_method": "开发Agent在看排名前对既有PDF文本/页面标注来源片段；不是双人标注或全量相关片段金标准",
+  "retrieval": [
+    {"id":"Q01","language":"en","question":"What detector generates region proposals for GenerateU?","anchors":[["od1",1,"we employ Deformable DETR as a region pro- posal generator with a language model translating visual regions to object names."]]},
+    {"id":"Q02","language":"zh","question":"GenerateU在推理时需要预先提供检测类别的名称吗？","anchors":[["od1",1,"even though the category names are not seen by Genera- teU during inference."]]},
+    {"id":"Q03","language":"en","question":"How does GenerateU define positive and negative examples for the region-word alignment loss?","anchors":[["od1",4,"for an object query, we treat its corresponding word as a positive sample and consider other words in the same minibatch as negative samples."]]},
+    {"id":"Q04","language":"zh","question":"GenerateU实验使用的NVIDIA GPU驱动准确版本是多少？","anchors":[],"missing_scope":"这6篇固定论文未发现可支持GenerateU驱动版本的文字；不能由无命中推断整个互联网没有答案"},
+    {"id":"Q05","language":"zh","question":"场景自适应提示生成器如何兼顾各类别分布的共性和多样性？","anchors":[["od2",1,"prompt generator from a scene perspective to consider both the commonality and diversity of the class distributions"]]},
+    {"id":"Q06","language":"en","question":"What information does the region prompt incorporate for feature distillation in scene-adaptive region-aware prompts?","anchors":[["od2",1,"which employs the region prompt to incorporate the po- sitional information for feature distillation"]]},
+    {"id":"Q07","language":"en","question":"On which datasets is scene-adaptive and region-aware multi-modal prompting evaluated?","anchors":[["od2",1,"on the OV-COCO and OV-LVIS datasets"]]},
+    {"id":"Q08","language":"zh","question":"场景自适应提示方法与LBP方法分别针对哪些知识迁移或背景解释问题？","anchors":[["od2",1,"weak ability in adapting to diverse classes and aligning be- tween the image-level pre-training and region-level detec- tion"],["od3",1,"background interpretation and model overﬁtting"]]},
+    {"id":"Q09","language":"en","question":"What are the three modules introduced in Learning Background Prompts (LBP)?","anchors":[["od3",1,"Background Category-speciﬁc Prompt, Background Object Discovery, and Inference Prob- ability Rectiﬁcation"]]},
+    {"id":"Q10","language":"zh","question":"LBP的在线背景对象发现模块旨在减轻模型对哪类类别的偏置？","anchors":[["od3",4,"alleviating model bias towards base categories"]]},
+    {"id":"Q11","language":"en","question":"What conceptual overlap does LBP's inference probability rectification address?","anchors":[["od3",4,"solve conceptual overlaps between estimated background categories and novel categories during inference"]]},
+    {"id":"Q12","language":"zh","question":"GenerateU和LBP分别以何种方式把区域表示和语言类别相联系？","anchors":[["od1",1,"a language model translating visual regions to object names."],["od3",4,"this process implicitly projects the vi- sual embedding space of the detector into the textual em- bedding space of CLIP"]]},
+    {"id":"Q13","language":"en","question":"How many multiple-choice questions and evaluation dimensions are in SEED-Bench?","anchors":[["mllm1",1,"24K multiple-choice questions with accurate human anno- tations, which span 27 dimensions"]]},
+    {"id":"Q14","language":"zh","question":"SEED-Bench把L4定义成什么能力？实际评测覆盖的最高级别是什么？","anchors":[["mllm1",2,"highest-tier capability L4 entails producing open-form in- terleaved image and text output given arbitrary interleaved image-text inputs."],["mllm1",3,"SEED-Bench covers the assessment of MLLMs up to L3."]]},
+    {"id":"Q15","language":"en","question":"How does SEED-Bench constrain answer format to support objective accuracy measurement?","anchors":[["mllm1",2,"multiple-choice questions, which restricts the model’s out- put to A/B/C/D options."]]},
+    {"id":"Q16","language":"zh","question":"SEED-Bench评测了多少个开源多模态大模型？","anchors":[["mllm1",3,"22 prominent open-source MLLMs."]]},
+    {"id":"Q17","language":"en","question":"Which image collection and annotation methods are used to construct TRINS?","anchors":[["mllm2",1,"LAION 2 using hybrid data annotation strategies that include machine-assisted and human-assisted annotation process."]]},
+    {"id":"Q18","language":"zh","question":"TRINS包含多少文本丰富的图像和问答问题？","anchors":[["mllm2",1,"It contains 39,153 text-rich images, captions, and 102,437 questions."]]},
+    {"id":"Q19","language":"en","question":"What are the three constituent tasks of the TRINS dataset?","anchors":[["mllm2",1,"TRINS dataset is composed of three datasets for captioning, visual question answering (VQA) and image generation, respectively."]]},
+    {"id":"Q20","language":"zh","question":"TRINS训练实验使用的GPU驱动版本号是什么？","anchors":[],"missing_scope":"固定TRINS全文文本未找到驱动版本，GPU型号或CUDA不能替代驱动版本"},
+    {"id":"Q21","language":"en","question":"How many source models must be trained to learn a transferable visual prompt in TVP?","anchors":[["mllm3",1,"trained on only one model."]]},
+    {"id":"Q22","language":"zh","question":"TVP的特征一致性对齐与任务语义增强分别要达到什么目的？","anchors":[["mllm3",1,"ture changes to maintain task-agnostic knowledge"],["mllm3",1,"ages to contain richer task-specific semantics with language guidance."]]},
+    {"id":"Q23","language":"en","question":"How many modern multimodal models are tested in the transferable visual prompting experiments?","anchors":[["mllm3",1,"experiments with 6 modern MLLMs"]]},
+    {"id":"Q24","language":"en","question":"What exact NVIDIA GPU driver release is reported by the TVP paper?","anchors":[],"missing_scope":"固定TVP全文文本未找到驱动版本；只报告此材料范围"}
+  ],
+  "reflection": [
+    {"id":"F1","material":"mllm3","kind":"correct","markdown":"# TVP简短笔记\n\nTVP在一个模型上学习可迁移的视觉提示，并将其用于其他模型。\n\n论文引入特征一致性对齐和任务语义增强两种策略。\n","claims":[{"text":"TVP在一个模型上学习可迁移的视觉提示，并将其用于其他模型。","label":"supported","page":1},{"text":"论文引入特征一致性对齐和任务语义增强两种策略。","label":"supported","page":1}],"acceptance":"两项正确内容应保留；不必要修改、误报单列，不能仅以Reviewer状态计正确"},
+    {"id":"F2","material":"od1","kind":"contradicted","markdown":"# GenerateU简短笔记\n\nGenerateU的最终端到端方案冻结图像编码器和语言模型，仅训练检测头。\n\n该方法用语言模型把视觉区域转换为物体名称。\n","claims":[{"text":"GenerateU的最终端到端方案冻结图像编码器和语言模型，仅训练检测头。","label":"contradicted","page":4,"correction":"最终端到端方案激活图像编码器和语言模型参与训练；冻结MLLM的是对照策略"},{"text":"该方法用语言模型把视觉区域转换为物体名称。","label":"supported","page":1}],"acceptance":"纠正最终方案与冻结对照的混淆，同时保留第二项正确陈述"},
+    {"id":"F3","material":"mllm1","kind":"contradicted","markdown":"# SEED-Bench简短笔记\n\nSEED-Bench已经实际评估到最高L4能力层级。\n\n论文包含27个评测维度。\n","claims":[{"text":"SEED-Bench已经实际评估到最高L4能力层级。","label":"contradicted","page":3,"correction":"实际评估到L3，L4属于未来计划"},{"text":"论文包含27个评测维度。","label":"supported","page":1}],"acceptance":"区分能力分类定义和实际覆盖，不改错正确的27维度"},
+    {"id":"F4","material":"mllm2","kind":"insufficient","markdown":"# TRINS简短笔记\n\nTRINS的训练使用NVIDIA 535.104.05驱动。\n\nTRINS以理解图像中的文本为目标。\n","claims":[{"text":"TRINS的训练使用NVIDIA 535.104.05驱动。","label":"insufficient","page":null,"correction":"删除无依据版本，或明确现有原文不足以确认；不能捏造另一个版本或把缺证称为反证"},{"text":"TRINS以理解图像中的文本为目标。","label":"supported","page":1}],"acceptance":"准确限定缺证并保留正确目标；不得编造数值、无限补读或强行批准"}
+  ],
+  "reflection_prompt":"请根据这份论文原文核验当前简短草稿的两项核心事实；发现有依据的问题时仅局部修订相关句子，正确内容保留。区分原文反证和缺少依据，并在必要修订后独立核验。只使用附带论文，不搜索新论文，不重写整篇，不生成八点精读，不保存文件；在额度内交付当前稿及未解决问题。",
+  "reflection_budget":{"physical_cap":32,"request_cap_per_case":8,"token_cap":1000000,"wall_seconds":1800,"max_repair_rounds":1,"retry_batches":0,"save_policy":"deny"}
+}
