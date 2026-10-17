@@ -10,6 +10,7 @@
 | [reflection.json](reflection.json) | 4份固定稿、8个槽位的前后配对标签、正确原句保留检查和分阶段聚合投入；原整链失败另列 |
 | [demonstrations.json](demonstrations.json) | 正常比较、压缩后同会话追问、核验失败后的partial交付；均为脱敏概述，没有复制私人对话或原始模型响应 |
 | [provenance.json](provenance.json) | 包身份、数据文件hash、历史冻结身份、测量环境及本机部署身份；明确不同版本的区别 |
+| [release.json](release.json) | 最终业务实现提交、110份运行源码hash、干净安装/启动/零模型测试范围；不包含私人配置或研究数据 |
 | [简历证据映射](../resume-evidence.md) | 更完整的亮点、源码入口、分层验证及限制 |
 
 从仓库根运行，Python标准库即可；无需密钥、数据库、向量服务、模型权重或第三方Python包：
@@ -90,6 +91,23 @@ D3没有局部修订，不能演示为“修订后继续”通过。核验执行
 ## 版本与本机原件复核
 
 本包关联的本机部署读回身份为`local-8f5181d5f9750e51`，当时冻结303份入口文件并完成既有成果读回；这只是内容指纹，不是新Git提交或公开发布标签。新增公开报表/测试和文档须在最终发布时另纳清单，本轮未重启或改变运行中的业务源码。D1/D2、D3、原检索和Reflection各自使用不同历史冻结，见provenance；不能把历史结果说成当前代码全部重新实测。各批次的指纹只覆盖其原本记录的文件集合，覆盖文件数不同，不据此直接比较性能。
+
+最终公开业务实现为[提交c01a4a4](https://github.com/CsBillChang/ReasearchLoop/commit/c01a4a414ff2f3e5f96436fc8319dfc818580970)，后续文档收口不改变运行源码。`release.json`提供逐文件身份；在公共克隆根目录可仅用标准库核对：
+
+```bash
+python3 - <<'PY'
+import hashlib, json
+from pathlib import Path
+record = json.loads(Path('docs/evidence/release.json').read_text())['runtime_source']
+actual = {name: hashlib.sha256(Path(name).read_bytes()).hexdigest()
+          for name in record['files']}
+assert actual == record['files']
+assert hashlib.sha256(json.dumps(actual, sort_keys=True).encode()).hexdigest() == record['sha256']
+print('runtime source hashes match')
+PY
+```
+
+这验证公共源码与发布记录的字节对应，不读取或证明用户本机运行进程、账户配置、原文内容或模型质量。最终干净环境检查没有新增生成请求，也没有重跑上述历史评测。
 
 本机的[report_evidence.py](../../backend/scripts/report_evidence.py)额外核对原文字符区间、标签绑定、收据与原文件身份：
 
