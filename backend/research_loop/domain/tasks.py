@@ -106,7 +106,11 @@ class GoalDelivery(BaseModel):
 # 根任务结束：可使用已存在的草稿，避免模型重复传输/改写正文。
 class FinishTaskInput(BaseModel):
     answer_markdown: str | None = Field(default=None, max_length=80000)
+    # 处理说明与正文分离；绑定快照时省略answer_markdown，勿追加说明后重传原文。
+    processing_summary: str | None = Field(default=None, max_length=80000)
     draft_id: str | None = None
+    reflection_target_id: str | None = None
+    reflection_content_hash: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
     matrix_hash: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
     goals: list[GoalDelivery] = Field(min_length=1, max_length=12)
 
@@ -202,10 +206,15 @@ class TaskResult(BaseModel):
     answer_kind: str = "research_result"
     note_artifacts: list[dict[str, Any]] = Field(default_factory=list)
     reflection: dict[str, Any] = Field(default_factory=dict)
+    research_reviews: list[dict[str, Any]] = Field(default_factory=list)
+    review_notices: list[dict[str, Any]] = Field(default_factory=list)
     review_status: str | None = None
     save_status: str | None = None
     source_warnings: list[str] = Field(default_factory=list)
     answer_markdown: str | None = None
+    answer_body_markdown: str | None = None
+    processing_summary: str | None = None
+    retained_answer_source: dict[str, Any] | None = None
     draft_id: str | None = None
     saved_path: str | None = None
     gaps: list[str] = Field(default_factory=list)
@@ -259,3 +268,14 @@ class ModelCallReceipt(BaseModel):
     status: Literal["started", "succeeded", "failed", "unknown"]
     usage: dict[str, Any] = Field(default_factory=dict)
     finish_reason: str | None = None
+
+
+# 网页显式操作的输入合同；不会自动提升旧任务的权限。
+class Feedback(BaseModel):
+    conversation_id: str
+    source_task_id: str
+    source_draft_id: str | None = None
+    content_hash: str=Field(pattern=r'^[a-f0-9]{64}$')
+    prompt: str=Field(min_length=1,max_length=10000)
+    idempotency_key: str
+    save_policy: SavePolicy=SavePolicy.deny

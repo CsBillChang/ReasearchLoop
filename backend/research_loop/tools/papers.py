@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 from research_loop.domain.tasks import Observation
 from research_loop.domain.retrieval import RetrievalQuery
+from research_loop.domain.visual_reading import VisualDelegationInput
 from research_loop.providers.dpr_acquisition import PaperAcquisitionError
 from research_loop.tools.base import ToolContext, ToolSpec
 
@@ -90,9 +91,24 @@ def _retrieve(args: RetrievalQuery, ctx: ToolContext) -> Observation:
         data=data, message="authorized source chunks; relevance is not factual verification", retryable=False)
 
 
+def _visual(args: VisualDelegationInput, ctx: ToolContext) -> Observation:
+    """委派单次Researcher节点；本处理函数不直接发送LLM请求或生成原文。"""
+    dispatch = ctx.services.get('visual_reading')
+    if not callable(dispatch):
+        return Observation(ok=False, kind='execution_error', retryable=False,
+            message='visual node unavailable; retain the textual result and disclose the specific gap')
+    result = dispatch(ctx.task_id, args)
+    success = result['status'] in {'complete', 'partial'}
+    return Observation(ok=success, kind='success' if success else 'execution_error', retryable=False,
+        data={'visual_observation': result},
+        message='visual model observation, not original text or semantic approval' if success
+                else 'visual execution failed: ' + (result.get('error') or 'unknown failure'))
+
+
 def specs() -> list[ToolSpec]:
     """三类Agent共用参数/执行契约；Reviewer另限制只读工具集合。"""
     return [
+        ToolSpec('delegate_visual_reading', 'Optional single Researcher visual node for an already-read physical PDF page, only when a damaged formula or missing spatial relation needs images. Give its actual evidence_id, specific question, reason and trigger; no paths, hashes or new search. Plain text stays the default. Same source/question/bbox reuses the result; use returned next_offset to read more without another visual request. Model observations are not exact source quotes or Reviewer approval. Failure or uncertainty may be disclosed and delivered.', VisualDelegationInput, _visual, ('supervisor',)),
         ToolSpec("retrieve_evidence", "Search already-read authorized original evidence using BM25 + vector + RRF + local Cross-encoder. Pass exact document_ids returned by read_paper; cannot search ungranted versions. For targeted questions/follow-ups, inspect ranked chunks and explicit degradations; scores are relevance, not factual proof or full-paper coverage. Use read_paper first if no page evidence, and for missing context. This does not generate deep-reading notes.", RetrievalQuery, _retrieve),
         ToolSpec("inspect_paper_media", "Extract authorized PDF figures/tables via optional PaperCropper, fallback embedded images. No image understanding; unknown page/bbox remain null.", ReadPaperArgs, _media),
         ToolSpec("search_papers", "Search configured paper sources. Abstracts and links are not full text.", SearchPapersArgs, _search),

@@ -1,0 +1,145 @@
+{
+  "scope": "sanitized summaries of recorded executions, not verbatim personal prompts or model responses",
+  "new_model_calls": 0,
+  "records": [
+    {
+      "id": "D1",
+      "batch_id": "comparison-session-20261016",
+      "same_conversation_group": "S01",
+      "turn": 1,
+      "task_summary": "基于两份既有论文比较方法",
+      "status": "completed",
+      "save_policy": "deny",
+      "physical_requests": 16,
+      "tokens": {
+        "prompt_tokens": 406497,
+        "completion_tokens": 20014,
+        "total_tokens": 426511
+      },
+      "unknown": 0,
+      "provider_failures": 0,
+      "elapsed_seconds": 181.7171964579902,
+      "answer_characters": 1929,
+      "database_drafts": 0,
+      "actions": {
+        "read_paper:succeeded": 6,
+        "record_research_progress:succeeded": 2,
+        "finish_research:succeeded": 2,
+        "retrieve_evidence:succeeded": 4,
+        "retrieve_evidence:failed": 2,
+        "record_research_progress:failed": 1,
+        "set_research_plan:succeeded": 1,
+        "delegate_research:succeeded": 1,
+        "finish_task:succeeded": 1
+      },
+      "roles": [
+        {
+          "role": "researcher",
+          "status": "partial",
+          "requests": 5,
+          "findings": 17
+        },
+        {
+          "role": "researcher",
+          "status": "partial",
+          "requests": 8,
+          "findings": 12
+        },
+        {
+          "role": "supervisor",
+          "status": "completed",
+          "requests": 3,
+          "findings": 0
+        }
+      ],
+      "result_summary": "交付方法比较与来源，子任务的未核验状态和阅读缺口保持可见",
+      "limitations": [
+        "固定开发材料，不是泛化成功率；原回答有组合引用页定位不精确的细节",
+        "上下文大小为字节上界估计，不能据此计算真实Token压缩收益"
+      ],
+      "reproduction_level": "historical execution summary; not raw transcript or newly executed demo"
+    },
+    {
+      "id": "D2",
+      "batch_id": "comparison-session-20261016",
+      "same_conversation_group": "S01",
+      "turn": 2,
+      "task_summary": "在原会话追问方法区别，显式触发压缩",
+      "status": "completed",
+      "save_policy": "deny",
+      "physical_requests": 12,
+      "tokens": {
+        "prompt_tokens": 272258,
+        "completion_tokens": 13472,
+        "total_tokens": 285730
+      },
+      "unknown": 0,
+      "provider_failures": 0,
+      "elapsed_seconds": 81.56377249999787,
+      "answer_characters": 1302,
+      "database_drafts": 0,
+      "actions": {
+        "set_research_plan:succeeded": 1,
+        "delegate_research:succeeded": 1,
+        "finish_task:succeeded": 1,
+        "read_paper:succeeded": 6,
+        "record_research_progress:failed": 1,
+        "record_research_progress:succeeded": 2,
+        "finish_research:succeeded": 2,
+        "retrieve_evidence:succeeded": 2
+      },
+      "roles": [
+        {
+          "role": "supervisor",
+          "status": "completed",
+          "requests": 3,
+          "findings": 0
+        },
+        {
+          "role": "researcher",
+          "status": "partial",
+          "requests": 5,
+          "findings": 14
+        },
+        {
+          "role": "researcher",
+          "status": "partial",
+          "requests": 4,
+          "findings": 9
+        }
+      ],
+      "result_summary": "沿用会话与附件，压缩后交付追问回答；未强制Reviewer通过",
+      "limitations": [
+        "固定开发材料，不是泛化成功率；原回答有组合引用页定位不精确的细节",
+        "上下文大小为字节上界估计，不能据此计算真实Token压缩收益"
+      ],
+      "reproduction_level": "historical execution summary; not raw transcript or newly executed demo"
+    },
+    {
+      "id": "D3",
+      "batch_id": "reviewer-failure-20261017",
+      "task_summary": "对已有比较回答进行定向核验并交付",
+      "status": "partial",
+      "save_policy": "deny",
+      "physical_requests": 14,
+      "tokens": {
+        "prompt_tokens": 668612,
+        "completion_tokens": 24453,
+        "total_tokens": 693065
+      },
+      "unknown": 0,
+      "provider_failures": 0,
+      "actual_revision_count": 0,
+      "explicit_finish_task_count": 1,
+      "post_revision_branch": "not_exercised",
+      "answer_characters": 1929,
+      "processing_summary_characters": 1665,
+      "result_summary": "核验引句未通过位置合同；Supervisor接收具体失败，保留原回答并独立说明原因和待确认项，以partial结束",
+      "limitations": [
+        "不是核验通过或答案被证实错误；没有发生局部修订，修订后继续分支本次未覆盖",
+        "与D1/D2属于不同批次，不能剪接成一次完整核验修订成功"
+      ],
+      "reproduction_level": "historical execution summary; not raw transcript or newly executed demo"
+    }
+  ]
+}

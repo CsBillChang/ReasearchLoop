@@ -69,7 +69,7 @@ class MatrixIntegrationTests(unittest.TestCase):
                                deepseek_api_key='STUB',retrieval_enabled=False)
         self.db=Database(url);self.db.ensure_schema()
         from research_loop.main import app
-        p=patch('research_loop.api.tasks.get_settings',return_value=self.settings);p.start();self.addCleanup(p.stop)
+        p=patch('research_loop.api.dependencies.get_settings',return_value=self.settings);p.start();self.addCleanup(p.stop)
         self.client=TestClient(app);self.addCleanup(self.client.close)
         self.tid=self.client.post('/api/tasks',json={'prompt':'对固定材料整理矩阵，不保存文件','idempotency_key':str(uuid4())}).json()['task_id']
         self.args=seed(self.db,self.tid);self.service=EvidenceMatrixService(self.db)

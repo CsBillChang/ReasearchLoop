@@ -18,6 +18,9 @@ class AG2AcceptanceEvidenceTests(unittest.TestCase):
         self.assertNotIn("必须调用某工具", source)
 
     def test_old_ag1_failure_evidence_is_not_rewritten(self):
+        """有本机原件时核对旧失败；公开克隆不附带私人验收记录。"""
         result = Path(__file__).parents[3] / "artifacts" / "ag1-readiness-review-20261007" / "results.json"
+        if not result.is_file():
+            self.skipTest("historical local AG1 evidence is not distributed")
         data = json.loads(result.read_text(encoding="utf-8"))
         self.assertTrue(data["probes"]["receipt_before_checkpoint"]["defect_reproduced"])

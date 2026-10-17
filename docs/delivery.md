@@ -1,8 +1,12 @@
 # 本机运行、备份与恢复
 
-本说明针对当前 Mac 的单用户本地应用。AG7.5及AG0–AG7约定范围已完成；修复后的同会话追问真实完成，复用原首问与同一PDF，现可以最终交付。权威进度见 [status.md](status.md)，最终复验报告（本机历史记录）保留旧失败和实际边界；运维/恢复证据见原AG7.5报告（本机历史记录）。
+本说明针对当前 Mac 的单用户本地应用。AG7.5 的启动、停止、备份与恢复已有原范围交付证据；这不代表当前长研究任务没有缺陷。应用能力、工作区与部署差异以 [status.md](status.md) 为准，后续范围以 [improvement-plan.md](improvement-plan.md) 为准；本手册不下达新的开发或真实调用任务。
 
 ## 日常启动
+
+版本固定时以实际源码清单/内容hash、依赖锁、脱敏配置身份和启动后的进程命令/工作目录共同核对；有未提交变更时本机内容指纹不等于Git提交。当前核对结果及本机证据入口只记[status.md](status.md)。项目快照/数据库原件不上传GitHub；发布后再将实际提交对应到部署清单，不用页面stage字段作为版本证明。
+
+Python声明和锁文件实际位于`backend/pyproject.toml`、`backend/uv.lock`，Python环境仍在仓库根`.venv`，由Makefile的`UV_PROJECT_ENVIRONMENT`统一。uv离线锁核对与安装包兼容检查不调用模型；它们不代替干净机器完整安装验证。
 
 首次安装或锁文件变化时：
 
@@ -43,6 +47,8 @@ make demo
 - `demo`：`http://127.0.0.1:4174/`，只读展示已有成果，写API拒绝403，不启动Worker/Scheduler。停止演示：`PYTHONPATH=backend .venv/bin/python backend/scripts/manage.py stop --profile demo`。
 - 端口冲突时拒绝启动；旧手工 `make api/worker/frontend/scheduler` 不会被自动接管，须在其原终端停止。正常 TIME_WAIT 不误报为监听进程。
 - 进程登记、心跳和日志位于 `data/runtime/<profile>/`。更换配置先停止再启动。启动后不是操作系统自启动服务，电脑关机后仍需上述命令。
+
+4174同一时间只能由一个profile占用。若状态页说明当前由本轮`delivery-partial`只读实例占用，先使用`manage.py stop --profile delivery-partial`再启动`make demo`；不要按端口杀未知进程。独立验收数据不得悄悄合并到生产会话；演示副本需要完整迁移登记并核对记录来源，缺少登记时不绕过ready或伪造版本。
 
 ## 冷备份
 
@@ -103,6 +109,16 @@ BM25词项保留，Qdrant向量派生状态置待重建。使用恢复报告的�
 
 ## 公共克隆配置准备
 
+### 干净副本的零模型验证范围
+
+2026-10-18在仅复制公开候选文件的干净目录中，新建根`.venv`并按锁执行`make sync-index`，前端执行`npm ci`；没有复制已有环境、.env、模型、论文或私人研究数据，安装可复用本机包缓存。Python3.14.6/uv/Node环境下，`make check`通过，后端723次测试运行、23项明确跳过、0失败，前端9/9通过；公开证据标准库复算也通过。缺本机历史文件的检查明确跳过，配置变换用合成输入验证，不假装重新完成真实验收。
+
+另用独立空MySQL库、专属账号/数据目录/向量命名空间与空闲端口验证迁移两次、缺迁移/缺密钥拒绝、无密钥只读启动/403写保护、空任务队列四进程启动、重复启动复用与正常停止。MySQL/Qdrant基础设施沿用本机容器，未声称创建全新容器或验证其他操作系统。四进程检查只使用本机不可用端点和占位key，队列/订阅/模型收据均为空，没有验证真实供应商或发起生成。
+
+全新配置的预期边界：未设置来源只读连接时17源返回`not_configured`，缺本机权重时检索报告`unavailable`，缺模型key时使用只读演示或补齐自己的配置。不要把健康/就绪200、占位key存在或安装成功当成真实论文检索、RAG质量或生成模型可用。
+
+### 配置步骤
+
 1. 复制.env.example为.env，仅在本机填写DeepSeek连接和数据库信息；不要把真实密钥提交到仓库。Compose的密码仅为本机开发默认值，服务只绑定127.0.0.1。
 2. 来源有两种明确配置方式：复制config/dpr-sources.example.json到data/config/dpr-sources.json后填写有权限的只读连接并启用所需来源；或从自己下载的DPR配置导入：
 
@@ -114,3 +130,30 @@ PYTHONPATH=backend .venv/bin/python backend/scripts/import_dpr_sources.py /path/
 3. 本机RAG需另外获取references.md列出的两个固定revision文件（权重、tokenizer.json、config.json）。将文件放到data/local-models/embedding和reranker；按config/model-manifest.example.json的文件SHA-256核对，复制模板到data/local-models/manifest.json，并在.env设置 `RESEARCHLOOP_RETRIEVAL_MODEL_MANIFEST` 为该文件绝对路径。模板里的directory相对于仓库根，手工从其他工作目录启动时应改为自己的绝对路径。不要修改hash以绕过校验。
 4. 本机ARM64权重未在其他架构验证；缺模型时应显示unavailable/降级，不能报完整RAG就绪。启动不自动下载或替换模型。既有本机使用者无需改动原data配置。
 5. 新克隆没有论文和个人数据。可由聊天上传合法PDF、配置来源后检索；不要下载私人artifact冒充初始化步骤。`make test`缺本地PDF/上游对照源码或隔离服务时会跳过对应门控测试。
+
+## 发布与公开仓库边界
+
+可公开的指标与演示材料位于[docs/evidence](evidence/README.md)。匿名排名/标签/保存计时可用标准库离线复算；PDF、原始对话/模型响应/收据和本机材料不随包分发。该包的数值复算无需配置上游服务；它不等于干净环境完整启动、重跑原始实验或新Git发布。
+
+目标仓库： https://github.com/CsBillChang/ReasearchLoop （保留用户建立的拼写）。
+
+### 上传
+
+- backend/research_loop 业务源码；backend/scripts运维/显式评测工具；backend/migrations追加迁移；后端测试与合成夹具。
+- frontend静态源码、代理、测试、package.json与锁文件。
+- 当前docs、AGENTS、README、Makefile、compose.yaml、依赖锁、空凭据配置模板、第三方许可证。
+- 精简脱敏的评测汇总；本机历史验收脚本明确不是日常入口。
+
+### 不上传
+
+.env及任何真实连接/凭据；data与artifacts原始内容（仅目录说明可公开）；数据库/备份/恢复副本；PDF/全文解析缓存/个人笔记/聊天/画像；模型权重；原始messages/response/usage与截图；本机历史文档archive；.venv/node_modules/cache/IDE本机配置。
+
+.gitignore防止意外加入；提交前运行 `PYTHONPATH=backend .venv/bin/python backend/scripts/check_publication.py --staged` 检查显式暂存列表、敏感模式、个人路径、类型与体积。扫描只输出位置/规则，不输出凭据值；扫描不是密码学安全保证，需要检查实际清单。
+
+本机数据不会因为未上传而删除。不能用公共仓库同步数据库或模型权重。上传不代表功能修复、生产重启或当前实验矩阵获准发布。
+
+### 许可证与运行前提
+
+复制的DPR代码附带其MIT许可证和归属，见 [第三方说明与许可证原文](../THIRD_PARTY_NOTICES.md)。项目整体暂未指定再分发许可证，不把第三方MIT自动当作所有依赖或整个项目的许可证。
+
+外部服务账号与可访问数据由使用者自行配置；不会发布作者的Supabase连接配置或假定其服务永远可用。模型权重按官方固定版本获取，清单模板不含本机路径。公共仓库为源码与文档交付，不是携带私人数据的一键运行镜像。

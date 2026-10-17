@@ -24,7 +24,7 @@ class ProfileNavigationTests(unittest.TestCase):
         root=Path(temp.name)
         self.settings=Settings(project_root=root,data_dir=root/'data',output_dir=root/'notes',database_url='sqlite:///'+str(root/'test.db'))
         self.db=Database(self.settings.database_url);self.db.ensure_schema()
-        p=patch('research_loop.api.tasks.get_settings',return_value=self.settings);p.start();self.addCleanup(p.stop)
+        p=patch('research_loop.api.dependencies.get_settings',return_value=self.settings);p.start();self.addCleanup(p.stop)
         self.client=TestClient(app);self.addCleanup(self.client.close)
         self.conv=ConversationService(self.db)
         self.cid=self.conv.create('原始名称','original')['conversation_id']

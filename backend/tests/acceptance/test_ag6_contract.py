@@ -124,7 +124,7 @@ class EvaluationContractTests(unittest.TestCase):
         case = copy.deepcopy(self.manifest['cases'][0])
         case['steps'] = [{'kind':'task','prompt':'请回顾有效偏好，不搜索论文，不保存文件。'}]
         with ExitStack() as stack:
-            for module in ['tasks','product','notes']:
+            for module in ['dependencies']:
                 stack.enter_context(patch('research_loop.api.'+module+'.get_settings', return_value=settings))
             client = stack.enter_context(TestClient(app))
             runner.case_started = time.monotonic()

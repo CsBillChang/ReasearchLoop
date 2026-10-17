@@ -15,7 +15,7 @@ from research_loop.main import app
 from research_loop.storage.mysql import Database
 from research_loop.services.conversations import ConversationService
 from research_loop.services.tasks import TaskService
-from research_loop.services.product import ProductService
+from research_loop.services.artifacts import ArtifactService
 from research_loop.domain.tasks import TaskCreate, TaskStatus, TaskResult
 from research_loop.workers.executor import TaskExecutor
 
@@ -107,7 +107,7 @@ class ConversationAttachmentTests(unittest.TestCase):
         """本批真实失败的附件为空问题，在API→DB→Worker messages→PDF链中回归。"""
         first=self.submit([self.attachment]);self.finish(first)
         fake=AttachmentProvider(self.attachment['input_ref'])
-        with patch('research_loop.api.tasks.get_settings',return_value=self.settings),TestClient(app) as client:
+        with patch('research_loop.api.dependencies.get_settings',return_value=self.settings),TestClient(app) as client:
             response=client.post('/api/tasks',json={'conversation_id':self.cid,'prompt':'沿用这篇原文，继续回答，不保存','save_policy':'deny','idempotency_key':uuid4().hex})
             self.assertEqual(response.status_code,202);tid=response.json()['task_id']
             TaskExecutor(self.settings,self.db,provider_factory=lambda _:fake).execute(tid,'ag75-zero-worker')
@@ -119,7 +119,7 @@ class ConversationAttachmentTests(unittest.TestCase):
         self.assertEqual(view['status'],'completed',view)
         self.assertEqual(list(self.settings.output_dir.rglob('*.md')) if self.settings.output_dir.exists() else [],[])
         # 上传PDF没有发现候选元数据时，网页仍须展示本任务已经读取的证据页。
-        product=ProductService(self.db,self.settings)
+        product=ArtifactService(self.db,self.settings)
         artifacts=product.artifacts(tid)
         self.assertEqual(len(artifacts['papers']),1)
         self.assertEqual(artifacts['papers'][0]['paper_id'],self.attachment['input_ref'])

@@ -77,7 +77,7 @@ class VerificationHandoffTests(loop.ReflectionLoopTests):
         from research_loop.main import app
         scenario=MissingEvidenceScenario()
         executor=TaskExecutor(self.settings,self.db,scenario.factory,lambda s,f:LimitedPDF())
-        with patch('research_loop.api.tasks.get_settings',return_value=self.settings),TestClient(app) as client:
+        with patch('research_loop.api.dependencies.get_settings',return_value=self.settings),TestClient(app) as client:
             response=client.post('/api/tasks',json={'prompt':'仅根据附件核验实验环境的版本是否为99。不要保存。',
                 'save_policy':'deny','attachments':[{'input_ref':'input-A','local_path':str(self.root/'A.pdf'),'paper_id':'paper-A'}]})
             self.assertEqual(response.status_code,202);tid=response.json()['task_id']

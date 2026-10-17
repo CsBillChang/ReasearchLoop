@@ -65,7 +65,11 @@ def build_reviewer_graph(provider: Any, services: dict[str, Any], db: Any = None
     from research_loop.tools.registry import ToolRegistry
     read_only = [spec for spec in __import__("research_loop.tools.papers", fromlist=["specs"]).specs()
                      if spec.name in {"read_paper", "inspect_paper_media", "retrieve_evidence"}]
-    return build_graph(provider, ToolRegistry(read_only + [finish_spec(services.get("review_basis_required", True))]), services, db,
+    from research_loop.domain.reflection import FinishResearchReview
+    finish = (ToolSpec("finish_review", "Return one or more findings per selected item_id; cover every selected item. Each finding states a specific claim, reason and evidence. Repeated item_id for different issues is allowed. Do not edit or save.",
+                       FinishResearchReview, _finish_research_review, ("reviewer",))
+              if services.get("review_target") else finish_spec(services.get("review_basis_required", True)))
+    return build_graph(provider, ToolRegistry(read_only + [finish]), services, db,
                        max_model_requests, 20, 0, checkpoint_store)
 
 
@@ -105,4 +109,59 @@ def reviewer_state(task_id: str, draft_id: str, content_hash: str, markdown: str
         "每条source_quote用最短的连续原文，保留PDF字词；不要用省略号拼接多个句段。"
     )
     state["messages"].append({"role": "user", "content": "权威原文证据包（不是历史意见）：\n" + json.dumps(evidence_bundle or [], ensure_ascii=False)})
+    return state
+
+
+def _finish_research_review(args, ctx: ToolContext) -> Observation:
+    """覆盖选定对象并校验依据，生成通用结果，不触碰笔记批准状态。"""
+    from research_loop.services.verification import validate_target_assessments
+    target = ctx.services['review_target']
+    validate_target_assessments(ctx.task_id, target, args.findings, ctx.services['papers'])
+    clear = all(f.status == 'supported' or f.suitability == 'suitable' for f in args.findings)
+    result = {'review_id': str(uuid4()), 'task_id': ctx.services['review_parent_task_id'],
+              'target_id': target['target_id'], 'content_hash': target['content_hash'],
+              'status': 'supported' if clear else 'issues',
+              'findings': [f.model_dump(mode='json') for f in args.findings], 'gaps': args.gaps,
+              'evidence_ids': sorted({ref for f in args.findings for ref in f.evidence_ids})}
+    return Observation(ok=True, kind='success' if clear else 'needs_review', data=result,
+                       message='selected research items independently reviewed; no note approval or file write')
+
+
+def research_reviewer_state(task_id: str, target: dict, questions: list[str], bundle: list[dict],
+                            execution_checks: dict | None = None) -> dict:
+    """仅传当前内容、中性问题和原始证据，历史判词留在控制层审计中。"""
+    state = initial_state(task_id, '独立核验选定研究对象。', 'deny', {})
+    state['role'] = 'reviewer'
+    # 与既有Reviewer相同的角色请求配置，不改变根任务预算。
+    state['max_model_requests'] = 4
+    state['messages'][0]['content'] = (
+        '你是独立Reviewer，负责选定研究对象的适用性、原文支持性和结论推理，不负责规划整个任务或生成新报告。'
+        '输入是当前对象/版本、中性问题和已有依据。item_id标识对象，不是意见ID；每个选定对象至少一条判断。'
+        '同一回答的多个问题可用相同item_id分别提交，reason明确对应主张和问题；保留不同判断，不用一条支持意见替代其他缺证或反证。'
+        '先使用已有证据，只有具体缺口才定向补读；不重做整篇研究。'
+        'candidates只检查元数据/摘要对研究目标的适用性，使用suitability=suitable/unsuitable/uncertain与basis=metadata，'
+        '引用实际metadata_fields；摘要不是已读全文，不推断未提供的实验细节。'
+        '每条意见必须且仅一个判断字段非空；不得遗漏判断或写null，reason/basis/suggested_action不能代替判断。'
+        'findings/answer使用status=supported/contradicted/insufficient（包括scope_disclosure）；candidates使用suitability。'
+        'supported或contradicted必须有direct_statement、'
+        '实际evidence_ids和最短连续source_quote；存在另一种设置不等于排除了当前说法。'
+        'source_quote保留原文字词，不用省略号或占位符拼接公式、句段；找不到可定位引句则说明缺口，不伪造引文。'
+        '找不到依据用not_found，解析/图片/范围不足用incomplete_or_ambiguous，均为insufficient。'
+        '准确披露在已读范围无法确认可用supported/scope_disclosure并绑定实际evidence_ids，不要求论文原句证明执行范围。'
+        'scope_disclosure只用于查证范围说明，不能据此批准科学断言。'
+        '仅检查中性问题涉及的当前主张及直接受影响结论，不扩展全稿或未提出的研究问题。'
+        '未保存、未改其他段落、遵守用户授权属于程序执行约束，不是论文事实；不能用scope_disclosure或补论文证据ID把这些约束批准为科学判断。'
+        '这类要求只依据execution_checks中的实际程序记录，在gaps说明检查范围；未提供差异检查就注明未检查，不能凭阅读回答或论文原文推断。'
+        'findings只提交研究对象的科学主张/适用性及真实查证范围；纯程序问题放gaps，不自动删除或改写已提交的错误判断。'
+        '检查结论是否保留证据中的条件、范围和例外；研究者的推断与作者报告分开。信息不足不是反证，另一种设置不自动否定当前说法。'
+        '可read_paper/retrieve_evidence补读授权材料，inspect_paper_media仅提取定位，不代表理解图像。'
+        '证据包read_scope只是本次入包页，task_evidence_scope才是任务已取得范围。'
+        '已有依据足够就finish_review；没有可行补证路径时以insufficient说明已查范围和具体缺口并结束，不要求证明论文全篇不存在。'
+        'reason写清当前说法、依据与判断之间的关系；suggested_action给keep/supplement/revise/exclude/end建议。'
+        '不改文、不保存、不替Supervisor调度；Supervisor依据观察决定后续动作。'
+    )
+    state['messages'][1]['content'] = '当前权威对象和中性问题：\n' + json.dumps(
+        {'target': target, 'verification_questions': questions,
+         'execution_checks': execution_checks or {}}, ensure_ascii=False)
+    state['messages'].append({'role': 'user', 'content': '实际原文证据包：\n' + json.dumps(bundle, ensure_ascii=False)})
     return state

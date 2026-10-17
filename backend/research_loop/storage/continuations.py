@@ -1,4 +1,4 @@
-"""产品交互持久层：保存取消后继续请求；模型状态仍由任务和收据负责。"""
+"""任务接续持久层：保存取消后继续请求；模型状态仍由任务和收据负责。"""
 SCHEMA='''
 CREATE TABLE IF NOT EXISTS task_continuations (
  continuation_id VARCHAR(64) PRIMARY KEY,

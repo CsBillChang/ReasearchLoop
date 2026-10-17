@@ -4,12 +4,8 @@ import os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from research_loop.config import get_settings
+from research_loop.api.router import router as api_router
 from research_loop.services.runtime import application_lock, heartbeat
-from research_loop.api.health import router as health_router
-from research_loop.api.tasks import router as tasks_router
-from research_loop.api.conversations import router as conversations_router
-from research_loop.api.profile import router as profile_router
-from research_loop.api.notes import router as notes_router
 
 @asynccontextmanager
 async def lifespan(app):
@@ -28,17 +24,5 @@ async def readonly_demo(request: Request, call_next):
     if os.getenv('RESEARCHLOOP_READONLY') == '1' and request.method not in {'GET','HEAD','OPTIONS'}:
         return JSONResponse({'detail': 'READONLY_DEMO: 当前入口只读，请使用日常入口'}, status_code=403)
     return await call_next(request)
-app.include_router(health_router, prefix="/api")
-app.include_router(tasks_router, prefix="/api")
-app.include_router(conversations_router, prefix="/api")
-app.include_router(profile_router, prefix="/api")
-app.include_router(notes_router, prefix="/api")
 
-from research_loop.api.product import router as product_router
-app.include_router(product_router, prefix="/api")
-
-from research_loop.api.subscriptions import router as subscriptions_router
-app.include_router(subscriptions_router, prefix="/api")
-
-from research_loop.api.reading_list import router as reading_list_router
-app.include_router(reading_list_router, prefix='/api')
+app.include_router(api_router, prefix="/api")

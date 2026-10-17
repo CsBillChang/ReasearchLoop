@@ -79,7 +79,7 @@ def real():
     stamp=[datetime.fromisoformat(frozen['created_at'])]
     service=SubscriptionService(db,lambda:stamp[0])
     payload={'title':'开放词汇检测 · 真实简报验收','directions':frozen['directions'],'sources':frozen['sources'],'lookback_days':frozen['lookback_days'],'enabled':True,'idempotency_key':'ag73-real-once'}
-    with patch('research_loop.api.tasks.get_settings',return_value=config), patch('research_loop.api.subscriptions.service',return_value=service),TestClient(app) as client:
+    with patch('research_loop.api.dependencies.get_settings',return_value=config), patch('research_loop.api.subscriptions.service',return_value=service),TestClient(app) as client:
         made=client.post('/api/subscriptions',json=payload);made.raise_for_status();sub=made.json();write('real-subscription.json',sub)
         worker=BriefScheduler(config,clock=lambda:stamp[0],request_cap=frozen['request_cap_per_tick'],duration_seconds=300)
         results=[]

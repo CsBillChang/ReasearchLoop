@@ -1,0 +1,107 @@
+{
+  "package_id": "public-evidence-20261017",
+  "prepared_date": "2026-10-17",
+  "source_of_truth": "existing frozen local artifacts; only allowlisted aggregate and anonymous numeric fields exported",
+  "current_deployment": {
+    "local_id": "local-8f5181d5f9750e51",
+    "source_fingerprint": "8f5181d5f9750e51f0ca58e3bb82f2f7b0f2a6f3ceeac0d47ae5685c90d79c56",
+    "files": 303,
+    "git_base": "9be0de66aac82691ca8ed3b33e589cc2bb6cf0ec",
+    "new_release_commit_created": false,
+    "scope": "deployment readback, not a rerun of historical evaluations; new report script is outside frozen runtime source"
+  },
+  "environment": {
+    "python": "3.14.6 (main, Jun 10 2026, 10:03:53) [Clang 21.0.0 (clang-2100.0.123.102)]",
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "cpu": "Apple M2",
+    "ram_gib": 8,
+    "inference_threads": 2
+  },
+  "models": {
+    "embedding": "intfloat/multilingual-e5-small",
+    "reranker": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    "generative_alias": "deepseek-flash",
+    "limit": "alias is not immutable provider weights; six local file revisions/hashes are in existing public config model template"
+  },
+  "historical_batches": [
+    {
+      "id": "original-20261011",
+      "date": "2026-10-11",
+      "freeze_sha256": "9ac130a8ac30c82b9ab7e19181539434429695a75586a46be88f8bb0b037eba6",
+      "code": {
+        "runtime_files": 77,
+        "path_hash_map_sha256": "6cd78692594f6058bb36d7b5a5bd3ef87fa85d69ce7ad68d8526eb81230e0b9e",
+        "scope": "runtime files present in the historical freeze; a narrow freeze need not cover all project code"
+      }
+    },
+    {
+      "id": "reflection-component-20261011",
+      "date": "2026-10-11",
+      "freeze_sha256": "d6912867260998dbd6a6b9be4a3a1550b788953dcf030ae90efc1062288410ad",
+      "code": {
+        "runtime_files": 77,
+        "path_hash_map_sha256": "6cd78692594f6058bb36d7b5a5bd3ef87fa85d69ce7ad68d8526eb81230e0b9e",
+        "scope": "runtime files present in the historical freeze; a narrow freeze need not cover all project code"
+      }
+    },
+    {
+      "id": "comparison-session-20261016",
+      "date": "2026-10-16",
+      "freeze_sha256": "d26e10f8a6948f97043d64f92f547f029d313ba619f10d9ff515ed23b20bd43a",
+      "code": {
+        "runtime_files": 94,
+        "path_hash_map_sha256": "2b9587f016521d86ed4ebc5e11ab038654700618da3ce267608ce2bf0fabeaf9",
+        "scope": "runtime files present in the historical freeze; a narrow freeze need not cover all project code"
+      }
+    },
+    {
+      "id": "reviewer-failure-20261017",
+      "date": "2026-10-17",
+      "freeze_sha256": "5a4c5fedaf61eaf4e57265829d10d1266a9f202c2e4d0906ca33f77cfbe659d1",
+      "code": {
+        "runtime_files": 97,
+        "path_hash_map_sha256": "686816b569962de80e8ab9d6435a09f304e5107309f4c7fccba724350dcbbedd",
+        "scope": "runtime files present in the historical freeze; a narrow freeze need not cover all project code"
+      }
+    },
+    {
+      "id": "retrieval-optimization-20261011",
+      "date": "2026-10-11",
+      "freeze_sha256": "990a5cd92084b44cce914f1811a45f29ce8abd9f0c3cc0e4a19329076bd199d4",
+      "code": {
+        "runtime_files": 3,
+        "path_hash_map_sha256": "d294e2877e6cb4644b03682e47666e496ae0f4b07131e71cfa4f022dffcce489",
+        "scope": "runtime files present in the historical freeze; a narrow freeze need not cover all project code"
+      }
+    },
+    {
+      "id": "reranker-efficiency-20261012",
+      "date": "2026-10-12",
+      "freeze_sha256": "32b0cc3ed4ff7d2f2625e2b8a20a9645857e19fa6e02bbcfcac68241fb8c4f8b",
+      "code": {
+        "runtime_files": 4,
+        "path_hash_map_sha256": "9ece0483ef91c626b53ed000031039e10472b348cf51c413c7ea33113f2e4ecc",
+        "scope": "runtime files present in the historical freeze; a narrow freeze need not cover all project code"
+      }
+    }
+  ],
+  "files": {
+    "retrieval.json": "264278c927880ba9cac6c7f28b8d947f337811fb378901e89b5610a4d30fcf2f",
+    "reflection.json": "83c85b884ab79c829f64f6c61b81dded7d8a2dcaa5751250a660256a25275719",
+    "demonstrations.json": "42fac6e32c22a281b5224698ddd6fe7d2daf310919dc917a5424e8b610bb046a"
+  },
+  "privacy": [
+    "No private prompts, answers, source text, source quotes, PDFs, raw receipts, UUIDs, credentials or personal paths",
+    "Mappings retained only locally; semantic labels cannot be independently validated from anonymous data alone"
+  ],
+  "reproducibility": {
+    "public": "stored-result arithmetic and integrity checks",
+    "local_private": "original source-span labels, receipts and frozen-input checks via report_evidence.py",
+    "not_claimed": "fresh model inference, new wall-clock measurements or full historical environment recreation"
+  },
+  "historical_reconstruction": {
+    "original_archived_freeze_available": true,
+    "reflection_component_current_source_mismatches": 53,
+    "limit": "historical result arithmetic verified; source drift recorded, no full historical execution recreation claimed"
+  }
+}

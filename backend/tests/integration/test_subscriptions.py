@@ -205,7 +205,7 @@ class SubscriptionTests(unittest.TestCase):
     def test_api_validates_sources_versions_and_no_requests(self):
         """真实FastAPI配置入口不会调用供应商；未知来源、过期版本均明确拒绝。"""
         from research_loop.main import app
-        with patch('research_loop.api.tasks.get_settings',return_value=self.config),TestClient(app) as client:
+        with patch('research_loop.api.dependencies.get_settings',return_value=self.config),TestClient(app) as client:
             response=client.get('/api/subscriptions');self.assertEqual(response.status_code,200)
             self.assertEqual(len(response.json()['sources']),17)
             data=self.payload.model_dump();data.update(idempotency_key=uuid4().hex,sources=['bogus'])

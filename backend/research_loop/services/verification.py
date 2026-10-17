@@ -93,3 +93,52 @@ def validate_assessments(task_id: str, assessments: list[ClaimAssessment], paper
     # 一次返回本批所有引句错误，避免逐个报错耗尽有界核验额度；不修写模型引句。
     if errors:
         raise ValueError("; ".join(errors))
+
+
+def validate_target_assessments(task_id: str, target: dict, assessments: list, papers) -> None:
+    """核对每个选定项、实际元数据字段和页级引句；不判断语义真伪。
+
+    Args:
+        task_id: 当前独立Reviewer任务。
+        target: 服务加载的权威对象快照。
+        assessments: 独立角色提交的逐项判断。
+        papers: 已授权原文服务。
+
+    Raises:
+        ValueError: 遗漏项目、错用判断类型或引句不属于实际依据。
+        PermissionError: 引用越过任务授权。
+    """
+    items = {item['item_id']: item for item in target['items']}
+    ids = {f.item_id for f in assessments}
+    # item是审核对象，不是意见的唯一键；一个回答可以包含多个独立问题。
+    if ids != set(items):
+        raise ValueError(f'review must cover selected item_ids; missing={sorted(set(items) - ids)}, '
+                         f'unknown={sorted(ids - set(items))}; multiple findings per item are allowed')
+    errors = []
+    for index, finding in enumerate(assessments):
+        item = items[finding.item_id]
+        if target['target_type'] == 'candidates':
+            if finding.suitability is None or finding.status is not None:
+                raise ValueError('candidate review requires suitability, not a factual verdict')
+            fields = finding.metadata_fields
+            if not fields or any(field not in item['metadata'] or item['metadata'][field] in (None, '') for field in fields):
+                raise ValueError('candidate review must identify available metadata_fields')
+            if finding.source_quote and not any(quote_in_text(finding.source_quote, str(item['metadata'][field])) for field in fields):
+                raise ValueError('candidate quote does not occur in the declared metadata fields')
+        else:
+            if finding.status is None or finding.suitability is not None:
+                raise ValueError('research findings/answers require factual status')
+            if finding.basis == 'scope_disclosure':
+                # 查不到支持与准确披露查证范围不同；范围本身是执行事实，不要求论文原句证明。
+                # 这里仍只验证范围真实存在，说明是否准确由独立角色判断。
+                papers.evidence_bundle(task_id, finding.evidence_ids)
+                continue
+            fact = ClaimAssessment(claim=item['text'], status=finding.status, basis=finding.basis,
+                reason=finding.reason, evidence_ids=finding.evidence_ids, source_quote=finding.source_quote)
+            try:
+                validate_assessments(task_id, [fact], papers)
+            except ValueError as exc:
+                # 保留原findings序号；scope_disclosure等分支不能使错误定位错位。
+                errors.append(f'findings[{index}] item_id={finding.item_id}: {exc}')
+    if errors:
+        raise ValueError('; '.join(errors))

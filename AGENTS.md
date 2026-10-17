@@ -4,7 +4,7 @@
 
 - 先读 README.md、docs/status.md、docs/improvement-plan.md、docs/file-map.md。当前计划以用户最新指令优先，其次为 improvement-plan 与 status；旧 AG/补齐合同仅为历史资料。
 - AG0–AG7按原约定完成，不重开。本轮是代码/文档盘点、完善准备与首次 GitHub 发布；没有授权自动执行 P0–P3、扩大语料、调用 DeepSeek 或修改外部简历。
-- 活动状态只写 docs/status.md，后续任务范围只写 docs/improvement-plan.md；不要再向 README/AGENTS 叠加每批次的“当前授权”。旧文档保存在本机 docs/archive/，原始证据保存在 artifacts/，均不上传。
+- 活动状态只写 docs/status.md，后续任务范围只写 docs/improvement-plan.md；不要再向 README/AGENTS 叠加每批次的“当前授权”。旧文档保存在仓库外本机备份（位置见 docs/status.md），原始证据保存在 artifacts/，均不上传。
 - 架构为 ReAct＋Reflection＋Memory，LangGraph 编排 Supervisor / Researcher / Reviewer。Checkpoint 为项目自实现快照，不冒称原生 Checkpointer。
 - 当前业务源码、依赖、配置入口与迁移保留；未交付矩阵标记为实验能力，不能阻挡无技术依赖的其他任务。不得为了整理目录删除运行数据或反复搬迁模块。
 

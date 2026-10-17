@@ -5,6 +5,11 @@ from research_loop.domain.tasks import Observation
 from research_loop.tools.base import ToolContext, ToolSpec, execute_spec
 
 
+def schema_names(schemas: list[dict[str, Any]]) -> set[str]:
+    """返回本次请求真正可见的工具名，包括收尾时收缩后的范围。"""
+    return {item["function"]["name"] for item in schemas}
+
+
 class ToolRegistry:
     def __init__(self, specs: list[ToolSpec] | None = None, *, allowed_names: set[str] | None = None):
         """以同一可选范围限制schema与执行；None保留日常角色全部工具。"""

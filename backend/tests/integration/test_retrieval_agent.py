@@ -31,7 +31,7 @@ class RetrievalAgentTests(unittest.TestCase):
         self.db=Database(url); self.db.ensure_schema()
         self.config=Settings(project_root=self.root,data_dir=self.root/'data',output_dir=self.root/'notes',database_url=url)
         self.client=TestClient(app)
-        self.patch=patch('research_loop.api.tasks.get_settings',return_value=self.config)
+        self.patch=patch('research_loop.api.dependencies.get_settings',return_value=self.config)
         self.patch.start(); self.addCleanup(self.patch.stop); self.addCleanup(self.client.close)
         self.key='ag72-contract-'+uuid.uuid4().hex
         self.payload={'prompt':'基于已授权原文定位language证据并简短回答，不保存。','save_policy':'deny','idempotency_key':self.key}

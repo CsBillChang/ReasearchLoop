@@ -78,3 +78,9 @@ class RevisionInput(BaseModel):
     content_hash: str = Field(pattern=r'^[0-9a-f]{64}$')
     review_id: str
     patches: list[NotePatch] = Field(min_length=1, max_length=20)
+
+
+# 网页显式操作的输入合同；不会自动提升旧任务的权限。
+class SaveDraft(BaseModel):
+    content_hash: str=Field(pattern=r'^[a-f0-9]{64}$')
+    confirm: bool=False

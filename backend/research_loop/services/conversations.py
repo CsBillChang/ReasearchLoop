@@ -1,6 +1,8 @@
 """会话服务：用户消息和任务原子关联，澄清继续原任务，结束结果可幂等补投影。"""
 from __future__ import annotations
 import json
+import hashlib
+import re
 from uuid import uuid4
 from research_loop.storage.memory import MemoryStore, dump, digest, operation, record_operation
 from research_loop.storage.mysql import Database, _now
@@ -35,6 +37,56 @@ class ConversationService:
             'FROM conversations c LEFT JOIN (SELECT conversation_id,MAX(created_at) AS last_activity_at '
             'FROM conversation_messages GROUP BY conversation_id) m ON m.conversation_id=c.conversation_id '
             'ORDER BY last_activity_at DESC,c.conversation_id')
+
+    def answer_message(self, task_id: str, message_id: str) -> dict | None:
+        """读回同会话、当前用户消息之前的assistant回答，不授予原文或保存权限。"""
+        return self.db.fetchone('SELECT m.* FROM conversation_links l '
+            'JOIN conversation_messages current_message ON current_message.message_id=l.message_id '
+            'JOIN conversation_messages m ON m.conversation_id=l.conversation_id '
+            "WHERE l.task_id=? AND m.message_id=? AND m.role='assistant' "
+            'AND m.sequence_no<current_message.sequence_no', (task_id, message_id))
+
+    def referenced_answer(self, task_id: str) -> dict | None:
+        """解析明确内容身份或成功message读回，供异常交付保留已有回答。
+
+        Args:
+            task_id: 当前任务，不跨会话选择历史内容。
+
+        Returns:
+            唯一回答内容及原消息/版本身份；没有明确来源或存在多个不同候选时
+            返回None。不默认采用最近回复，不继承旧核验或保存授权。
+        """
+        task = self.db.get_task(task_id)
+        link = self.db.fetchone('SELECT * FROM conversation_links WHERE task_id=?', (task_id,))
+        if not task or not link:
+            return None
+        wanted = set(re.findall(r'(?i)(?<![a-f0-9])[a-f0-9]{64}(?![a-f0-9])', task['prompt']))
+        wanted = {value.lower() for value in wanted}
+        candidates = {}
+        rows = self.db.fetchall('SELECT message_id FROM conversation_messages WHERE conversation_id=? '
+                               "AND role='assistant' ORDER BY sequence_no DESC", (link['conversation_id'],))
+        for entry in rows:
+            row = self.answer_message(task_id, entry['message_id'])
+            if row and hashlib.sha256(row['content'].encode()).hexdigest() in wanted:
+                candidates.setdefault(hashlib.sha256(row['content'].encode()).hexdigest(), row)
+        for action in self.db.list_actions(task_id):
+            data = (action.get('observation') or {}).get('data') or {}
+            args = action.get('arguments') or {}
+            if (action['tool_name'] != 'read_memory' or action.get('status') != 'succeeded'
+                    or args.get('source_type') != 'message' or data.get('source_type') != 'message'
+                    or data.get('source_id') != args.get('source_id')):
+                continue
+            row = self.answer_message(task_id, data['source_id'])
+            # read_memory的content_hash沿用JSON规范化身份；交付另提供原文字节SHA。
+            if row and data.get('content_hash') == digest(row['content']):
+                candidates.setdefault(hashlib.sha256(row['content'].encode()).hexdigest(), row)
+        if len(candidates) != 1:
+            return None
+        content_hash, row = next(iter(candidates.items()))
+        return {'content': row['content'], 'source_type': 'message', 'source_id': row['message_id'],
+                'content_sha256': content_hash, 'conversation_id': link['conversation_id'],
+                'source_task_id': row['task_id'], 'is_original_paper_evidence': False,
+                'review_status': 'unreviewed', 'save_permission_inherited': False}
 
     def rename(self, conversation_id: str, args) -> dict:
         """按用户看到的旧标题修改会话名，保留消息和全部研究身份。
@@ -136,7 +188,7 @@ class ConversationService:
             tx.execute('INSERT INTO task_events(event_id,task_id,event_type,payload_json,created_at) VALUES(?,?,?,?,?)',
                 (str(uuid4()),tid,'conversation_attachments_bound',dump({'source_task_id':inherited_from,
                 'input_refs':[a['input_ref'] for a in attachments],'save_permission_inherited':False,'page_evidence_inherited':False}),now))
-        tx.execute('INSERT INTO task_budgets(root_task_id,model_limit,tool_limit,reserve_tail,created_at) VALUES(?,?,?,?,?)', (tid,48,80,10,now))
+        self.db.create_budget(tx, tid, self.settings)
         tx.execute('INSERT INTO task_events(event_id,task_id,event_type,payload_json,created_at) VALUES(?,?,?,?,?)', (str(uuid4()),tid,'task_created',dump({'conversation_id':cid,'status':'queued'}),now))
         return tid
 
@@ -167,7 +219,11 @@ class ConversationService:
         paper_ids = [r['paper_id'] for r in tx.all('SELECT DISTINCT p.paper_id FROM task_papers p JOIN tasks t ON t.task_id=p.task_id WHERE t.root_task_id=?', (task_id,))]
         papers = [json.loads(r['metadata_json']) for pid in paper_ids if (r := tx.one('SELECT metadata_json FROM papers WHERE paper_id=?', (pid,)))]
         evidence_ids = [r['evidence_id'] for r in tx.all('SELECT DISTINCT e.evidence_id FROM task_evidence e JOIN tasks t ON t.task_id=e.task_id WHERE t.root_task_id=?', (task_id,))]
-        record = {'source_type':'research_history','task_id':task_id,'conversation_id':cid,'prompt':task['prompt'],'status':task['status'],'answer':answer,'papers':papers,'paper_ids':paper_ids,'evidence_ids':evidence_ids,'gaps':result.get('gaps',[]),'note_artifacts':result.get('note_artifacts',[]),'created_at':task['created_at']}
+        from research_loop.services.research_progress import ResearchProgressService
+        stage = ResearchProgressService(self.db)
+        progress = [stage.retained(row['task_id']) for row in tx.all('SELECT task_id FROM tasks WHERE root_task_id=?', (task_id,))]
+        progress = [item for item in progress if item['revision']]
+        record = {'research_progress': progress, 'source_type':'research_history','task_id':task_id,'conversation_id':cid,'prompt':task['prompt'],'status':task['status'],'answer':answer,'papers':papers,'paper_ids':paper_ids,'evidence_ids':evidence_ids,'gaps':result.get('gaps',[]),'note_artifacts':result.get('note_artifacts',[]),'created_at':task['created_at']}
         tx.execute('INSERT INTO research_memories(task_id,conversation_id,record_json,search_text,created_at) VALUES(?,?,?,?,?)', (task_id,cid,dump(record), task['prompt']+'\n'+answer+'\n'+dump(papers), _now()))
 
     def view(self, cid: str, offset: int = 0, limit: int = 100) -> dict:

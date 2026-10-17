@@ -68,8 +68,10 @@ class AG6RepairTests(unittest.TestCase):
         validate_messages(projected)
         self.assertLess(metrics['after'],metrics['input_capacity'])
         self.assertEqual(projected[-2:],messages[-2:]);self.assertEqual(projected[2],messages[1])
-        self.assertEqual([m['reasoning_content'] for m in projected if m['role']=='assistant'],
-                         [m['reasoning_content'] for m in messages if m['role']=='assistant'])
+        self.assertTrue(metrics['archived_groups'])
+        assistants=[m for m in projected if m['role']=='assistant']
+        self.assertEqual(assistants,[messages[-2]])
+        self.assertTrue(all(m in messages for m in assistants))
         self.assertEqual(json.dumps(messages,ensure_ascii=False),before)
         archived=self.db.fetchone('SELECT original_json FROM context_archives WHERE snapshot_id=?',(metrics['snapshot_id'],))
         self.assertEqual(json.loads(archived['original_json'])['messages'],messages)

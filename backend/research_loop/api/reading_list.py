@@ -1,8 +1,9 @@
 """阅读清单HTTP接口；不调用模型、不执行PDF下载或笔记保存。"""
 from typing import Literal
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from research_loop.api.tasks import _service
+from research_loop.api.dependencies import get_database
+from research_loop.storage.mysql import Database
 from research_loop.services.reading_list import ReadingListService
 
 router = APIRouter()
@@ -18,16 +19,16 @@ class ReadingChange(BaseModel):
 
 
 @router.get('/reading-list')
-def reading_list():
+def reading_list(db: Database = Depends(get_database)):
     """读取清单与移除版本，不把该操作计为阅读或自动精读。"""
-    return {'items': ReadingListService(_service().db).list()}
+    return {'items': ReadingListService(db).list()}
 
 
 @router.post('/reading-list')
-def change_reading_list(payload: ReadingChange):
+def change_reading_list(payload: ReadingChange, db: Database = Depends(get_database)):
     """处理用户明确清单操作，版本或幂等冲突返回409。"""
     try:
-        return ReadingListService(_service().db).change(payload)
+        return ReadingListService(db).change(payload)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

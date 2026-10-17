@@ -71,7 +71,7 @@ def run():
     runner=object.__new__(EvaluationRunner);runner.ledger=ledger;runner.cancel_hook=False
     executor=TaskExecutor(config,db,provider_factory=runner.provider)
     results=[]
-    with patch('research_loop.api.tasks.get_settings',return_value=config),TestClient(app) as client:
+    with patch('research_loop.api.dependencies.get_settings',return_value=config),TestClient(app) as client:
         for case in spec['reflection']:
             ledger.case=case['id'];started=time.monotonic()
             tid,draft=seed_case(client,db,config,case,spec['reflection_prompt'],corpus)

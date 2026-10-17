@@ -86,7 +86,7 @@ class ReflectionLoopTests(unittest.TestCase):
         from research_loop.main import app
         scenario = ReflectionScenario(no_progress)
         executor = TaskExecutor(self.settings,self.db,scenario.factory,lambda s,f:FixturePDF())
-        with patch('research_loop.api.tasks.get_settings', return_value=self.settings), TestClient(app) as client:
+        with patch('research_loop.api.dependencies.get_settings', return_value=self.settings), TestClient(app) as client:
             response = client.post('/api/tasks',json={'prompt':'核对语言条件并修订用户草稿。' + ('不要保存' if no_progress else '保存到项目'),
                 'save_policy':'deny' if no_progress else 'allow','attachments':[{'input_ref':'input-A','local_path':str(self.root/'A.pdf'),'paper_id':'paper-A'}]})
             self.assertEqual(response.status_code,202); tid = response.json()['task_id']

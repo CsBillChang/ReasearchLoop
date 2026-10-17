@@ -1,4 +1,4 @@
-"""Supervisor 专属工具：记录能力缺口、请求澄清、分派 Researcher 和调用独立 Reviewer。"""
+"""Supervisor 调度与角色共用阶段进展：澄清、委派、按需核验及候选成果记录。"""
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from research_loop.domain.tasks import Observation, SubtaskSpec, ResearchBrief, FinishTaskInput
 from research_loop.tools.base import ToolContext, ToolSpec
 from research_loop.domain.research import EvidenceMatrixInput
+from research_loop.domain.reflection import ResearchReviewInput, ResearchRevisionInput, CloseResearchIssueInput
 
 
 # 澄清工具参数：问题、所缺字段与建议值。
@@ -71,6 +72,30 @@ def _review(args: ReviewNoteArgs, ctx: ToolContext) -> Observation:
                        data=result, message="one independent review completed")
 
 
+def _review_research(args: ResearchReviewInput, ctx: ToolContext) -> Observation:
+    """核验已授权研究对象，不要求创建笔记；执行失败保持独立。"""
+    result = ctx.services['reflection'].review_research(ctx.task_id, args,
+        lambda attempt, target, refs, questions: ctx.services['review_research'](ctx.task_id, attempt, target, refs, questions))
+    failed = result.get('status') == 'execution_failed'
+    return Observation(ok=not failed, kind='execution_error' if failed else
+        ('success' if result.get('quality_status') == 'supported' else 'needs_review'),
+        retryable=False, data=result, message=('；'.join(result.get('gaps', [])) if failed else
+            '按需研究核验结果；查看具体问题、依据和reflection停止原因。'))
+
+
+def _revise_research(args: ResearchRevisionInput, ctx: ToolContext) -> Observation:
+    """提交精确局部版本，原子保存差异，不覆盖子任务原结果。"""
+    result = ctx.services['reflection'].revise_research(ctx.task_id, args)
+    return Observation(ok=True, kind='success', data=result, message='研究对象局部新版本已登记，当前版本尚未核验。')
+
+
+def _close_research(args: CloseResearchIssueInput, ctx: ToolContext) -> Observation:
+    """记录Supervisor明确结束选择，保留Reviewer原始意见。"""
+    result = ctx.services['reflection'].close_research(ctx.task_id, args)
+    return Observation(ok=True, kind='success', data={'research_disposition': result},
+                       message='已记录排除/披露/结束原因；请交付已有成果和适用边界。')
+
+
 def _plan(args: ResearchBrief, ctx: ToolContext) -> Observation:
     """返回经检查的目标计划，由通用工具行动与checkpoint持久化。"""
     plan = ctx.services["coverage"].prepare_plan(ctx.task_id, args)
@@ -91,10 +116,15 @@ def _matrix(args: EvidenceMatrixInput, ctx: ToolContext) -> Observation:
 
 
 def specs() -> list[ToolSpec]:
+    from research_loop.agents.researcher import progress_spec
     return [
+        progress_spec(),
+        ToolSpec('review_research', 'Optional independent review of actual candidates/findings or an answer snapshot. For new candidates/findings use source_task_id and actual item_ids. For an explicitly referenced prior assistant answer in this conversation, omit answer_markdown: the server loads its exact body and identity; do not copy it or re-read all sources first. For a newly composed answer supply answer_markdown. Continue with returned target_id/content_hash, omit source selectors. Give neutral verification_questions and reason; only authorized evidence_ids. No note creation or save required.', ResearchReviewInput, _review_research, ('supervisor',)),
+        ToolSpec('revise_research', 'Patch only unresolved selected items using current target_id/content_hash/review_id and exact old_text/new_text. Preserve all other text and source records; re-review current version independently. Not a whole-answer rewrite.', ResearchRevisionInput, _revise_research, ('supervisor',)),
+        ToolSpec('close_research_issue', 'End an unresolved review with a concrete reason: exclude unsuitable candidates, disclose a limitation, or end after no useful path. Does not approve content or authorize save. Use current target_id/content_hash/review_id.', CloseResearchIssueInput, _close_research, ('supervisor',)),
         ToolSpec('record_evidence_matrix', 'Optional structured comparison artifact, after reading sources. Each document row has question/method/dataset/metric/limitation. Quote exact page text (whitespace may differ); never infer missing numbers or universal experimental fairness. missing has empty value/references and a scope-limited reason. Metric needs explicit conditions; uncertain when conditions are unknown. Use current base_matrix_hash for changes, null initially; use returned matrix_hash in finish_task. No file save or automatic Reviewer.', EvidenceMatrixInput, _matrix, ('supervisor',)),
         ToolSpec("set_research_plan", "Record user requirements before delegating. After a user clarification, update the provisional plan to the answer and preserve unrelated requirements. Without a new user answer, may add goals but not weaken constraints. deep_reading_requested is true only for a requested deep-reading note.", ResearchBrief, _plan, ("supervisor",)),
-        ToolSpec("finish_task", "Deliver the answer or existing draft with every goal satisfied or explicitly unresolved. End without extra model calls.", FinishTaskInput, _finish_task, ("supervisor",)),
+        ToolSpec("finish_task", "Deliver retained work with goals satisfied or explicitly unresolved; unresolved reviews may be disclosed. With reflection_target_id/hash omit answer_markdown: the server loads the exact current body. Put handling notes in processing_summary, not appended to the body. End without extra model calls.", FinishTaskInput, _finish_task, ("supervisor",)),
         ToolSpec("report_task_gap", "Record an unavailable requirement without blocking achievable work. Disclose it in the final answer.", ReportGapArgs, _gap, ("supervisor",)),
         ToolSpec("request_clarification", "Persist one blocking question and release the worker.", ClarificationArgs, _clarify, ("supervisor",)),
         ToolSpec("delegate_research", "Persist and run up to two independent researcher subtasks.", DelegateResearchArgs, _delegate, ("supervisor",)),

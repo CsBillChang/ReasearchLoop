@@ -81,7 +81,7 @@ def main():
         """本批次禁止网络检索和PDF读取，若误调工具则保留权限失败。"""
         raise PermissionError('AG4冻结范围仅记忆，不调用论文上游')
     try:
-        with patch('research_loop.api.tasks.get_settings',return_value=settings), TestClient(app) as client, patch('research_loop.providers.discovery.DiscoveryProvider.search',side_effect=prohibited), patch('research_loop.services.papers.PaperService.read',side_effect=prohibited):
+        with patch('research_loop.api.dependencies.get_settings',return_value=settings), TestClient(app) as client, patch('research_loop.providers.discovery.DiscoveryProvider.search',side_effect=prohibited), patch('research_loop.services.papers.PaperService.read',side_effect=prohibited):
             for i,(prompt,cid) in enumerate(zip(INPUTS,[first,first,second,long]),1):
                 task=client.post('/api/tasks',json={'prompt':prompt,'conversation_id':cid,'save_policy':'deny','idempotency_key':'ag4-real-'+str(i)}).json()
                 tid=task['task_id']

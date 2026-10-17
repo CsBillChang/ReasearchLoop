@@ -156,14 +156,18 @@ class DPRPublicationTests(unittest.TestCase):
 
     def test_legacy_search_response_completes_without_new_plan_contract(self):
         """旧checkpoint按冻结合同恢复，不强迫历史只读回答执行新目标工具。"""
+        legacy_prompt = '你是ResearchLoop的Supervisor。仅查找论文，不强制全文精读。'
         class Provider:
             def send(inner, messages, tools, **kwargs):
-                self.assertIn('不强制全文精读', messages[0]['content'])
+                self.assertEqual(legacy_prompt, messages[0]['content'])
                 return self.raw('找到符合条件的论文：https://paper.example/title')
             def close(inner): pass
         task = TaskService(self.db).create(TaskCreate(prompt='找一篇今年CVPR论文'))
         from research_loop.agents.graph import initial_state
-        self.db.save_checkpoint(task.task_id, initial_state(task.task_id, '找一篇今年CVPR论文', 'deny'))
+        legacy_state = initial_state(task.task_id, '找一篇今年CVPR论文', 'deny')
+        # 历史恢复测试必须冻结旧规则，不能临时从最新版提示词猜测旧措辞。
+        legacy_state['messages'][0]['content'] = legacy_prompt
+        self.db.save_checkpoint(task.task_id, legacy_state)
         executor = TaskExecutor(self.settings, self.db, lambda settings: Provider())
         result = executor.execute(task.task_id)
         self.assertEqual(self.db.get_task(task.task_id)['status'], 'completed')

@@ -27,6 +27,7 @@ from research_loop.agents.memory import ContextService, PREFIX, estimate
 from research_loop.agents.graph import initial_state
 from research_loop.providers.deepseek import validate_messages
 from research_loop.workers.executor import TaskExecutor
+from research_loop.tools.memory import specs as memory_specs
 
 
 class MemoryProvider:
@@ -132,7 +133,7 @@ class MemoryTests(unittest.TestCase):
         from research_loop.main import app
         quote='以后请默认用中文回答科研问题。'+self.prefix
         provider=MemoryProvider(quote)
-        with patch('research_loop.api.tasks.get_settings',return_value=self.settings), TestClient(app) as client:
+        with patch('research_loop.api.dependencies.get_settings',return_value=self.settings), TestClient(app) as client:
             tid=client.post('/api/tasks',json={'prompt':quote,'conversation_id':self.cid,'save_policy':'deny'}).json()['task_id']
             TaskExecutor(self.settings,self.db,lambda s:provider).execute(tid)
             result=client.get('/api/tasks/'+tid).json()
@@ -175,7 +176,8 @@ class MemoryTests(unittest.TestCase):
         messages=[{'role':'system','content':'system'},{'role':'user','content':self.db.get_task(tid)['prompt']}]
         for i in range(3):
             messages += [{'role':'assistant','content':'','tool_calls':[{'id':str(i),'type':'function','function':{'name':'read_paper','arguments':'{}'}}]}, {'role':'tool','tool_call_id':str(i),'content':'目标检测正文 abc '*2000 if i<2 else '近期观察'}]
-        projected,metrics=ctx.prepare({'task_id':tid,'prompt':'只比较两篇，不保存','model_requests':2},messages,[])
+        tools = [s.schema() for s in memory_specs() if s.name == 'read_memory']
+        projected,metrics=ctx.prepare({'task_id':tid,'prompt':'只比较两篇，不保存','model_requests':2},messages,tools)
         validate_messages(projected)
         self.assertLess(metrics['after'],metrics['before'])
         self.assertEqual(projected[2],messages[1])
@@ -185,7 +187,7 @@ class MemoryTests(unittest.TestCase):
         self.assertFalse(archived['is_original_paper_evidence'])
         self.assertIsNotNone(archived['next_offset'])
         before=self.db.fetchone('SELECT COUNT(*) AS n FROM context_archives WHERE task_id=?',(tid,))['n']
-        ctx.prepare({'task_id':tid,'prompt':'只比较两篇，不保存'},messages,[])
+        ctx.prepare({'task_id':tid,'prompt':'只比较两篇，不保存'},messages,tools)
         self.assertEqual(self.db.fetchone('SELECT COUNT(*) AS n FROM context_archives WHERE task_id=?',(tid,))['n'],before)
 
     def test_latest_memory_page_shrinks_with_exact_readback_cursor(self):
@@ -204,9 +206,10 @@ class MemoryTests(unittest.TestCase):
         original=copy.deepcopy(messages)
         settings=self.settings.model_copy(update={'context_window_tokens':10000,'context_output_reserve':1000,'context_safety_tokens':500})
         ctx=ContextService(self.db,self.memory,settings)
+        tools = [s.schema() for s in memory_specs() if s.name == 'read_memory']
         # 本例只隔离单轮工具投影；真实多轮历史仍由另一个测试覆盖。
         with patch.object(ctx,'history',return_value={}):
-            projected,metrics=ctx.prepare({'task_id':tid,'prompt':'继续历史材料'},messages,[])
+            projected,metrics=ctx.prepare({'task_id':tid,'prompt':'继续历史材料'},messages,tools)
         validate_messages(projected)
         page=json.loads(projected[-1]['content'])['data']
         self.assertLessEqual(metrics['after'],metrics['input_capacity'])

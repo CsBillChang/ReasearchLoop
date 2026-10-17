@@ -56,7 +56,7 @@ def main() -> None:
                 'database':'researchloop_test_dpr_live_20261009','source_hashes':source_hashes}
         (artifact/'freeze.json').write_text(json.dumps(freeze,ensure_ascii=False,indent=2))
         (artifact/'production-before.json').write_text(json.dumps(snapshot(Database(settings.database_url)),ensure_ascii=False,indent=2))
-        with patch('research_loop.api.tasks.get_settings',return_value=isolated),TestClient(app) as client:
+        with patch('research_loop.api.dependencies.get_settings',return_value=isolated),TestClient(app) as client:
             response=client.post('/api/tasks',json={'prompt':PROMPT,'idempotency_key':'dpr-consolidation-20261009-one-task','save_policy':'allow'})
             response.raise_for_status();created=response.json()
             identity_path.write_text(json.dumps(created,ensure_ascii=False,indent=2))
@@ -67,7 +67,7 @@ def main() -> None:
             TaskExecutor(isolated,db).execute(task_id,'dpr-consolidation-once')
     else:
         task_id=json.loads(identity_path.read_text())['task_id']
-    with patch('research_loop.api.tasks.get_settings',return_value=isolated),TestClient(app) as client:
+    with patch('research_loop.api.dependencies.get_settings',return_value=isolated),TestClient(app) as client:
         view=client.get('/api/tasks/'+task_id).json()
     children=db.list_subtasks(task_id)
     ids=[task_id]+[child['subtask_id'] for child in children]

@@ -65,7 +65,7 @@ class ClarificationPipelineTests(unittest.TestCase):
     def test_api_pause_resume_new_worker_valid_http_messages(self):
         q = self.pause()
         from research_loop.main import app
-        with patch('research_loop.api.tasks.get_settings',return_value=self.settings):
+        with patch('research_loop.api.dependencies.get_settings',return_value=self.settings):
             with TestClient(app) as client:
                 r=client.post(f'/api/tasks/{self.task.task_id}/resume',json=self.payload(q).model_dump())
                 self.assertEqual(r.status_code,200,r.text)

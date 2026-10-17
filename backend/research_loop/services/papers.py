@@ -229,3 +229,119 @@ class PaperService:
         result = PaperMediaProvider(files).extract(files.cache_pdf_path(first['content_sha256']), first['content_sha256'], list(range(start, end + 1)))
         return {**result, 'target_ref': target_ref, 'document_id': first['document_id'],
                 'gaps': ['图表文件已提取，但当前文字模型没有接收图片；不能宣称视觉核验通过。']}
+
+    def visual_input_for_evidence(self, task_id: str, args):
+        """从已授权的真实页派生视觉身份，不取新论文或让模型填写hash。
+
+        Args:
+            task_id: 当前Supervisor任务。
+            args: VisualDelegationInput，指定实际取得的evidence_id和问题。
+
+        Returns:
+            与原独立组件相同的VisualInput；原正文与来源不改。
+
+        Raises:
+            PermissionError: 页不属于本任务或超出用户范围。
+            ValueError: 无物理页、PDF/解析缓存缺失或来源版本变化。
+        """
+        from hashlib import sha256
+        from pathlib import Path
+        from research_loop.domain.visual_reading import VisualInput
+        task = self.db.get_task(task_id)
+        if not task or task['cancel_requested'] or task['status'] != 'running':
+            raise PermissionError('visual delegation requires an active task')
+        page = self.evidence_bundle(task_id, [args.evidence_id])[0]
+        number = page['page_number']
+        if not isinstance(number, int) or number < 1:
+            raise ValueError('visual reading requires physical PDF page evidence; text-only source has no page image')
+        scope = self.user_scope(task_id)
+        if scope and not scope.start <= number <= scope.end:
+            raise PermissionError('visual page exceeds user-specified physical page range')
+        pdf = self.pdf.file_store.cache_pdf_path(page['source_sha256'])
+        if not pdf.is_file() or sha256(pdf.read_bytes()).hexdigest() != page['source_sha256']:
+            raise ValueError('visual PDF cache missing or changed; no automatic fetch')
+        attached = next((a for a in json.loads(task['attachments_json'] or '[]')
+                         if a['input_ref'] == page['target_ref']), None)
+        if attached and attached.get('local_path'):
+            source = Path(attached['local_path'])
+            if not source.is_file() or sha256(source.read_bytes()).hexdigest() != page['source_sha256']:
+                raise ValueError('visual attachment version changed')
+        config_hash = sha256(json.dumps(self.pdf.parser_config, sort_keys=True).encode()).hexdigest()
+        key = sha256(f'{page["source_sha256"]}:pymupdf:{self.pdf.parser_version}:{config_hash}'.encode()).hexdigest()
+        cache = self.pdf.file_store.cache_parse_path(key)
+        if page['document_id'] != 'doc:' + key[:32] or not cache.is_file():
+            raise ValueError('visual parsed cache identity missing or changed')
+        cached = next((p for p in json.loads(cache.read_text())['pages'] if p['page_number'] == number), None)
+        if not cached or cached['document_id'] != page['document_id'] or cached['text'] != page['text']:
+            raise ValueError('visual retained page differs from original parsed cache')
+        return VisualInput(target_ref=page['target_ref'], document_id=page['document_id'],
+            pdf_sha256=page['source_sha256'], page_text_sha256=sha256(page['text'].encode()).hexdigest(),
+            physical_page=number, question=args.question, group='visual', bbox=args.bbox)
+
+    def prepare_visual(self, task_id: str, request) -> dict:
+        """只从当前任务绑定附件与既有PDF缓存准备视觉组件输入，不联网取文。
+
+        Args:
+            task_id: 当前组件任务；继承的附件须已持久绑定且授权。
+            request: VisualInput，包含冻结来源、原文hash及单个物理页。
+
+        Returns:
+            原页文字、图片文件清单及不含图片字节的来源manifest。
+
+        Raises:
+            PermissionError: 取消、附件未绑定、页范围或来源身份不一致。
+            ValueError: 缓存缺失或损坏；不自动重检索、重解析。
+        """
+        from hashlib import sha256
+        from pathlib import Path
+        from research_loop.domain.visual_reading import VisualInput
+        from research_loop.providers.paper_media import PaperMediaProvider
+        item = VisualInput.model_validate(request)
+        task = self.db.get_task(task_id)
+        if not task or task['cancel_requested'] or task['status'] in {'cancelled', 'failed', 'completed', 'partial'}:
+            raise PermissionError('visual task is not active')
+        attachments = {a['input_ref']: a for a in json.loads(task['attachments_json'] or '[]')}
+        attached = attachments.get(item.target_ref)
+        if not attached or not self.db.task_has_input(task_id, item.target_ref):
+            raise PermissionError('visual input is not an assigned attachment')
+        scope = self.user_scope(task_id)
+        if scope and not scope.start <= item.physical_page <= scope.end:
+            raise PermissionError('visual page exceeds user-specified physical page range')
+        source = attached.get('local_path')
+        if not source or not Path(source).is_file():
+            raise ValueError('visual component requires an existing local PDF')
+        files = self.pdf.file_store
+        pdf = files.cache_pdf_path(item.pdf_sha256)
+        if not pdf.is_file() or sha256(pdf.read_bytes()).hexdigest() != item.pdf_sha256:
+            raise ValueError('visual PDF cache missing or changed')
+        if sha256(Path(source).read_bytes()).hexdigest() != item.pdf_sha256:
+            raise ValueError('visual attachment version changed')
+        # 与既有PDFProvider缓存键一致；先确认缓存存在，禁止回退重解析全文。
+        config_hash = sha256(json.dumps(self.pdf.parser_config, sort_keys=True).encode()).hexdigest()
+        cache_key = sha256(f'{item.pdf_sha256}:pymupdf:{self.pdf.parser_version}:{config_hash}'.encode()).hexdigest()
+        cache = files.cache_parse_path(cache_key)
+        if item.document_id != 'doc:' + cache_key[:32] or not cache.is_file():
+            raise ValueError('visual parsed cache identity missing or changed')
+        cached = json.loads(cache.read_text())
+        page = next((p for p in cached['pages'] if p['page_number'] == item.physical_page), None)
+        if not page or page['document_id'] != item.document_id or sha256(page['text'].encode()).hexdigest() != item.page_text_sha256:
+            raise ValueError('visual page text identity mismatch')
+        # 日常子节点已继承选中页，直接使用同版缓存；尤其不能因paper_id再次走网络获取。
+        retained = self.db.get_page(page['evidence_id']) if self.db.task_has_evidence(task_id, page['evidence_id']) else None
+        if retained:
+            if retained['document_id'] != item.document_id or retained['text'] != page['text']:
+                raise ValueError('visual authorized page differs from original cache')
+            first = {'document_id': item.document_id, 'content_sha256': item.pdf_sha256, 'pages': [retained]}
+        else:
+            first = self.read(task_id, item.target_ref, item.physical_page, 1, attachments)
+        if (first['document_id'], first['content_sha256']) != (item.document_id, item.pdf_sha256):
+            raise ValueError('visual source identity changed while reading')
+        text = first['pages'][0]['text']
+        if sha256(text.encode()).hexdigest() != item.page_text_sha256:
+            raise ValueError('visual text changed while reading')
+        rendered = PaperMediaProvider(files).render(pdf, item.pdf_sha256, item.physical_page, item.bbox)
+        manifest = {**item.model_dump(mode='json'), 'assets': rendered['assets'],
+                    'render_options': rendered['render_options'], 'evidence_id': first['pages'][0]['evidence_id'],
+                    'kind': 'model_observation', 'semantically_verified': False}
+        return {'input': item.model_dump(mode='json'), 'text': text, 'assets': rendered['assets'],
+                'manifest': manifest, 'render_seconds': rendered['render_seconds']}

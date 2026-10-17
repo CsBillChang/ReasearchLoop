@@ -129,7 +129,7 @@ class AdaptiveResearchTests(unittest.TestCase):
         from research_loop.main import app
         scenario = AdaptiveScenario(kind)
         executor = TaskExecutor(self.settings, self.db, scenario.factory, lambda s, f: FixturePDF())
-        with patch("research_loop.api.tasks.get_settings", return_value=self.settings), TestClient(app) as client:
+        with patch("research_loop.api.dependencies.get_settings", return_value=self.settings), TestClient(app) as client:
             response = client.post("/api/tasks", json={"prompt": "找三篇论文" if kind == "S" else "比较不同研究维度",
                 "save_policy": "allow" if kind == "C" else "deny"})
             self.assertEqual(response.status_code, 202)

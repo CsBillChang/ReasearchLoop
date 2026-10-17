@@ -169,12 +169,12 @@ class Database:
     def ensure_schema(self) -> None:
         """幂等创建基础表和索引；已有数据库的结构升级仍由显式迁移脚本管理。"""
         from research_loop.storage.memory import SCHEMA as MEMORY_SCHEMA
-        from research_loop.storage.product import SCHEMA as PRODUCT_SCHEMA
+        from research_loop.storage.continuations import SCHEMA as CONTINUATION_SCHEMA
         from research_loop.storage.evidence_index import SCHEMA as INDEX_SCHEMA
         from research_loop.storage.subscriptions import SCHEMA as SUBSCRIPTIONS_SCHEMA
         from research_loop.storage.token_budget import SCHEMA as TOKEN_SCHEMA
         from research_loop.storage.reading_list import SCHEMA as READING_SCHEMA
-        schema = SCHEMA + MEMORY_SCHEMA + PRODUCT_SCHEMA + INDEX_SCHEMA + SUBSCRIPTIONS_SCHEMA + TOKEN_SCHEMA + READING_SCHEMA
+        schema = SCHEMA + MEMORY_SCHEMA + CONTINUATION_SCHEMA + INDEX_SCHEMA + SUBSCRIPTIONS_SCHEMA + TOKEN_SCHEMA + READING_SCHEMA
         with self.connection() as conn:
             if self.kind == "sqlite":
                 conn.executescript(schema)
@@ -233,6 +233,7 @@ class Database:
             )
             if token_settings is not None and parent_task_id is None:
                 create_policy(tx, task_id, token_settings)
+                self.create_budget(tx, task_id, token_settings)
         for attachment in attachments or []:
             input_ref = attachment.get("input_ref") if isinstance(attachment, dict) else None
             if input_ref:
@@ -241,6 +242,41 @@ class Database:
                 except Exception:
                     # 旧 AG1 表结构由显式迁移升级；这里保留原有兼容分支，不隐式迁移。
                     pass
+
+    @staticmethod
+    def create_budget(tx, root_task_id: str, settings) -> None:
+        """在新根任务事务中冻结共享请求/工具额度；不更新任何历史策略。
+
+        Args:
+            tx: 创建该任务的事务，失败时任务和策略一并回滚。
+            root_task_id: 新根任务身份。
+            settings: 本次实例配置，收尾预留至少给根任务留一次执行机会。
+        """
+        limit = int(settings.max_model_requests)
+        tools = int(settings.max_tool_actions)
+        tail = max(0, min(int(settings.reserve_model_requests), limit - 1))
+        if limit < 1 or tools < 1:
+            raise ValueError('INVALID_REQUEST_BUDGET: 请求及工具上限必须为正数')
+        tx.execute('INSERT INTO task_budgets(root_task_id,model_limit,tool_limit,reserve_tail,created_at) VALUES(?,?,?,?,?)',
+                   (root_task_id, limit, tools, tail, _now()))
+
+    def assert_budget_policy(self, root_task_id: str, settings) -> dict:
+        """新验收发送前读回断言；只报告不一致，不替恢复任务改写旧策略。
+
+        Returns:
+            已验证的数据库共享策略及Token账本。
+
+        Raises:
+            ValueError: 实际策略缺失或与冻结配置不一致。
+        """
+        row = self.budget_summary(root_task_id)
+        expected = (settings.max_model_requests, settings.max_tool_actions,
+                    max(0, min(settings.reserve_model_requests, settings.max_model_requests - 1)))
+        actual = tuple((row or {}).get(k) for k in ('model_limit', 'tool_limit', 'reserve_tail'))
+        tokens = (row or {}).get('tokens') or {}
+        if actual != expected or (tokens.get('token_limit'), tokens.get('tail_tokens')) != (settings.task_token_limit, settings.task_token_tail):
+            raise ValueError('BUDGET_POLICY_MISMATCH: 数据库预算与冻结配置不一致，未授权发送')
+        return row
 
     def ensure_budget(self, root_task_id: str, model_limit: int = 48, tool_limit: int = 80,
                       reserve_tail: int = 10) -> None:
@@ -261,13 +297,20 @@ class Database:
                                (1 if role == "reviewer" else 0, root_task_id))
         return updated == 1
 
-    def reserve_tool_slot(self, root_task_id: str) -> bool:
-        """执行新工具动作前预留根任务额度；已持久化观察的恢复由调用方避免重复预留。"""
+    def reserve_tool_slot(self, root_task_id: str, reserve_tail: int = 0) -> bool:
+        """原子领取工具额度并保护收尾空间；恢复已有行动不重复领取。
+
+        Args:
+            root_task_id: 根任务身份。
+            reserve_tail: 本次行动不可占用的剩余槽位，不改变冻结总上限。
+        """
+        if reserve_tail < 0:
+            raise ValueError("reserve_tail must be nonnegative")
         budget = self.fetchone("SELECT * FROM task_budgets WHERE root_task_id=?", (root_task_id,))
         if not budget:
             return True
-        return self.execute("UPDATE task_budgets SET tool_used=tool_used+1 WHERE root_task_id=? AND tool_used < tool_limit",
-                            (root_task_id,)) == 1
+        return self.execute("UPDATE task_budgets SET tool_used=tool_used+1 WHERE root_task_id=? AND tool_used < tool_limit - ?",
+                            (root_task_id, reserve_tail)) == 1
 
     def budget_summary(self, root_task_id: str) -> dict[str, Any]:
         from research_loop.storage.token_budget import TokenBudgetStore

@@ -101,7 +101,7 @@ class ClarifiedPlanTests(unittest.TestCase):
         from research_loop.main import app
         scenario = ClarifiedScenario(count, note)
         executor = TaskExecutor(self.settings, self.db, scenario.factory, lambda s, f: FixturePDF())
-        with patch("research_loop.api.tasks.get_settings", return_value=self.settings), TestClient(app) as client:
+        with patch("research_loop.api.dependencies.get_settings", return_value=self.settings), TestClient(app) as client:
             payload = {"prompt": "生成一篇精读笔记并保存" if note else "先问数量再比较2025年CVPR原文，不保存",
                        "save_policy": "allow" if note else "deny", "idempotency_key": str(uuid4())}
             tid = client.post("/api/tasks", json=payload).json()["task_id"]

@@ -41,7 +41,7 @@ class ProductTests(unittest.TestCase):
         self.files=FileStore(self.s.data_dir,self.s.output_dir,root)
         self.notes=NoteService(self.db,self.files)
         from research_loop.main import app
-        for name in ['tasks','product','notes']:
+        for name in ['dependencies']:
             p=patch('research_loop.api.'+name+'.get_settings',return_value=self.s);p.start();self.addCleanup(p.stop)
         self.client=TestClient(app);self.addCleanup(self.client.close)
 
@@ -106,7 +106,7 @@ class ProductTests(unittest.TestCase):
         self.assertTrue(Path(json.loads(self.db.get_task(tid)['attachments_json'])[0]['local_path']).exists())
         self.assertEqual(self.client.post('/api/uploads',content=b'not pdf').status_code,422)
         small=self.s.model_copy(update={'max_pdf_bytes':3})
-        with patch('research_loop.api.product.get_settings',return_value=small):
+        with patch('research_loop.api.dependencies.get_settings',return_value=small):
             self.assertEqual(self.client.post('/api/uploads',content=raw).status_code,413)
         self.assertEqual(self.client.post('/api/tasks',json={'prompt':'x','attachments':[{'input_ref':'upload-../oops'}]}).status_code,422)
         self.assertEqual(self.client.post('/api/tasks',json={'prompt':'x','attachments':[{'input_ref':a['input_ref'],'url':'https://other.invalid'}]}).status_code,422)

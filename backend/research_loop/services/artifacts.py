@@ -1,29 +1,15 @@
-"""产品投影与上传：从权威任务/文件构建界面数据，不触发新的研究或模型请求。"""
+"""研究成果服务：授权原文、稿件、保存与上下文诊断投影，不触发模型请求。"""
 from __future__ import annotations
+
 import hashlib
 import json
-import re
-from pathlib import Path
 
+from research_loop.domain.tasks import SavePolicy
+from research_loop.services.notes import NoteService
 from research_loop.storage.files import FileStore
 
 
-def resolve_upload(settings, attachment):
-    """将服务器生成的上传身份绑定到已验证PDF，拒绝调用方替换路径或链接。"""
-    if not attachment.input_ref.startswith('upload-'):
-        return attachment
-    digest=attachment.input_ref[7:]
-    if not re.fullmatch('[a-f0-9]{64}',digest):
-        raise ValueError('无效上传身份')
-    path=settings.data_dir/'uploads'/f'{digest}.pdf'
-    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest()!=digest:
-        raise ValueError('上传文件不存在或已改变，请重新上传')
-    if attachment.url or (attachment.local_path and Path(attachment.local_path).resolve()!=path.resolve()):
-        raise ValueError('上传身份不能替换为其他路径')
-    return attachment.model_copy(update={'local_path':str(path)})
-
-
-class ProductService:
+class ArtifactService:
     """单用户产品查询；文件访问通过任务中的授权身份，不开放任意路径。"""
 
     def __init__(self, db, settings):
@@ -96,17 +82,55 @@ class ProductService:
         return {**draft,'saved':bool(self.db.get_receipt(draft_id,draft['content_hash'])),
                 'verification':verification}
 
+    def save_draft(self, task_id: str, draft_id: str, content_hash: str) -> dict:
+        """保存用户已明确确认的终态稿件，并验证当前版本、冲突与幂等收据。
 
-def public_event(event):
-    """仅向SSE公开可理解的行动摘要，原始工具观察/请求/推理保留在后端审计。"""
-    payload=event['payload']
-    if event['event_type']=='answer_stream':
-        data={k:payload[k] for k in ('stream_key','request_number','text','provisional') if k in payload}
-    elif event['event_type']=='observation':
-        obs=payload.get('observation') or {}
-        data={'tool':payload.get('tool'),'ok':obs.get('ok'),'message':obs.get('message','')[:300]}
-    elif event['event_type']=='task_finished':
-        data={'status':payload.get('status')}
-    else:
-        data={'status':payload.get('status')} if payload.get('status') else {}
-    return {'id':event['event_id'],'type':event['event_type'],'data':data}
+        Args:
+            task_id: 稿件所属的根任务。
+            draft_id: 用户当前看到的稿件身份。
+            content_hash: 用户确认时绑定的精确内容版本。
+
+        Returns:
+            保存收据；旧任务的保存权限不会被这次操作改写。
+
+        Raises:
+            KeyError: 稿件不属于任务。
+            ValueError: 任务仍在执行、稿件已过期或版本不匹配。
+        """
+        row = self.draft(task_id, draft_id)
+        task = self.db.get_task(task_id)
+        if task['status'] not in {'completed', 'partial', 'failed', 'cancelled'}:
+            raise ValueError('任务仍在运行')
+        latest = self.db.fetchone(
+            'SELECT draft_id FROM drafts WHERE task_id=? ORDER BY created_at DESC,draft_id DESC LIMIT 1',
+            (task_id,),
+        )
+        if not latest or latest['draft_id'] != draft_id:
+            raise ValueError('草稿已过期，请刷新')
+        if row['content_hash'] != content_hash:
+            raise ValueError('版本已过期')
+        result = NoteService(self.db, self.files).save(task_id, SavePolicy.allow, draft_id, content_hash)
+        if result.status != 'already_saved':
+            self.db.append_event(task_id, 'user_saved_note', {'draft_id': draft_id, 'content_hash': content_hash})
+        return result.model_dump(mode='json')
+
+
+    def context(self, task_id: str):
+        """返回实际请求使用的记忆与压缩指标，不公开模型推理或整份messages。"""
+        if not self.db.get_task(task_id):raise KeyError('任务不存在')
+        memories=[]
+        for call in self.db.list_model_calls(task_id):
+            request=json.loads(call.get('request_json') or '{}')
+            for message in request.get('messages',[]):
+                content=message.get('content')
+                if isinstance(content,str) and content.startswith('[ResearchLoop Memory v1]'):
+                    start=content.find('\n{')
+                    if start>=0:
+                        try:
+                            data=json.loads(content[start+1:])
+                            memories.append({'request_number':call['sequence_no'],'preferences':data.get('preferences',{}),'related_research':data.get('related_history',[]),'history_readback':data.get('older_messages_readback')})
+                        except ValueError:pass
+        checkpoint=self.db.fetchone('SELECT state_json FROM checkpoints WHERE task_id=?',(task_id,))
+        state=json.loads(checkpoint['state_json']) if checkpoint else {}
+        return {'memory_usage':memories,'compression':state.get('context_metrics',{}),'note':'历史研究和偏好不是原文证据，也不授予保存权限'}
+

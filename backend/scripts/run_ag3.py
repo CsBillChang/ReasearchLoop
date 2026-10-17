@@ -58,7 +58,7 @@ def run(output: Path, case: str) -> None:
     if sha256(pdf.read_bytes()).hexdigest()!=freeze['pdf_sha256']:
         raise ValueError('source PDF changed')
     db=Database(settings.database_url);db.ensure_schema()
-    with patch('research_loop.api.tasks.get_settings', return_value=settings),TestClient(app) as client:
+    with patch('research_loop.api.dependencies.get_settings', return_value=settings),TestClient(app) as client:
         payload={'prompt':PROMPTS[case],'save_policy':'allow' if case=='T1' else 'deny','idempotency_key':str(output)+'-'+case,
                  'attachments':[{'input_ref':'RARR','local_path':str(pdf),'paper_id':'RARR-fixed-source'}]}
         response=client.post('/api/tasks',json=payload);response.raise_for_status();task=response.json()['task_id']

@@ -37,7 +37,7 @@ def main():
     def factory(s):
         return Counted(s.deepseek_api_key,s.deepseek_model,s.deepseek_base_url,s.request_timeout_seconds)
     from research_loop.main import app
-    patches=[patch('research_loop.api.'+n+'.get_settings',return_value=settings) for n in ('tasks','product','notes')]
+    patches=[patch('research_loop.api.'+n+'.get_settings',return_value=settings) for n in ('dependencies',)]
     for p in patches:p.start()
     results=[]
     try:

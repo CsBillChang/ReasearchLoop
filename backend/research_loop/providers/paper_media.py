@@ -1,8 +1,8 @@
 """DPR 图表提取适配：可选 PaperCropper，失败回退 PyMuPDF 内嵌图片。
 
 调用参数、降级次序及图片尺寸过滤改编自 daily-paper-reader/src/paper_figures.py，
-MIT 许可见 docs/licenses/daily-paper-reader.txt。宿主新增 PDF/hash/页授权绑定，
-保留原始 PNG/图片字节，不引入 Pillow/WebP、图像理解模型或 Docling。
+MIT 许可见 THIRD_PARTY_NOTICES.md。宿主新增 PDF/hash/页授权绑定与定向页图渲染，
+保留原始 PNG/图片字节；本适配器不调用图像理解模型或 Docling。
 """
 from __future__ import annotations
 
@@ -107,6 +107,61 @@ class PaperMediaProvider:
                       'PyMuPDF 回退不保证提取矢量表格/公式；PaperCropper未知页码和bbox为null。']}
         self.files.write_bytes_atomic(manifest, json.dumps(result, ensure_ascii=False).encode())
         return result
+
+    def render(self, pdf_path: Path, pdf_hash: str, page_number: int,
+               bbox: tuple[float, float, float, float] | None = None) -> dict:
+        """渲染一个授权页及可选区域；保留文字、矢量图形和原PDF坐标。
+
+        Args:
+            pdf_path: 读取服务提供的本机缓存文件。
+            pdf_hash: 冻结的PDF字节hash。
+            page_number: 1起算物理页，权限须由服务层检查。
+            bbox: 可选归一化区域，不接受越界或空矩形。
+
+        Returns:
+            图片清单与渲染版本/参数；不包含模型解释。
+        """
+        import time
+        from research_loop.domain.visual_reading import VisualInput
+        started = time.perf_counter()
+        if type(page_number) is not int or page_number < 1:
+            raise ValueError('invalid physical page')
+        VisualInput.valid_bbox(bbox)
+        payload = pdf_path.read_bytes()
+        if sha256(payload).hexdigest() != pdf_hash:
+            raise ValueError('PDF hash mismatch')
+        options = {'full_page_long_side': 1800, 'crop_dpi': 200, 'colorspace': 'RGB',
+                   'alpha': False, 'annots': False, 'pymupdf': fitz.VersionBind}
+        key = sha256(json.dumps([pdf_hash, page_number, bbox, options], sort_keys=True).encode()).hexdigest()
+        folder = self.files.cache_dir / 'visual' / key
+        assets = []
+        # 同一份已校验字节用于打开，避免hash校验后文件被替换。
+        with fitz.open(stream=payload, filetype='pdf') as document:
+            if page_number > len(document):
+                raise ValueError('physical page exceeds PDF')
+            page = document[page_number - 1]
+            page_rect = page.rect
+            rectangles = [('page', page_rect)]
+            if bbox is not None:
+                x0, y0, x1, y1 = bbox
+                rectangles.append(('region', fitz.Rect(
+                    page_rect.x0 + x0 * page_rect.width, page_rect.y0 + y0 * page_rect.height,
+                    page_rect.x0 + x1 * page_rect.width, page_rect.y0 + y1 * page_rect.height)))
+            for kind, rect in rectangles:
+                scale = 1800 / max(page_rect.width, page_rect.height) if kind == 'page' else 200 / 72
+                if max(rect.width, rect.height) * scale > 8192:
+                    raise ValueError('render exceeds provider image dimension limit')
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=rect,
+                                      colorspace=fitz.csRGB, alpha=False, annots=False)
+                image = pix.tobytes('png')
+                asset = self._asset(folder, image, 'png', kind, page_number, list(rect))
+                # page.rect/clip采用旋转后的页面坐标；同时保留逆变换后PDF页坐标。
+                asset.update(width=pix.width, height=pix.height, bytes=len(image),
+                             pdf_bbox=list(rect * page.derotation_matrix), page_rotation=page.rotation,
+                             coordinate_system='pymupdf_page_rect', pdf_sha256=pdf_hash)
+                assets.append(asset)
+        return {'assets': assets, 'render_options': options,
+                'render_seconds': time.perf_counter() - started, 'model_received_images': False}
 
     def _asset(self, folder: Path, payload: bytes, extension: str, kind: str, page: int | None, bbox: list | None) -> dict:
         """按内容 hash 原子缓存图片；页码仅取可信 PDF API，不从文件排序推断。"""

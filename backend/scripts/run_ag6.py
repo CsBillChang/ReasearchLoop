@@ -357,7 +357,7 @@ class EvaluationRunner:
         """单次串行运行场景；每场景内部仍允许业务Researcher并行。"""
         from research_loop.main import app
         with ExitStack() as stack:
-            for module in ['tasks', 'product', 'notes']:
+            for module in ['dependencies']:
                 stack.enter_context(patch(f'research_loop.api.{module}.get_settings', return_value=self.settings))
             client = stack.enter_context(TestClient(app))
             for case in self.manifest['cases']:

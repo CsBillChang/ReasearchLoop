@@ -27,6 +27,110 @@ class CoverageService:
                 return (action.get("observation") or {}).get("data", {}).get("research_plan")
         return None
 
+    def normalize_references(self, task_id: str, spec: dict) -> dict:
+        """只把当前任务唯一绑定的附件别名规范为input_ref，不授予新权限。
+
+        Args:
+            task_id: 持有附件或论文授权的父任务。
+            spec: 模型分派参数；不原地修改旧行动记录。
+
+        Returns:
+            引用去重、排序后的副本，可用于稳定幂等键。
+
+        Raises:
+            PermissionError: 外来引用、附件已失权或同一别名绑定多个版本。
+        """
+        task = self.db.get_task(task_id)
+        attachments = json.loads(task['attachments_json'])
+        inputs = list(spec.get('input_refs') or [])
+        papers = []
+        for ref in spec.get('paper_ids') or []:
+            matches = [a['input_ref'] for a in attachments if a.get('paper_id') == ref]
+            if len(set(matches)) > 1:
+                raise PermissionError('ambiguous attachment paper_id; use exact input_ref: ' + ref)
+            if matches:
+                inputs.append(matches[0])
+            elif self.db.task_has_paper(task_id, ref):
+                papers.append(ref)
+            else:
+                raise PermissionError('cannot delegate an unauthorized paper: ' + ref)
+        bound = {a['input_ref'] for a in attachments}
+        for ref in inputs:
+            if ref not in bound or not self.db.task_has_input(task_id, ref):
+                raise PermissionError('cannot delegate an unauthorized attachment: ' + ref)
+        return {**spec, 'paper_ids': sorted(set(papers)), 'input_refs': sorted(set(inputs))}
+
+    def current_context(self, task_id: str, state: dict) -> dict:
+        """从持久业务记录装配不可被旧工具摘要替代的任务状态。
+
+        Args:
+            task_id: 当前根任务身份，不读取其他任务的授权页。
+            state: 当前图状态，仅用于定位候选稿和待执行调用；权限以库为准。
+
+        Returns:
+            原始要求、有效澄清、计划、当前稿身份及已授权证据位置。
+            页索引不是原文，也不因出现在上下文中而授予新权限。
+        """
+        import hashlib
+        from research_loop.services.research_progress import ResearchProgressService
+        from research_loop.agents.reflection import ReflectionService
+        progress = ResearchProgressService(self.db)
+        task = self.db.get_task(task_id)
+        if not task:
+            raise ValueError("CONTEXT_TASK_MISSING: current task is unavailable")
+        plan = self.plan(task_id)
+        answer = self._latest_answer(task_id)
+        # 成功行动可能早于checkpoint落盘；新请求优先沿用已落库的新稿身份。
+        draft_id = state.get("draft_id")
+        for action in reversed(self.db.list_actions(task_id)):
+            candidate = (action.get("observation") or {}).get("data", {}).get("draft_id")
+            if action["status"] == "succeeded" and candidate and action["tool_name"] in {"create_note", "revise_note"}:
+                draft_id = candidate
+                break
+        draft = self.db.get_draft(draft_id) if draft_id else None
+        draft_valid = bool(draft and draft["task_id"] == task_id)
+        receipt = self.db.get_receipt(draft_id, draft["content_hash"]) if draft_valid else None
+        refs = set(self.db.list_task_evidence(task_id))
+        pages = []
+        unavailable = set(state.get("evidence_ids") or []) - refs
+        for ref in sorted(refs):
+            page = self.db.get_page(ref)
+            doc = self.db.fetchone("SELECT * FROM documents WHERE document_id=?", (page["document_id"],)) if page else None
+            if not page or not doc:
+                unavailable.add(ref)
+                continue
+            pages.append({"evidence_id": ref, "document_id": doc["document_id"],
+                          "paper_id": doc["paper_id"], "page_number": page["page_number"],
+                          "source_sha256": doc["content_sha256"],
+                          "text_sha256": hashlib.sha256(page["text"].encode()).hexdigest()})
+        return {"task_id": task_id, "user_request": task["prompt"],
+                "save_policy": task["save_policy"], "latest_clarification": answer,
+                "research_progress": progress.retained(task_id),
+                "research_reviews": ReflectionService(self.db).research_context(task_id),
+                "research_plan": plan,
+                "plan_needs_update": bool(answer and (not plan or plan.get("clarification_id") != answer["clarification_id"])),
+                "attachments": [{**{k: a.get(k) for k in ("input_ref", "paper_id", "filename")},
+                                 "delegate_using": {"input_refs": [a['input_ref']]},
+                                 "notice": "paper_id仅为附件别名；用当前input_ref委派及读取"}
+                                for a in json.loads(task["attachments_json"])],
+                "current_draft": ({k: draft[k] for k in ("draft_id", "content_hash", "status", "evidence_ids")}
+                                  if draft_valid else None),
+                "unavailable_draft_id": draft_id if draft_id and not draft_valid else None,
+                "save_status": task.get("save_status"),
+                "save_receipt": ({k: receipt.get(k) for k in ("receipt_id", "draft_id", "content_hash", "status")}
+                                 if receipt else None),
+                "subtasks": [{"subtask_id": child["subtask_id"], "status": child["status"],
+                              "goal_ids": child["spec"].get("goal_ids", []),
+                              "research_progress": progress.retained(child["subtask_id"]),
+                              # 旧往返压缩后仍保留真实停止原因；已读身份不参与完成门判断。
+                              "stop_reason": ((child.get('result') or {}).get('result') or {}).get('stop_reason'),
+                              "read_paper_ids": ((child.get('result') or {}).get('result') or {}).get('read_paper_ids', []),
+                              "objective": child["objective"]} for child in self.db.list_subtasks(task_id)],
+                "pending_tool_calls": [{k: c.get(k) for k in ("call_id", "name", "arguments")}
+                                       for c in state.get("pending_tool_calls", [])],
+                "authorized_evidence": pages, "unavailable_evidence_ids": sorted(unavailable),
+                "notice": "当前任务/权限/目标ID以本记录为准。位置索引不是原文内容；旧摘要不替代证据。"}
+
     def prepare_plan(self, task_id: str, brief: ResearchBrief) -> dict:
         """依据有效用户回答更新计划；没有新回答时禁止模型削弱既定范围。
 
@@ -171,6 +275,10 @@ class CoverageService:
             raise ValueError("finish_task must account for every goal exactly once; "
                              f"expected goal_ids={list(expected)}, received={actual}. "
                              "Use the current plan IDs; report unfinished goals as unresolved. Do not reread history to guess IDs.")
+        from research_loop.agents.reflection import ReflectionService
+        reviews = ReflectionService(self.db).research_context(task_id)
+        unsuitable = {f['item_id'] for review in reviews if review['target']['target_type'] == 'candidates'
+                      for f in review.get('findings', []) if f.get('suitability') == 'unsuitable'}
         children = {c["subtask_id"]: c for c in self.db.list_subtasks(task_id)}
         if plan.get("task_kind") == "memory" and not any(a["status"] == "succeeded" and a["tool_name"] in {"remember_preference", "forget_preference", "search_memory", "read_memory", "get_profile", "update_saved_note"} for a in self.db.list_actions(task_id)):
             raise ValueError("memory任务必须有真实记忆操作或读回，不能只声称已经记住")
@@ -227,6 +335,7 @@ class CoverageService:
                     if expected[item.goal_id]["requires_fulltext"] and paper_id not in read_ids:
                         continue
                     matched.add(paper_id)
+            matched.difference_update(unsuitable)
             if item.status == "satisfied" and len(matched) < expected[item.goal_id]["min_papers"]:
                 if not item.subtask_ids and children:
                     raise ValueError(f"goal {item.goal_id} missing subtask_ids; bind supporting existing child IDs first: {list(children)}. Do not retrieve again merely because the IDs were omitted.")
@@ -242,8 +351,56 @@ class CoverageService:
         if payload.draft_id and (not draft or draft["task_id"] != task_id):
             raise ValueError("draft_id must belong to this task")
         answer = draft["markdown"] if draft else payload.answer_markdown
-        if not answer or not answer.strip():
+        if not payload.reflection_target_id and (not answer or not answer.strip()):
             raise ValueError("deliver an answer or retained findings, even when partial")
+        from research_loop.agents.reflection import ReflectionService
+        reflection = ReflectionService(self.db)
+        reviews = reflection.research_context(task_id)
+        if bool(payload.reflection_target_id) != bool(payload.reflection_content_hash):
+            raise ValueError('reflection_target_id/hash must be provided together')
+        if payload.reflection_target_id:
+            record = reflection.research_target(task_id, payload.reflection_target_id, payload.reflection_content_hash)
+            target = record['current']
+            if draft or target['target_type'] != 'answer':
+                raise ValueError('reflection delivery requires an answer snapshot, without draft_id')
+            reviewed_answer = target['items'][0]['text']
+            if payload.answer_markdown is not None and payload.answer_markdown != reviewed_answer:
+                raise ValueError('answer differs from selected current reflection snapshot; omit answer_markdown '
+                                 'when delivering the bound snapshot, put processing notes in processing_summary '
+                                 'and unresolved goals in goals[].reason; use revise_research for actual text changes')
+            answer = reviewed_answer
+        # 仅已选择的核验结果随交付展示；不强制其他任务调用Reviewer。
+        answer_body = answer
+        notices = []
+        for review in reviews:
+            if review.get('quality_status') != 'supported':
+                decision = (review.get('decisions') or [{}])[-1]
+                notices.append({'target_id': review['target_id'], 'quality_status': review['quality_status'],
+                    'goal_ids': review['target'].get('goal_ids', []), 'issues': review.get('issues', []),
+                    'disposition': decision})
+                if decision.get('action') != 'exclude':
+                    pending = review.get('pending_checks', [])
+                    execution_errors = [c.get('execution_error') for c in pending if c.get('execution_error')]
+                    reasons = [f.get('reason', '') for check in pending for f in check.get('findings', [])]
+                    reason = decision.get('reason') or '；'.join(dict.fromkeys(r for r in reasons if r)) or '所选内容仍有待核实事项'
+                    if execution_errors:
+                        # 技术诊断来自持久行动；模型的结束说明不能替代实际错误因果。
+                        details = []
+                        for error in execution_errors:
+                            first = error.get('first_error')
+                            details.append((f"首个工具错误[{first['tool_name']}]：{first['message']}；" if first else '')
+                                           + '最后停止：' + error['stop_reason'])
+                        reason = '独立核验执行未完成，已有正文保留；' + '；'.join(details) + '。未获得语义结论，不能据此认定原文缺证或答案错误。'
+                    notices[-1]['message'] = reason
+                    answer += '\n\n核验范围说明：' + reason
+                    # 仅显式绑定的必要目标受此缺口影响；可选材料局限不强制整项失败。
+                    for goal in resolved:
+                        if goal['goal_id'] in review['target'].get('goal_ids', []):
+                            goal['status'] = 'unresolved'
+                            goal['reason'] = reason
+                            gaps.append(expected[goal['goal_id']]['description'] + '：' + reason)
+        if not answer or not answer.strip():
+            raise ValueError('deliver readable retained work, including when reflection is incomplete')
         receipt = self.db.get_receipt(draft["draft_id"], draft["content_hash"]) if draft else None
         from research_loop.services.notes import NoteService
         # 聊天答复和笔记附件是不同产物；只用当前稿的真实、完整收据满足保存目标。
@@ -257,8 +414,12 @@ class CoverageService:
         if payload.matrix_hash:
             from research_loop.services.evidence_matrix import EvidenceMatrixService
             matrix = EvidenceMatrixService(self.db).delivery_ref(task_id, payload.matrix_hash)
-        return {"answer_markdown": answer, "draft_id": payload.draft_id, "note_artifacts": artifacts,
-                "evidence_matrix": matrix,
+        summary = payload.processing_summary
+        if summary and summary.strip():
+            answer += '\n\n处理说明：' + summary
+        return {"answer_markdown": answer, "answer_body_markdown": answer_body,
+                "processing_summary": summary, "draft_id": payload.draft_id, "note_artifacts": artifacts,
+                "evidence_matrix": matrix, "research_reviews": reviews, "review_notices": notices,
                 "saved_path": receipt["path"] if receipt else None,
                 "coverage": {"plan": plan, "goals": resolved, "paper_ids": sorted(paper_ids)},
                 "gaps": gaps, "status": "partial" if gaps else "completed"}

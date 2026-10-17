@@ -123,7 +123,7 @@ def summary_checks(settings: Settings, db: Database, out: Path) -> None:
 
 def search_check(settings: Settings, db: Database, out: Path) -> None:
     """原样提交用户检索要求，使用真实API及定向Worker，不人工选候选。"""
-    with patch('research_loop.api.tasks.get_settings', return_value=settings), TestClient(app) as client:
+    with patch('research_loop.api.dependencies.get_settings', return_value=settings), TestClient(app) as client:
         response = client.post('/api/tasks', json={'prompt': SEARCH_PROMPT,
             'idempotency_key': 'dpr-followup-cvpr-remote-sensing-20261009', 'save_policy': 'deny'})
         response.raise_for_status()

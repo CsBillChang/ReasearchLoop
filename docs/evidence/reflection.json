@@ -1,0 +1,124 @@
+{
+  "scope": {
+    "drafts": 4,
+    "claim_slots": 8,
+    "labels": "reused development-agent source review; no new human annotation; arithmetic cannot establish semantic correctness",
+    "design": "controlled verification/local-edit component; not autonomous end-to-end causal ablation"
+  },
+  "claims": [
+    {
+      "draft_id": "F1",
+      "slot": 1,
+      "before": "supported",
+      "after": "supported",
+      "original_supported_text_preserved": true
+    },
+    {
+      "draft_id": "F1",
+      "slot": 2,
+      "before": "supported",
+      "after": "supported",
+      "original_supported_text_preserved": true
+    },
+    {
+      "draft_id": "F2",
+      "slot": 1,
+      "before": "contradicted",
+      "after": "supported",
+      "original_supported_text_preserved": null
+    },
+    {
+      "draft_id": "F2",
+      "slot": 2,
+      "before": "supported",
+      "after": "supported",
+      "original_supported_text_preserved": true
+    },
+    {
+      "draft_id": "F3",
+      "slot": 1,
+      "before": "contradicted",
+      "after": "supported",
+      "original_supported_text_preserved": null
+    },
+    {
+      "draft_id": "F3",
+      "slot": 2,
+      "before": "supported",
+      "after": "supported",
+      "original_supported_text_preserved": true
+    },
+    {
+      "draft_id": "F4",
+      "slot": 1,
+      "before": "insufficient",
+      "after": "bounded_disclosure",
+      "original_supported_text_preserved": null
+    },
+    {
+      "draft_id": "F4",
+      "slot": 2,
+      "before": "supported",
+      "after": "supported",
+      "original_supported_text_preserved": true
+    }
+  ],
+  "expected_transitions": {
+    "supported -> supported": 5,
+    "contradicted -> supported": 2,
+    "insufficient -> bounded_disclosure": 1
+  },
+  "expected_preserved_supported": 5,
+  "component_accounting": {
+    "physical_requests": 17,
+    "tokens": {
+      "prompt_tokens": 660996,
+      "completion_tokens": 20194,
+      "total_tokens": 681190
+    },
+    "unknown": 0,
+    "provider_failures": 0,
+    "phases": [
+      {
+        "phase": "final_review",
+        "physical_requests": 7,
+        "tokens": {
+          "prompt_tokens": 259934,
+          "completion_tokens": 9375,
+          "total_tokens": 269309
+        }
+      },
+      {
+        "phase": "initial_review",
+        "physical_requests": 7,
+        "tokens": {
+          "prompt_tokens": 290110,
+          "completion_tokens": 8633,
+          "total_tokens": 298743
+        }
+      },
+      {
+        "phase": "revision",
+        "physical_requests": 3,
+        "tokens": {
+          "prompt_tokens": 110952,
+          "completion_tokens": 2186,
+          "total_tokens": 113138
+        }
+      }
+    ]
+  },
+  "prior_full_loop": {
+    "drafts": 4,
+    "claim_slots": 8,
+    "partial_tasks": 4,
+    "patches": 0,
+    "physical_requests": 32,
+    "tokens": {
+      "prompt_tokens": 564302,
+      "completion_tokens": 46813,
+      "total_tokens": 611115
+    },
+    "comparison_limit": "different execution design; retain failure separately, no pooled success rate"
+  }
+}

@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import base64
+from copy import deepcopy
+import hashlib
 import json
+import struct
 from research_loop.storage.memory import Transaction, digest, dump
 from research_loop.storage.mysql import _now
 
@@ -29,8 +33,73 @@ def create_policy(tx: Transaction, root: str, settings) -> None:
 
 
 def estimate_request(request: dict) -> int:
-    """保守估算发送载荷和最大输出；协议额外留1024，不冒充精确tokenizer。"""
-    return len(dump({'messages': request['messages'], 'tools': request.get('tools', [])}).encode('utf-8')) + 1024 + int(request['max_tokens'])
+    """返回保守输入/输出预留；旧文字结果逐值保持，图片按独立规则计量。"""
+    return estimate_details(request)['reserved_tokens']
+
+
+def estimate_details(request: dict) -> dict:
+    """识别可信PNG图片块，隔离传输字节与Token计量。
+
+    Args:
+        request: 冻结请求；只有官方deepseek-flash的user内联PNG启用图片分支。
+
+    Returns:
+        预留值、方法、图片数与传输字节；不是供应商实际usage。
+
+    Raises:
+        ValueError: 图片损坏、来源/模型不支持或超出官方传输限制。
+    """
+    original = {'messages': request['messages'], 'tools': request.get('tools', [])}
+    has_images = any(isinstance(m.get('content'), list) and any(
+        isinstance(b, dict) and b.get('type') == 'image_url' for b in m['content']) for m in original['messages'])
+    if not has_images:
+        # 日常文字路线保持原公式和单次序列化，不因实验组件复制大型上下文。
+        size = len(dump(original).encode('utf-8'))
+        return {'reserved_tokens': size + 1024 + int(request['max_tokens']),
+                'method': 'utf8_bytes_plus_1024_plus_output', 'image_count': 0,
+                'image_tokens_upper_bound': 0, 'transport_bytes': size}
+    projected = deepcopy(original)
+    images = 0
+    for message in projected['messages']:
+        content = message.get('content')
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get('type') != 'image_url':
+                continue
+            if message.get('role') != 'user' or request.get('model') != 'deepseek-flash':
+                raise ValueError('image Token estimate requires deepseek-flash user images')
+            image = block.get('image_url') or {}
+            url = image.get('url', '')
+            prefix = 'data:image/png;base64,'
+            if not url.startswith(prefix) or image.get('detail') != 'original':
+                raise ValueError('only inline PNG detail=original is supported')
+            if len(url) > 32 * 1024 * 1024 * 4 // 3 + len(prefix) + 4:
+                raise ValueError('image exceeds inline byte limit')
+            try:
+                data = base64.b64decode(url[len(prefix):], validate=True)
+                if len(data) > 32 * 1024 * 1024 or data[:8] != b'\x89PNG\r\n\x1a\n' or data[12:16] != b'IHDR':
+                    raise ValueError('invalid PNG header')
+                width, height = struct.unpack('>II', data[16:24])
+                if not (0 < width <= 8192 and 0 < height <= 8192):
+                    raise ValueError('PNG dimensions exceed limit')
+                import fitz
+                decoded = fitz.Pixmap(data)
+                if (decoded.width, decoded.height) != (width, height):
+                    raise ValueError('PNG decode dimensions mismatch')
+            except Exception as exc:
+                raise ValueError('invalid inline PNG: ' + type(exc).__name__) from exc
+            images += 1
+            # 只改估算副本，原始载荷/hash/收据保留base64原件。
+            image['url'] = 'png-sha256:' + hashlib.sha256(data).hexdigest()
+    wire_bytes = len(dump({'messages': request['messages'], 'tools': request.get('tools', [])}).encode('utf-8'))
+    if images and wire_bytes > 48 * 1024 * 1024:
+        raise ValueError('image request exceeds transport byte limit')
+    text_bytes = len(dump(projected).encode('utf-8'))
+    # 2026-10-17官方Vision每图上限1024，按上限保守预留而非猜测压缩后尺寸。
+    return {'reserved_tokens': text_bytes + 1024 + int(request['max_tokens']) + images * 1024,
+            'method': 'utf8_bytes_plus_1024_plus_output' if not images else 'text_utf8_plus_image_upper_bound_1024_plus_output',
+            'image_count': images, 'image_tokens_upper_bound': images * 1024, 'transport_bytes': wire_bytes}
 
 
 def actual_usage(usage: dict) -> int | None:

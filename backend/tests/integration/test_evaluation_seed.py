@@ -30,7 +30,7 @@ class EvaluationSeedTests(unittest.TestCase):
                             data_dir=root/'data',output_dir=root/'notes')
             db=Database(config.database_url);db.ensure_schema()
             corpus={'documents':[{'key':'sample','material':{'path':str(pdf),'paper_id':'sample-paper'}}]}
-            with patch('research_loop.api.tasks.get_settings',return_value=config),TestClient(app) as client:
+            with patch('research_loop.api.dependencies.get_settings',return_value=config),TestClient(app) as client:
                 tid,draft=seed_case(client,db,config,{'id':'seed-contract','material':'sample','markdown':'已有短稿'},'核验当前稿，不保存',corpus)
             event=next(e['payload'] for e in db.list_events(tid) if e['event_type']=='feedback_draft_bound')
             self.assertTrue(event['evidence_ids'])

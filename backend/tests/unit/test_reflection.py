@@ -39,7 +39,10 @@ class ReflectionTests(unittest.TestCase):
             self.calls.append(n)
             return {'review_id': str(uuid4()), 'task_id': self.task, 'draft_id': draft['draft_id'],
                     'content_hash': draft['content_hash'], 'status': status,
-                    'findings': [{'claim': '错误句。', 'status': 'contradicted', 'reason': 'fixture source', 'evidence_ids': []} for _ in range(count)], 'gaps': []}
+                    'findings': [{'claim': '错误句。' if i == 0 else f'具体主张{i}',
+                                  'status': 'contradicted' if i < count else 'supported',
+                                  'reason': 'fixture source', 'evidence_ids': []}
+                                 for i in range(max(count, 3) if count else 0)], 'gaps': []}
         return self.service.review(self.task, draft['draft_id'], draft['content_hash'], '核验具体陈述', refs or [], questions or [], execute)
 
     def patch(self, review, old='错误句。', new='修正句。', draft=None):

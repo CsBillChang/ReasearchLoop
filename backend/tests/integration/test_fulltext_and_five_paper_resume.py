@@ -219,7 +219,7 @@ class FivePaperResumeTests(unittest.TestCase):
                 path.write_bytes(b'%PDF-fixture')
                 attachments.append({'input_ref':f'p{n}','local_path':str(path)})
             from research_loop.main import app
-            with patch('research_loop.api.tasks.get_settings',return_value=settings),TestClient(app) as client:
+            with patch('research_loop.api.dependencies.get_settings',return_value=settings),TestClient(app) as client:
                 created = client.post('/api/tasks',json={'prompt':prompt,'save_policy':'deny',
                                                         'attachments':attachments}).json()
                 task_id = created['task_id']

@@ -47,7 +47,7 @@ class TaskService:
             raise exc
         for attachment in payload.attachments:
             self.db.grant_input(task_id, attachment.input_ref, task_id)
-        self.db.ensure_budget(task_id)
+        # 请求/Token策略已和新任务原子创建；幂等恢复不得回填或改写旧策略。
         self.db.append_event(task_id, "task_created", {"status": "queued", "root_task_id": task_id})
         return self.view(self.db.get_task(task_id))
 

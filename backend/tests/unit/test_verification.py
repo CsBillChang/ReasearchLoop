@@ -129,3 +129,26 @@ class VerificationTests(unittest.TestCase):
         self.assertIs(finish_spec(False).args_model, LegacyFinishReviewArgs)
         LegacyFinishReviewArgs.model_validate(old)
         with self.assertRaises(ValueError): FinishReviewArgs.model_validate(old)
+
+    def test_optional_invalid_quote_keeps_unverified_findings(self):
+        """普通研究保留候选，不把错误引句放行或把候选标为核验通过。"""
+        ctx=SimpleNamespace(task_id=self.tid,services={'papers':self.papers,'scope':{'mode':'investigate'}})
+        self.db.grant_paper(self.tid,'fixture','test')
+        args=FinishResearchArgs(findings=['待核对候选'],paper_ids=['fixture'],evidence_ids=[self.ref],
+            assessments=[self.assessment(source_quote='The encoder ... four layers.')])
+        out=_finish(args,ctx)
+        self.assertEqual(out.data['status'],'partial')
+        self.assertEqual(out.data['findings'],['待核对候选'])
+        self.assertEqual(out.data['assessments'][0]['status'],'insufficient')
+        self.assertIsNone(out.data['assessments'][0]['source_quote'])
+        self.assertIn('assessment[0]',out.data['gaps'][0])
+        self.assertEqual(args.assessments[0].source_quote,'The encoder ... four layers.')
+        ctx.services['scope']['verification_claims']=[args.assessments[0].claim]
+        with self.assertRaises(ValueError):_finish(args,ctx)
+
+    def test_optional_foreign_evidence_still_rejected(self):
+        """候选保留不能绕过源授权，也不能将越权误报为普通缺证。"""
+        ctx=SimpleNamespace(task_id=self.tid,services={'papers':self.papers,'scope':{'mode':'investigate'}})
+        args=FinishResearchArgs(status='partial',findings=['候选'],evidence_ids=[self.ref],
+            assessments=[self.assessment(evidence_ids=['foreign'])])
+        with self.assertRaises(PermissionError):_finish(args,ctx)

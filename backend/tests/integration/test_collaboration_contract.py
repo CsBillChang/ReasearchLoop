@@ -79,7 +79,7 @@ class CollaborationContractTests(unittest.TestCase):
     def run_scenario(self,verdict):
         from research_loop.main import app
         scenario=Scenario(verdict);executor=TaskExecutor(self.settings,self.db,scenario.factory,lambda s,f:FixturePDF())
-        with patch('research_loop.api.tasks.get_settings',return_value=self.settings),TestClient(app) as client:
+        with patch('research_loop.api.dependencies.get_settings',return_value=self.settings),TestClient(app) as client:
             tid=self.create(client);executor.execute(tid)
             q=client.get(f'/api/tasks/{tid}').json()['clarification']
             res=client.post(f'/api/tasks/{tid}/resume',json={'clarification_id':q['clarification_id'],'answer':'2篇','idempotency_key':str(uuid4())});self.assertEqual(res.status_code,200,res.text)

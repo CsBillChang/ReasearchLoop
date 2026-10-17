@@ -147,7 +147,7 @@ def real():
     runner.ledger=ledger; runner.cancel_hook=False
     executor=TaskExecutor(config,db,provider_factory=runner.provider)
     results=[]
-    with patch('research_loop.api.tasks.get_settings',return_value=config), TestClient(app) as client:
+    with patch('research_loop.api.dependencies.get_settings',return_value=config), TestClient(app) as client:
         for case in manifest['cases']:
             ledger.case=case['id']
             reply=client.post('/api/tasks',json={'prompt':case['prompt'],'save_policy':'deny',

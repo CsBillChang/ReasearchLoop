@@ -29,7 +29,7 @@ class CloseoutFoundationTests(unittest.TestCase):
                                deepseek_api_key='STUB',retrieval_enabled=False)
         self.db=Database(url);self.db.ensure_schema()
         from research_loop.main import app
-        p=patch('research_loop.api.tasks.get_settings',return_value=self.settings);p.start();self.addCleanup(p.stop)
+        p=patch('research_loop.api.dependencies.get_settings',return_value=self.settings);p.start();self.addCleanup(p.stop)
         self.client=TestClient(app);self.addCleanup(self.client.close)
         self.task=self.create()
 
@@ -133,7 +133,7 @@ with patch.object(TokenBudgetStore,'settle',side_effect=terminate):
         payload={'conversation_id':cid,'prompt':'这次回答，不保存','idempotency_key':str(uuid4())}
         first=self.client.post('/api/tasks',json=payload).json()
         changed=self.settings.model_copy(update={'task_token_limit':2000000})
-        with patch('research_loop.api.tasks.get_settings',return_value=changed):second=self.client.post('/api/tasks',json=payload).json()
+        with patch('research_loop.api.dependencies.get_settings',return_value=changed):second=self.client.post('/api/tasks',json=payload).json()
         self.assertEqual(first['task_id'],second['task_id'])
         self.assertEqual(second['usage']['budget']['tokens']['token_limit'],1000000)
 

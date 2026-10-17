@@ -85,7 +85,8 @@ class AgentLoopTests(unittest.TestCase):
         })
         result = build_graph(provider, registry, {}).invoke(initial_state("last", "回顾", "allow", max_model_requests=1))
         self.assertEqual(effects, [])
-        self.assertIn("non-terminal", result["final_reason"])
+        self.assertEqual(result["actions"][0]["observation"]["data"]["error_code"], "TOOL_NOT_AVAILABLE")
+        self.assertIn("budget exhausted", result["final_reason"])
 
     def test_textual_tool_invocation_is_not_a_public_answer_or_action(self):
         """供应商返回伪调用文本时停止且保留错误，不解析执行或发布为研究答案。"""
