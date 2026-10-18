@@ -26,8 +26,8 @@ PATTERNS = {
 # 仅放行逐图检查过的合成展示截图；换图须重新核对像素内容和字节身份。
 # hash 白名单不等于自动隐私识别，其他图片仍按原发布边界拒绝。
 REVIEWED_SCREENSHOTS = {
-    "frontend/assets/screenshots/chat.jpg": "d5596e3834cf9723ba5326958e4de8889563c569f91164684db21775b93395dd",
-    "frontend/assets/screenshots/profile.jpg": "763d7a6da1b15ca03d34ac58e2c84fd91ef06babb01175536397d34ce971c183",
+    "frontend/assets/screenshots/chat.jpg": "538c4266b661a555558352ff04fbee1058a1f3da9f5a7ce2ba5474d2834ed1a2",
+    "frontend/assets/screenshots/profile.jpg": "4a59bb6d3611a87e4b6cefe2559cdbea1088f25c43aa31ccee346bb2abf81e90",
 }
 
 

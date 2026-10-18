@@ -33,7 +33,7 @@
 
 ### 💬 科研对话
 
-用自然语言提出问题，在同一对话中阅读比较表格、查看关联成果，并继续追问。
+用自然语言提出问题，在同一对话中阅读比较表格、查看关联成果，并继续追问。下图为 **1920 × 1080** 桌面宽屏截图。
 
 <p align="center">
   <img src="frontend/assets/screenshots/chat.jpg" alt="ResearchLoop 聊天界面：合成问题、方法比较表格与继续研究入口" width="100%" />
@@ -41,10 +41,10 @@
 
 ### 🧠 个人面板
 
-查看研究积累，用自然语言记录长期偏好，并管理可以撤销的兴趣推断。
+查看研究积累，用自然语言记录长期偏好，并管理可以撤销的兴趣推断。下图按 **1920 像素桌面宽度**完整截取面板（1920 × 1800），包括偏好、兴趣推断和下方的个性化论文简报。
 
 <p align="center">
-  <img src="frontend/assets/screenshots/profile.jpg" alt="ResearchLoop 个人面板：合成统计、自然语言偏好与兴趣推断" width="100%" />
+  <img src="frontend/assets/screenshots/profile.jpg" alt="ResearchLoop 完整桌面个人面板：合成统计、自然语言偏好、可撤销兴趣推断与个性化论文简报" width="100%" />
 </p>
 
 <a id="features"></a>
