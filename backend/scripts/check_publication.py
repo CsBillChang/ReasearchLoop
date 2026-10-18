@@ -8,8 +8,8 @@ import re
 import subprocess
 
 
-ROOT_FILES = {".gitignore", ".env.example", ".python-version", "AGENTS.md",
-              "README.md", "NOTICE", "Makefile", "compose.yaml"}
+ROOT_FILES = {".gitignore", ".env.example", ".python-version",
+              "README.md", "Makefile", "compose.yaml"}
 SOURCE_ROOTS = {"backend", "frontend", "config"}
 BLOCKED_PARTS = {"node_modules", "__pycache__", ".venv", ".vscode", ".idea",
                  "archive", "backups", "data-restores", ".pytest_cache"}

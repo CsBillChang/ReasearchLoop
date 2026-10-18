@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="260" viewBox="0 0 1200 260" role="img" aria-labelledby="title desc">
+  <title id="title">ResearchLoop 科研情报与证据研读 Agent</title>
+  <desc id="desc">以自然语言串联论文发现、原文研读、证据核验与研究记忆。</desc>
+  <rect width="1200" height="260" rx="28" fill="#fff8fa"/>
+  <rect x="1" y="1" width="1198" height="258" rx="27" fill="none" stroke="#f1dce4" stroke-width="2"/>
+  <circle cx="1090" cy="35" r="130" fill="#fce9ef"/>
+  <circle cx="1190" cy="235" r="100" fill="#f7dde8"/>
+  <rect x="76" y="61" width="104" height="104" rx="29" fill="#f46697"/>
+  <text x="128" y="132" text-anchor="middle" font-size="68" font-weight="750" fill="#5e1934" font-family="Arial,Helvetica,sans-serif">R</text>
+  <text x="214" y="106" font-size="56" font-weight="750" fill="#372b33" font-family="Arial,Helvetica,sans-serif">ResearchLoop</text>
+  <text x="216" y="149" font-size="24" fill="#775b69" font-family="PingFang SC,Microsoft YaHei,sans-serif">科研情报与证据研读 Agent</text>
+  <text x="78" y="210" font-size="20" letter-spacing="1.6" fill="#a13b63" font-family="Arial,Helvetica,sans-serif">DISCOVER · READ · REFLECT · REMEMBER</text>
+  <g fill="none" stroke="#d98aa6" stroke-width="2.5">
+    <path d="M884 101h58m20 0h58m-48 39h48"/>
+    <rect x="845" y="79" width="40" height="44" rx="10" fill="#fff8fa"/>
+    <rect x="940" y="79" width="40" height="44" rx="10" fill="#fff8fa"/>
+    <rect x="1034" y="79" width="40" height="44" rx="10" fill="#fff8fa"/>
+    <path d="M1054 123v44H865v-44" stroke-dasharray="5 6"/>
+    <path d="m876 137-11-14-11 14"/>
+  </g>
+</svg>

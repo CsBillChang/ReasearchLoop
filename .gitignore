@@ -22,6 +22,10 @@ artifacts/
 docs/
 THIRD_PARTY_NOTICES.md
 third_party_notices.md
+AGENTS.md
+agents.md
+NOTICE
+notice
 backups/
 data-restores/
 *.sqlite*
