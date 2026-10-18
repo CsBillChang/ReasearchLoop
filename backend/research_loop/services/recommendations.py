@@ -10,7 +10,7 @@ def paper_identity(paper: dict) -> str:
     """按明确DOI或来源ID及版本去重；不以标题相似度合并不同论文。
 
     Args:
-        paper: DPR规范候选，包含source、paper_id、可选doi/version。
+        paper: 论文规范候选，包含source、paper_id、可选doi/version。
 
     Returns:
         适于持久主键的SHA256；缺失版本仍明确标记unknown，不虚构版本。
@@ -40,7 +40,7 @@ def rank_candidates(candidates: list[dict], config: dict, profile: dict, deliver
         query_matches = [q for q in paper.get('_queries', []) if q in config['directions']]
         if not query_matches or paper['source'] not in config['sources']:
             continue
-        reasons = ['DPR查询匹配：' + '、'.join(query_matches)]
+        reasons = ['论文查询匹配：' + '、'.join(query_matches)]
         score = 10.0 * len(query_matches)
         used = []
         for entries, weight, label in ((explicit, 4, '明确偏好'), (inferred, 1, '可撤销的推断兴趣')):
@@ -62,7 +62,7 @@ def rank_candidates(candidates: list[dict], config: dict, profile: dict, deliver
             reasons.append('尚未交付过此来源身份/版本')
         item = {'identity':identity, 'paper':paper, 'score':score, 'reasons':reasons,
                 'memory_sources':used, 'deep_read':was_deep_read, 'user_read':was_read,
-                'abstract_source':'DPR上游摘要元数据；未读取全文'}
+                'abstract_source':'论文上游摘要元数据；未读取全文'}
         if identity not in ranked or score > ranked[identity]['score']:
             ranked[identity] = item
     return sorted(ranked.values(), key=lambda x:(-x['score'], -(int(re.sub(r'\D','', x['paper'].get('published') or '')[:8] or 0)), x['identity']))[:config['limit']]

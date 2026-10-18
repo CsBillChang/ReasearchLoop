@@ -21,7 +21,7 @@ from research_loop.workers.scheduler import BriefScheduler
 
 
 class SourceStub:
-    """明确标记的DPR替身；禁止触及PDF或LLM，仅返回候选元数据。"""
+    """明确标记的论文替身；禁止触及PDF或LLM，仅返回候选元数据。"""
     def __init__(self, fail=(), truncated=False):
         """配置失败来源和饱和标志，记录实际查询参数。"""
         self.calls=[]; self.fail=fail; self.truncated=truncated; self.version='1'

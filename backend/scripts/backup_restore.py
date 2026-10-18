@@ -12,7 +12,7 @@ import subprocess
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from research_loop.config import Settings
+from research_loop.config import Settings, paper_sources_path
 from research_loop.services.runtime import application_lock, atomic_json, identity
 from research_loop.storage.mysql import Database
 
@@ -130,7 +130,7 @@ def backup(settings: Settings, destination: Path) -> dict:
                   'parser_version': settings.parser_version, 'parser_config': settings.parser_config,
                   'model_manifest': str(settings.retrieval_model_manifest or ROOT/'data/ag71-preflight/models/manifest.json'),
                   'secrets_included': False}
-        source_config = ROOT/'data/config/dpr-sources.json'
+        source_config = paper_sources_path(ROOT)
         if source_config.exists():
             def without_secrets(value):
                 """保留来源/RPC配置，认证字段只记录需要重新配置。"""
@@ -139,7 +139,7 @@ def backup(settings: Settings, destination: Path) -> dict:
                 if isinstance(value,list):
                     return [without_secrets(v) for v in value]
                 return value
-            config['dpr_sources_without_credentials'] = without_secrets(json.loads(source_config.read_text()))
+            config['paper_sources_without_credentials'] = without_secrets(json.loads(source_config.read_text()))
         model_path = Path(config['model_manifest'])
         if model_path.exists():
             files.add(model_path)

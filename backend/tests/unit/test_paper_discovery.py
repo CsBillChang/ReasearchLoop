@@ -1,14 +1,14 @@
-# DPR 适配测试：覆盖逐源 RPC、候选映射与日期条件；替身响应不代表线上来源可用。
+# 论文 适配测试：覆盖逐源 RPC、候选映射与日期条件；替身响应不代表线上来源可用。
 import json
 import unittest
 import httpx
 from research_loop.providers.discovery import DiscoveryProvider, SUPPORTED_SOURCES
-from research_loop.providers.dpr_sources import resolve_backends, RPC_NAMES
+from research_loop.providers.paper_sources import resolve_backends, RPC_NAMES
 
 
-class DPRDiscoveryTests(unittest.TestCase):
+class PaperDiscoveryTests(unittest.TestCase):
     def config(self):
-        return resolve_backends({'supabase':{'url':'https://dpr.example','anon_key':'public-fixture','bm25_rpc':'match_arxiv_papers_bm25'}})
+        return resolve_backends({'supabase':{'url':'https://papers.example','anon_key':'public-fixture','bm25_rpc':'match_arxiv_papers_bm25'}})
 
     def test_seventeen_rpc_contracts_and_dates(self):
         calls=[]

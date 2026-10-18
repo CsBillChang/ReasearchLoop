@@ -23,7 +23,7 @@ from research_loop.storage.checkpoints import CheckpointStore
 from research_loop.storage.mysql import Database
 from research_loop.tools.registry import ToolRegistry
 from research_loop.workers.executor import TaskExecutor
-from scripts.run_dpr_consolidation import snapshot
+from scripts.run_reading_regression import snapshot
 
 SEARCH_PROMPT = "找一篇今年CVPR中关于遥感图像检测的论文"
 

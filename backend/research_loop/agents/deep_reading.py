@@ -1,6 +1,6 @@
-"""DPR 精读单节点：上游生成函数不改提示与循环，外层负责已有收据和取消。
+"""精读单节点：上游生成函数不改提示与循环，外层负责已有收据和取消。
 
-精读/发布行为对齐 DPR long-range 严格阅读入口；未知请求与取消不会被当作
+精读/发布保留严格阅读入口的结束标记合同；未知请求与取消不会被当作
 普通生成异常重试。原文身份保留在数据库，不要求模型把长 ID 写进总结。
 """
 from __future__ import annotations
@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from research_loop.providers import dpr_summary
+from research_loop.providers import paper_summary
 from research_loop.providers.deepseek import DeepSeekProvider, ProviderResponseError
 
 SYSTEM_PROMPT = "你是一名资深学术论文分析助手，请使用中文、以 Markdown 形式，对给定论文做结构化、深入、客观的总结。"
@@ -21,7 +21,7 @@ class _RunInterrupted(BaseException):
 
 
 def paper_inputs(bundle: list[dict], metadata: list[dict]) -> tuple[str, str]:
-    """将已有正文和元数据映射到 DPR 的 txt/md 输入，不注入任务或引用约束。
+    """将已有正文和元数据映射到精读节点的 txt/md 输入，不注入任务或引用约束。
 
     Args:
         bundle: 已授权、按阅读顺序提供的原文片段。
@@ -31,13 +31,13 @@ def paper_inputs(bundle: list[dict], metadata: list[dict]) -> tuple[str, str]:
         原文文本与上游格式 Markdown；证据 ID/解析警告只留在任务记录。
     """
     text = "\n\n".join(item.get("text") or "" for item in bundle)
-    markdown = "\n\n".join(dpr_summary.build_markdown_content(
+    markdown = "\n\n".join(paper_summary.build_markdown_content(
         paper, "deep", "", "", []) for paper in metadata)
     return text, markdown
 
 
 class _ReceiptClient:
-    """把 DPR client.chat 接到单次供应商调用；重入时按固定序号本地回放。
+    """把精读 client.chat 接到单次供应商调用；重入时按固定序号本地回放。
 
     每次重入从该节点的第一条收据开始回放，使上游整个三轮循环可以原样复用。
     已成功响应不重发，显式失败重现异常，远端结果未知则中断，不伪造 usage。
@@ -52,7 +52,7 @@ class _ReceiptClient:
         self.finish_reason = None
 
     def chat(self, messages: list[dict], response_format: dict | None = None) -> dict:
-        """执行或回放一次 DPR 请求，并先落盘响应再让上游判断结束标记。
+        """执行或回放一次精读请求，并先落盘响应再让上游判断结束标记。
 
         Args:
             messages: 上游函数构造的原始 messages，不在这里追加约束。
@@ -134,7 +134,7 @@ class _ReceiptClient:
 
 
 def deep_reading_node(state: dict, provider: Any, papers: Any, db: Any, record: Any) -> dict:
-    """调用 DPR 原函数；成功按结束标记发布，不引入引用或 Reviewer 完成门。
+    """调用精读生成函数；成功按结束标记发布，不引入引用或 Reviewer 完成门。
 
     Args:
         state: Researcher 已有正文交接状态。
@@ -174,11 +174,11 @@ def deep_reading_node(state: dict, provider: Any, papers: Any, db: Any, record: 
     error = None
     try:
         # 文件仅映射上游函数的 md/txt 参数，模型消息与控制流由复制的函数决定。
-        with tempfile.TemporaryDirectory(prefix="researchloop-dpr-") as directory:
+        with tempfile.TemporaryDirectory(prefix="researchloop-reading-") as directory:
             md_path, txt_path = Path(directory) / "paper.md", Path(directory) / "paper.txt"
             md_path.write_text(stage["metadata_markdown"], encoding="utf-8")
             txt_path.write_text(stage["text"], encoding="utf-8")
-            markdown = dpr_summary.generate_deep_summary(str(md_path), str(txt_path), client=client) or ""
+            markdown = paper_summary.generate_deep_summary(str(md_path), str(txt_path), client=client) or ""
     except _RunInterrupted as exc:
         error = str(exc)
         markdown = client.last_initial

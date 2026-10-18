@@ -149,7 +149,7 @@ class SubscriptionService:
         """发送前持久化尝试；成功结果复用，started恢复记unknown并占用两次上限。
 
         Returns:
-            cached结果、ready请求身份、或耗尽标志。这里只重试只读DPR，不处理模型收据。
+            cached结果、ready请求身份、或耗尽标志。这里只重试只读论文，不处理模型收据。
         """
         rid, token, lane = run['run_id'],run['lease_token'],request_lane(window)
         with self.store.transaction() as tx:

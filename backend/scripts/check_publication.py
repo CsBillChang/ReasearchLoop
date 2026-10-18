@@ -9,8 +9,8 @@ import subprocess
 
 
 ROOT_FILES = {".gitignore", ".env.example", ".python-version", "AGENTS.md",
-              "README.md", "THIRD_PARTY_NOTICES.md", "Makefile", "compose.yaml"}
-SOURCE_ROOTS = {"backend", "frontend", "docs", "config"}
+              "README.md", "NOTICE", "Makefile", "compose.yaml"}
+SOURCE_ROOTS = {"backend", "frontend", "config"}
 BLOCKED_PARTS = {"node_modules", "__pycache__", ".venv", ".vscode", ".idea",
                  "archive", "backups", "data-restores", ".pytest_cache"}
 BLOCKED_SUFFIXES = {".pdf", ".onnx", ".sqlite", ".db", ".log", ".pem", ".key",
@@ -37,7 +37,7 @@ def check_file(name: str, content: bytes, mode: str = "100644") -> list[dict]:
     """
     path = PurePosixPath(name)
     findings = []
-    allowed = name in ROOT_FILES or name in {"data/README.md", "artifacts/README.md"}
+    allowed = name in ROOT_FILES
     allowed = allowed or (bool(path.parts) and path.parts[0] in SOURCE_ROOTS)
     if (not allowed or path.is_absolute() or ".." in path.parts
             or any(part in BLOCKED_PARTS for part in path.parts)

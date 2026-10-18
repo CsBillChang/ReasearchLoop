@@ -21,7 +21,7 @@
 
 资源路由只从 `api/dependencies.py` 取得公共依赖，不导入其他资源路由的私有函数。服务层不依赖 FastAPI；路由负责输入/状态码和响应，服务负责版本、权限与保存等业务判断。测试可用 `app.dependency_overrides` 注入隔离配置或数据库。
 
-模块职责与源码阅读顺序见 [文件地图](../docs/file-map.md)。Supervisor动态委派Researcher并按需调用Reviewer；DPR精读为固定LLM节点，不强制每次问答使用。
+模块职责见上表。Supervisor动态委派Researcher并按需调用Reviewer；精读为固定LLM节点，不强制每次问答使用。
 
 ```bash
 make sync-index
@@ -32,4 +32,4 @@ make test
 make check
 ```
 
-来源/模型需要本机配置，见 [运行手册](../docs/delivery.md)。默认测试不调用DeepSeek；环境门控跳过不能报为真实验证通过。历史脚本显式冻结和隔离，不作日常入口。当前完善状态见 [status](../docs/status.md)。
+来源/模型需要本机配置，见 [项目说明](../README.md)。默认测试不调用DeepSeek；环境门控跳过不能报为真实验证通过。历史脚本显式冻结和隔离，不作日常入口。本机历史评测材料不随公开仓库分发。

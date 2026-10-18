@@ -1,4 +1,4 @@
-"""DPR 集中适配回归：真实图/服务/收据，供应商与 HTTP 均为明确替身。"""
+"""论文 集中适配回归：真实图/服务/收据，供应商与 HTTP 均为明确替身。"""
 import hashlib
 import json
 import os
@@ -17,7 +17,7 @@ from research_loop.domain.evidence import Document, PageEvidence
 from research_loop.domain.tasks import TaskCreate
 from research_loop.providers.deepseek import DeepSeekProvider, ModelResponse, ToolCall
 from research_loop.providers.discovery import DiscoveryProvider
-from research_loop.providers.dpr_sources import resolve_backends
+from research_loop.providers.paper_sources import resolve_backends
 from research_loop.providers.pdf import PDFProvider, is_usable_paper_text
 from research_loop.services.papers import PaperService
 from research_loop.services.tasks import TaskService
@@ -28,7 +28,7 @@ from research_loop.tools.registry import ToolRegistry
 from research_loop.workers.executor import TaskExecutor
 
 
-class DPRConsolidationTests(unittest.TestCase):
+class ReadingRegressionTests(unittest.TestCase):
     """通过输入输出验证正文、单节点及失败交付，不把替身结果当作真实模型验收。"""
 
     def setUp(self):
@@ -36,7 +36,7 @@ class DPRConsolidationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.files = FileStore(self.root/'data', self.root/'notes', self.root)
-        url = os.getenv('DPR_TEST_DATABASE_URL') or 'sqlite:///' + str(self.root/'test.db')
+        url = os.getenv('READING_TEST_DATABASE_URL') or 'sqlite:///' + str(self.root/'test.db')
         if not url.startswith('sqlite:') and 'researchloop_test_' not in url.rsplit('/',1)[-1]:
             raise ValueError('explicit isolated MySQL required')
         self.db = Database(url)
@@ -108,7 +108,7 @@ class DPRConsolidationTests(unittest.TestCase):
             body=json.loads(req.content);calls.append(body)
             if len(calls)==1:return httpx.Response(500,json={'code':'57014'})
             return httpx.Response(200,json=[{'id':'paper','title':'paper'}])
-        cfg=resolve_backends({'supabase':{'url':'https://dpr.example','anon_key':'fixture'}})
+        cfg=resolve_backends({'supabase':{'url':'https://papers.example','anon_key':'fixture'}})
         with httpx.Client(transport=httpx.MockTransport(handler)) as client:
             result=DiscoveryProvider(backends=cfg,client=client).search('language','2026-01-01','2026-01-04',['arxiv'])
         self.assertEqual(len(result.candidates),1)
@@ -296,16 +296,16 @@ class DPRConsolidationTests(unittest.TestCase):
         self.assertEqual(len(calls),1)
         self.assertIn('未重复执行',str(result['observations']))
 
-    def test_real_sigkill_after_dpr_receipt_keeps_usage_without_resend(self):
+    def test_real_sigkill_after_reading_receipt_keeps_usage_without_resend(self):
         """真实终止子进程，供应商仍为替身；复验 MySQL 收据而非网络质量。"""
         import subprocess, signal, sys, time
-        if not os.getenv('DPR_TEST_DATABASE_URL'):
+        if not os.getenv('READING_TEST_DATABASE_URL'):
             self.skipTest('explicit isolated MySQL required')
         tid,state,_=self.summary_fixture(lambda r:self.fail('parent must not send'))
         self.db.save_checkpoint(tid,state)
-        env={**os.environ,'DPR_RECOVERY_DB':self.db.url,'DPR_RECOVERY_TASK':tid,
-             'DPR_RECOVERY_COUNTER':str(self.root/'counter'),'DPR_RECOVERY_READY':str(self.root/'ready')}
-        command=[sys.executable,str(Path(__file__).with_name('dpr_recovery_process.py'))]
+        env={**os.environ,'READING_RECOVERY_DB':self.db.url,'READING_RECOVERY_TASK':tid,
+             'READING_RECOVERY_COUNTER':str(self.root/'counter'),'READING_RECOVERY_READY':str(self.root/'ready')}
+        command=[sys.executable,str(Path(__file__).with_name('reading_recovery_process.py'))]
         child=subprocess.Popen(command+['crash'],env=env)
         try:
             deadline=time.monotonic()+20

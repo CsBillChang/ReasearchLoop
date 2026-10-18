@@ -16,11 +16,12 @@ __pycache__/
 .coverage*
 htmlcov/
 node_modules/
-# 运行数据、模型、论文与原始轨迹；只公开目录说明
-data/*
-!data/README.md
-artifacts/*
-!artifacts/README.md
+# 本机文档、运行数据、模型、论文与原始轨迹不发布
+data/
+artifacts/
+docs/
+THIRD_PARTY_NOTICES.md
+third_party_notices.md
 backups/
 data-restores/
 *.sqlite*
@@ -28,5 +29,3 @@ data-restores/
 *.log
 *.pdf
 *.onnx
-# 本机历史说明含私有路径和历史指令，不参与新任务/公开发布
-docs/archive/

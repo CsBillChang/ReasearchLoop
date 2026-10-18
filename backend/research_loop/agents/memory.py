@@ -1,4 +1,4 @@
-"""会话上下文装配与可追溯压缩；不调用LLM，不改变DPR正文输入或历史收据。"""
+"""会话上下文装配与可追溯压缩；不调用LLM，不改变论文正文输入或历史收据。"""
 from __future__ import annotations
 import json
 from research_loop.storage.memory import MemoryStore, dump, digest

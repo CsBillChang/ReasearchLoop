@@ -49,6 +49,19 @@ class BackupRestoreTests(unittest.TestCase):
         self.assertTrue((Path(report['data_dir'])/'restore-hold.json').exists())
         self.assertFalse(manifest['config']['secrets_included'])
 
+    def test_neutral_source_configuration_is_redacted_in_backup(self):
+        """新文件名纳入脱敏配置；原本机来源文件不被修改。"""
+        source = self.root / 'data/config/paper-sources.json'
+        source.parent.mkdir(parents=True)
+        source.write_text(json.dumps({'supabase': {'url': 'https://papers.example',
+                                                  'anon_key': 'fixture-private'}}))
+        original = source.read_bytes()
+        manifest = backup(self.settings, self.back)
+        sanitized = manifest['config']['paper_sources_without_credentials']
+        self.assertEqual(sanitized['supabase']['anon_key'], '[configure locally]')
+        self.assertNotIn('fixture-private', json.dumps(manifest['config']))
+        self.assertEqual(source.read_bytes(), original)
+
     def test_backup_refuses_running(self):
         """执行中任务不通过强杀或改状态制造一致性备份。"""
         self.db.execute("UPDATE tasks SET status='running'")

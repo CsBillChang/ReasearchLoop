@@ -1,4 +1,4 @@
-"""启动本机简报轮询；只有已启用且到期的订阅才查询DPR，不调用生成模型。"""
+"""启动本机简报轮询；只有已启用且到期的订阅才查询论文，不调用生成模型。"""
 import argparse
 import signal
 import threading

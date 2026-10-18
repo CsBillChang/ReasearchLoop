@@ -136,9 +136,9 @@ def researcher_state(task_id: str, objective: str, save_policy: str = "deny",
         "findings与gaps必须保持相同判断：未找到支持只能说当前无法确认，不能说已证伪或必定不存在。"
     )
     mode_prompt = {
-        "screen": "本次仅筛选候选。优先根据标题/摘要核对主题、日期和来源，findings交付逐篇标题、链接、相关理由及依据层级。只有摘要不足才读取正文，不默认逐篇下载或精读。paper_ids只包含选中的论文，不包括所有检索候选。未读取正文时evidence_ids必须为空列表，不能填写paper_id，也不需要为填此字段而读取PDF。数量不足交付已有候选并标partial。不会启动DPR八点总结。",
-        "investigate": "本次定向研究。读取原文后围绕分派的问题/维度形成findings，包含普通论文链接、观察、适用条件与资料局限。无需八点总结或（完）标记，不会启动DPR节点。paper_ids只包含实际用于发现的论文。任务尚有缺口就标partial并保留有用发现，不无限补读。",
-        "deep_read": "取得正文后尽快finish_research交接证据；findings只写少量取证说明，完整八点总结由随后DPR精读节点生成。",
+        "screen": "本次仅筛选候选。优先根据标题/摘要核对主题、日期和来源，findings交付逐篇标题、链接、相关理由及依据层级。只有摘要不足才读取正文，不默认逐篇下载或精读。paper_ids只包含选中的论文，不包括所有检索候选。未读取正文时evidence_ids必须为空列表，不能填写paper_id，也不需要为填此字段而读取PDF。数量不足交付已有候选并标partial。不会启动论文八点总结。",
+        "investigate": "本次定向研究。读取原文后围绕分派的问题/维度形成findings，包含普通论文链接、观察、适用条件与资料局限。无需八点总结或（完）标记，不会启动论文节点。paper_ids只包含实际用于发现的论文。任务尚有缺口就标partial并保留有用发现，不无限补读。",
+        "deep_read": "取得正文后尽快finish_research交接证据；findings只写少量取证说明，完整八点总结由随后论文精读节点生成。",
     }
     state["messages"][0]["content"] += mode_prompt[mode]
     if brief:

@@ -651,7 +651,7 @@ class TaskExecutor:
     def _delivery_status(self, task_id: str, state: dict, result: TaskResult) -> TaskStatus:
         """按实际执行/生成完成情况结束，不以阅读警告或 Reviewer 意见阻断发布。
 
-        DPR 的严格阅读入口保留总结结束标记检查；ResearchLoop 的任务外壳还需
+        论文 的严格阅读入口保留总结结束标记检查；ResearchLoop 的任务外壳还需
         如实表达取消、未结算请求、实际执行失败与明确未满足的用户子要求。
         """
         if self.db.has_unknown_family_call(task_id):

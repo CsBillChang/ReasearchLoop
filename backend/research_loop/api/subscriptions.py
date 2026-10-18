@@ -4,7 +4,7 @@ from research_loop.api.dependencies import get_database
 from research_loop.storage.mysql import Database
 from research_loop.domain.subscriptions import SubscriptionInput, CandidateReadInput
 from research_loop.services.subscriptions import SubscriptionService
-from research_loop.providers.dpr_sources import SUPPORTED_SOURCES, DEFAULT_SEARCH_SOURCES
+from research_loop.providers.paper_sources import SUPPORTED_SOURCES, DEFAULT_SEARCH_SOURCES
 
 router=APIRouter()
 

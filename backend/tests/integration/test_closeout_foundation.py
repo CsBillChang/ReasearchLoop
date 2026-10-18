@@ -178,7 +178,7 @@ with patch.object(TokenBudgetStore,'settle',side_effect=terminate):
         self.assertEqual(self.db.fetchone('SELECT COUNT(*) AS n FROM reading_list WHERE paper_id=?',(pid,))['n'],1)
 
     def test_deep_reading_wrapper_uses_same_root_policy(self):
-        """DPR原函数不改，外层物理调用共享根预算并复用成功收据。"""
+        """论文原函数不改，外层物理调用共享根预算并复用成功收据。"""
         from research_loop.agents.deep_reading import _ReceiptClient
         calls=[]
         class Provider:

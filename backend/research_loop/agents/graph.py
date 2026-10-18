@@ -110,7 +110,7 @@ def handoff_navigation(handoff: dict, actions: list[dict]) -> tuple[dict, bool]:
 
 
 def matrix_thinking(state: AgentState) -> dict[str, str] | None:
-    """仅为已取证的矩阵整理与交付选择 DPR 相同的非思考模式。
+    """仅为已取证的矩阵整理与交付选择 论文 相同的非思考模式。
 
     Args:
         state: 当前角色、已持久计划和实际工具返回的证据身份。

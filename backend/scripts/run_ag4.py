@@ -1,4 +1,4 @@
-"""AG4固定真实会话验收：隔离MySQL，最多四任务/每题四请求，无论文搜索或DPR。"""
+"""AG4固定真实会话验收：隔离MySQL，最多四任务/每题四请求，无论文搜索或论文。"""
 from __future__ import annotations
 import argparse
 import hashlib

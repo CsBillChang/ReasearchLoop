@@ -1,4 +1,4 @@
-"""DPR只读请求退避策略；不包装模型调用或有副作用的写接口。"""
+"""论文只读请求退避策略；不包装模型调用或有副作用的写接口。"""
 from __future__ import annotations
 
 from datetime import datetime, timezone

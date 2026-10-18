@@ -1,13 +1,13 @@
-"""发现适配器：调用 DPR 配置的逐源 Supabase RPC，统一候选字段并保留每个来源的查询状态。
+"""发现适配器：调用逐源 Supabase RPC，统一候选字段并记录查询状态。
 
-改编来源：daily-paper-reader，MIT 归属见 docs/licenses/daily-paper-reader.txt。"""
+涉及第三方适配的版权和许可声明见仓库根 NOTICE。"""
 from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 import time
 from typing import Any
 import httpx
 from research_loop.domain.evidence import PaperCandidate, SearchResult, SourceResult
-from research_loop.providers.dpr_sources import SUPPORTED_SOURCES, DEFAULT_SEARCH_SOURCES, RPC_NAMES, normalize_source, resolve_backends
+from research_loop.providers.paper_sources import SUPPORTED_SOURCES, DEFAULT_SEARCH_SOURCES, RPC_NAMES, normalize_source, resolve_backends
 
 SOURCE_ROUTES = {s: f"dpr_supabase:{rpc}" for s, rpc in RPC_NAMES.items()}
 
@@ -30,7 +30,7 @@ class DiscoveryProvider:
     @classmethod
     def from_settings(cls, settings, **kwargs):
         """从配置解析逐源后端；不把缺失配置的来源标为已查询成功。"""
-        # DPR 的 RPC 超时独立于模型 HTTP 超时：arXiv BM25 45 秒、exact 75 秒，其余 20 秒。
+        # 论文源 RPC 超时独立于模型 HTTP 超时：arXiv BM25 45 秒、exact 75 秒，其余 20 秒。
         return cls(backends=settings.discovery_backends, **kwargs)
 
     def close(self) -> None:
@@ -60,14 +60,14 @@ class DiscoveryProvider:
                 results.append(SourceResult(source=source, status="not_queried", message="source not selected"))
                 continue
             if not cfg.get("enabled", True) or not cfg.get("use_bm25_rpc", True) or not cfg.get("url") or not cfg.get("anon_key"):
-                results.append(SourceResult(source=source, status="not_configured", message="DPR Supabase read endpoint is missing or disabled"))
+                results.append(SourceResult(source=source, status="not_configured", message="论文 Supabase read endpoint is missing or disabled"))
                 continue
             try:
                 found, count, request = self._search_windows(query, date_from, date_to, cap, source)
                 saturated |= count >= cap or bool(request.get("unresolved_windows"))
                 groups.append(found)
                 results.append(SourceResult(source=source, status=("partial_results" if request.get("unresolved_windows") else ("queried_success" if found else "queried_empty")),
-                                            message=f"DPR Supabase RPC {cfg['bm25_rpc']}; bounded top-k, not full coverage",
+                                            message=f"论文 Supabase RPC {cfg['bm25_rpc']}; bounded top-k, not full coverage",
                                             candidate_count=len(found), request=request))
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}".replace(str(cfg.get("anon_key") or "[none]"), "[redacted]")
@@ -86,7 +86,7 @@ class DiscoveryProvider:
 
     def _search_windows(self, query: str, date_from: str | None, date_to: str | None,
                         limit: int, source: str) -> tuple[list[PaperCandidate], int, dict[str, Any]]:
-        """DPR 数据库 57014 细分日期窗口；有界保留成功结果及未完成区间。
+        """论文源数据库 57014 细分日期窗口；有界保留成功结果及未完成区间。
 
         Args:
             query: 原始基础关键词，分片时不改写。
@@ -159,10 +159,10 @@ class DiscoveryProvider:
             "match_arxiv_papers_exact": 75.0, "match_arxiv_papers_bm25": 45.0}.get(rpc, 20.0))
         response = self._request_with_retries(endpoint, payload, headers, timeout, request)
         if response.status_code >= 300:
-            raise ValueError(f"DPR RPC HTTP {response.status_code}: {response.text[:500]}")
+            raise ValueError(f"论文 RPC HTTP {response.status_code}: {response.text[:500]}")
         rows = response.json()
         if not isinstance(rows, list):
-            raise ValueError("DPR RPC returned non-list")
+            raise ValueError("论文 RPC returned non-list")
         candidates = [self._row_to_candidate(row, source, rpc) for row in rows
                       if isinstance(row, dict) and row.get("id") and self._in_window(row.get("published"), date_from, date_to)]
         request["response_rows"] = len(rows)
@@ -171,7 +171,7 @@ class DiscoveryProvider:
 
     def _request_with_retries(self, endpoint: str, payload: dict, headers: dict,
                               timeout: float, request: dict) -> httpx.Response:
-        """适配 DPR 的只读 RPC 重试，默认四次；简报由持久调度层限制重试，仅429/临时5xx/传输失败有限退避，数据库语句超时不重试。
+        """适配只读 RPC 重试，默认四次；简报由持久调度层限制重试，仅429/临时5xx/传输失败有限退避，数据库语句超时不重试。
 
         Args:
             endpoint: 已配置来源的 RPC 地址。

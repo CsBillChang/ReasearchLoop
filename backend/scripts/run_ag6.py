@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from research_loop.config import Settings
 from research_loop.providers.deepseek import DeepSeekProvider, RequestNotSent, validate_messages
 from research_loop.providers.pdf import PDFProvider
-from research_loop.providers.dpr_acquisition import PaperAcquisitionError
+from research_loop.providers.paper_acquisition import PaperAcquisitionError
 from research_loop.storage.mysql import Database
 from research_loop.workers.executor import TaskExecutor
 

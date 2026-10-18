@@ -46,7 +46,7 @@ def rank_terms(query: str, records: list[dict], bags: list[dict], limit: int = 2
 
 
 def reciprocal_rank_fusion(channels: dict[str, list[dict]], k: int = 60) -> list[dict]:
-    """参考DPR的1/(k+rank)融合思想；只合并同一版本片段，不相加异量纲分数。
+    """参考论文的1/(k+rank)融合思想；只合并同一版本片段，不相加异量纲分数。
 
     同通道重复候选只算一次；并列以完整候选身份稳定排序，保留原通道排名/分数。
     """

@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from research_loop.domain.tasks import Observation
 from research_loop.domain.retrieval import RetrievalQuery
 from research_loop.domain.visual_reading import VisualDelegationInput
-from research_loop.providers.dpr_acquisition import PaperAcquisitionError
+from research_loop.providers.paper_acquisition import PaperAcquisitionError
 from research_loop.tools.base import ToolContext, ToolSpec
 
 

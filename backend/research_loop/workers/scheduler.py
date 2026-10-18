@@ -1,4 +1,4 @@
-"""本机简报调度器：只读DPR元数据，有限请求与租约恢复，不调用研究Agent或模型。"""
+"""本机简报调度器：只读论文元数据，有限请求与租约恢复，不调用研究Agent或模型。"""
 from __future__ import annotations
 import json
 import time
@@ -16,8 +16,8 @@ class BriefScheduler:
         """注入来源和时钟；默认每来源/查询最多两次，每轮最多102次物理RPC。
 
         Args:
-            settings: 数据库与既有DPR连接配置。
-            provider_factory: 组件测试替身，默认严格单请求的现有DPR适配器。
+            settings: 数据库与既有论文连接配置。
+            provider_factory: 组件测试替身，默认严格单请求的现有论文适配器。
             clock: 日历时间；真实运行不修改系统时钟。
             after_receipt: 测试故障点，发生于响应落库后、发布前。
             request_cap: 单轮总请求上限，真实验收可收紧。

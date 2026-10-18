@@ -1,4 +1,4 @@
-"""AG7.3冻结验收：隔离库、只读DPR、有界两窗、真实进程退出与资产读回。"""
+"""AG7.3冻结验收：隔离库、只读论文、有界两窗、真实进程退出与资产读回。"""
 from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -55,12 +55,12 @@ def snapshot():
 
 
 def freeze():
-    """在任何DPR验收请求前固定查询、窗口、数据库与总额度。"""
+    """在任何论文验收请求前固定查询、窗口、数据库与总额度。"""
     write('production-before.json',snapshot())
     write('real-freeze.json',{'sources':['cvpr','ijcai'],'directions':['open vocabulary object detection'],
         'lookback_days':365,'limit':5,'created_at':'2026-10-07T00:00:00+00:00',
         'ticks':['2026-10-08T01:01:00+00:00','2026-10-11T01:01:00+00:00'],
-        'clock_note':'注入历史调度时刻检验真实DPR日期请求与停机合并；不是等待两天的墙钟实验',
+        'clock_note':'注入历史调度时刻检验真实论文日期请求与停机合并；不是等待两天的墙钟实验',
         'request_cap_per_tick':4,'total_physical_rpc_cap':8,'per_lane_max_attempts':2,
         'timeout_seconds':30,'total_time_limit_seconds':600,'generative_model_cap':0,'fulltext_download_cap':0,
         'database':'researchloop_test_ag73_20261011',
@@ -69,7 +69,7 @@ def freeze():
 
 
 def real():
-    """两个冻结日期窗口走API配置→MySQL→调度器→DPR→聊天；不调用研究Worker。"""
+    """两个冻结日期窗口走API配置→MySQL→调度器→论文→聊天；不调用研究Worker。"""
     from research_loop.main import app
     frozen=json.loads((OUT/'real-freeze.json').read_text())
     for path,expected in frozen['source_hashes'].items():
@@ -103,11 +103,11 @@ def real():
         'runs':[{'run_id':r['run_id'],'status':r['status'],'candidates':len(r['items']),'coverage':r['coverage']} for r in results],
         'physical_rpc_requests':calls,'dispatch_receipts':len(requests),'unknown':sum(r['status']=='unknown' for r in requests),
         'generative_model_requests':0,'fulltext_downloads':0,'subscription_disabled_after_acceptance':True})
-    print('real batch completed:',calls,'DPR RPCs; 0 LLM; conversation',sub['conversation_id'])
+    print('real batch completed:',calls,'论文 RPCs; 0 LLM; conversation',sub['conversation_id'])
 
 
 def crash_child():
-    """独立进程在DPR替身响应落库后真实SIGKILL；不消耗真实来源预算。"""
+    """独立进程在论文替身响应落库后真实SIGKILL；不消耗真实来源预算。"""
     from tests.integration.test_subscriptions import SourceStub
     config=settings();provider=SourceStub()
     original=provider.search

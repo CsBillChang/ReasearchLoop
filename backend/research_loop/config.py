@@ -1,4 +1,4 @@
-"""运行配置：合并环境变量和 DPR 来源配置；本模块不负责启动服务或验证供应商可用性。"""
+"""运行配置：合并环境变量和论文来源配置；不负责启动服务或验证供应商可用性。"""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,24 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
-from research_loop.providers.dpr_sources import resolve_backends
+from research_loop.providers.paper_sources import resolve_backends
+
+
+def paper_sources_path(root: Path) -> Path:
+    """定位论文源配置，优先新入口，同时兼容已有本机配置。
+
+    Args:
+        root: 项目根目录；默认配置位于其 data/config 下。
+
+    Returns:
+        显式指定或默认配置路径；不存在时由调用方按未配置处理。
+    """
+    explicit = os.getenv("RESEARCHLOOP_PAPER_SOURCES_CONFIG") or os.getenv("RESEARCHLOOP_DPR_CONFIG")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    preferred = root / "data" / "config" / "paper-sources.json"
+    legacy = root / "data" / "config" / "dpr-sources.json"
+    return preferred if preferred.exists() or not legacy.exists() else legacy
 
 
 def _load_dotenv(path: Path) -> None:
@@ -65,18 +82,18 @@ class Settings(BaseModel):
         # 源码在 backend/research_loop；统一从仓库根读取 .env，手工入口与受管入口一致。
         root = Path(project_root or Path(__file__).resolve().parents[2]).resolve()
         _load_dotenv(root / ".env")
-        data_dir = Path(os.getenv("RESEARCHLOOP_DATA_DIR", str(root / "data" / "ag1"))).resolve()
-        output_dir = Path(os.getenv("RESEARCHLOOP_OUTPUT_DIR", str(data_dir / "notes"))).resolve()
-        config_path = Path(os.getenv("RESEARCHLOOP_DPR_CONFIG") or root / "data" / "config" / "dpr-sources.json")
-        dpr_config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+        data_dir = Path(os.getenv("RESEARCHLOOP_DATA_DIR") or root / "data" / "ag1").resolve()
+        output_dir = Path(os.getenv("RESEARCHLOOP_OUTPUT_DIR") or data_dir / "notes").resolve()
+        config_path = paper_sources_path(root)
+        sources_config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
         override = {k: os.environ[e] for k, e in (("url", "SUPABASE_URL"), ("anon_key", "SUPABASE_ANON_KEY"), ("schema", "SUPABASE_SCHEMA")) if os.getenv(e)}
         if override:
-            dpr_config["supabase_shared"] = {**(dpr_config.get("supabase_shared") or dpr_config.get("supabase") or {}), **override}
-            dpr_config["supabase"] = {**(dpr_config.get("supabase") or {}), **override}
-            for backend in (dpr_config.get("source_backends") or {}).values():
+            sources_config["supabase_shared"] = {**(sources_config.get("supabase_shared") or sources_config.get("supabase") or {}), **override}
+            sources_config["supabase"] = {**(sources_config.get("supabase") or {}), **override}
+            for backend in (sources_config.get("source_backends") or {}).values():
                 backend.update(override)
         if os.getenv("SUPABASE_BM25_RPC"):
-            dpr_config.setdefault("source_backends", {}).setdefault("arxiv", {})["bm25_rpc"] = os.environ["SUPABASE_BM25_RPC"]
+            sources_config.setdefault("source_backends", {}).setdefault("arxiv", {})["bm25_rpc"] = os.environ["SUPABASE_BM25_RPC"]
         return cls(
             project_root=root,
             data_dir=data_dir,
@@ -88,7 +105,7 @@ class Settings(BaseModel):
             supabase_url=os.getenv("SUPABASE_URL") or None,
             supabase_key=os.getenv("SUPABASE_ANON_KEY") or None,
             supabase_bm25_rpc=os.getenv("SUPABASE_BM25_RPC") or "match_arxiv_papers_bm25",
-            discovery_backends=resolve_backends(dpr_config),
+            discovery_backends=resolve_backends(sources_config),
             task_token_limit=int(os.getenv("RESEARCHLOOP_TASK_TOKEN_LIMIT", "1000000")),
             task_token_tail=int(os.getenv("RESEARCHLOOP_TASK_TOKEN_TAIL", "32768")),
             max_reflection_rounds=int(os.getenv("RESEARCHLOOP_REFLECTION_ROUNDS", "2")),

@@ -1,9 +1,7 @@
-"""DPR 图表提取适配：可选 PaperCropper，失败回退 PyMuPDF 内嵌图片。
+"""图表提取：可选 PaperCropper，失败回退 PyMuPDF 内嵌图片。
 
-调用参数、降级次序及图片尺寸过滤改编自 daily-paper-reader/src/paper_figures.py，
-MIT 许可见 THIRD_PARTY_NOTICES.md。宿主新增 PDF/hash/页授权绑定与定向页图渲染，
-保留原始 PNG/图片字节；本适配器不调用图像理解模型或 Docling。
-"""
+第三方适配许可见仓库根 NOTICE。保留 PDF/hash/页授权绑定与定向页图，
+保留原始图片字节；本适配器不调用图像理解模型或 Docling。"""
 from __future__ import annotations
 
 from hashlib import sha256

@@ -1,8 +1,6 @@
-"""DPR 论文地址适配；仅定位 PDF，不解析正文或向其他服务搜索替代论文。
+"""论文地址适配：定位 PDF，不解析正文或搜索替代论文。
 
-改编自 daily-paper-reader 的 conference_sidebar.resolve_conference_pdf_url
-及 starter_pack_publications._pdf。MIT 归属见 docs/licenses/daily-paper-reader.txt。
-"""
+涉及第三方适配的版权和许可声明见仓库根 NOTICE。"""
 from __future__ import annotations
 
 from html.parser import HTMLParser
@@ -22,7 +20,7 @@ class PaperAcquisitionError(ValueError):
 
 
 def resolve_pdf_url(pdf_url: str | None, paper_url: str | None) -> str:
-    """按 DPR 优先使用显式 PDF，否则转换已知来源的详情地址。
+    """优先使用显式 PDF，否则转换已知来源的详情地址。
 
     Args:
         pdf_url: 上游直接返回的 PDF 地址；不重新猜测或改变版本。
@@ -96,7 +94,7 @@ def pdf_from_detail(html: str, page_url: str) -> str:
         唯一主文 PDF 地址；没有明确候选或存在歧义时返回空字符串。
 
     Notes:
-        保留 DPR 的官方站点与 mlresearch GitHub 分发路径，额外允许页面
+        保留官方站点与 mlresearch GitHub 分发路径，额外允许页面
         自身域名以适配其余会议来源。禁止任意跨站链接或补充材料冒充主文。
     """
     parser = _PaperLinks()

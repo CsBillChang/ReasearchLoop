@@ -2,7 +2,7 @@
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, Field, field_validator
-from research_loop.providers.dpr_sources import DEFAULT_SEARCH_SOURCES, SUPPORTED_SOURCES
+from research_loop.providers.paper_sources import DEFAULT_SEARCH_SOURCES, SUPPORTED_SOURCES
 
 
 # 单用户订阅配置；数量有硬上限，临时聊天不修改本结构。
@@ -30,7 +30,7 @@ class SubscriptionInput(BaseModel):
     @field_validator('sources')
     @classmethod
     def valid_sources(cls, values):
-        """只接受DPR来源目录，不允许输入任意接口地址。"""
+        """只接受论文来源目录，不允许输入任意接口地址。"""
         if set(values) - set(SUPPORTED_SOURCES):
             raise ValueError('未知论文来源')
         return list(dict.fromkeys(values))

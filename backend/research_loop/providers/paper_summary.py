@@ -1,9 +1,8 @@
-"""复用 DPR 的八点精读与 Markdown 元数据纯函数。
+"""八点精读与 Markdown 元数据函数。
 
-来源：daily-paper-reader/src/6.generate_docs.py，MIT 归属见项目 docs/licenses。
-仅提供可调用函数，不导入或启动上游全局客户端、采集器或发布程序。
-三轮生成、每轮一次续写、结束标记与最终回退均保留上游行为。
-"""
+涉及第三方适配的版权和许可声明见仓库根 NOTICE。
+仅提供可调用函数，不启动全局客户端、采集器或发布程序。
+三轮生成、每轮一次续写、结束标记与最终回退保持原有行为。"""
 from __future__ import annotations
 
 import json
@@ -177,7 +176,7 @@ def generate_deep_summary(
     max_retries: int = 3,
     client: DeepSeekClient | None = None,
 ) -> str | None:
-    """按 DPR 原行为运行最多三轮总结，每轮首次生成后最多续写一次。"""
+    """按 论文 原行为运行最多三轮总结，每轮首次生成后最多续写一次。"""
     active_client = client or LLM_CLIENT
     if active_client is None:
         log("[WARN] 未配置 DEEPSEEK_API_KEY 或 SUMMARY_API_KEY，跳过精读总结。")

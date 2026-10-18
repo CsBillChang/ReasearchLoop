@@ -1,7 +1,6 @@
-"""DPR 正文获取：有效缓存→Jina→PDF/PyMuPDF；保留真实页码，不推断远端文本的 PDF 页。
+"""正文获取：有效缓存→Jina→PDF/PyMuPDF；保留真实物理页码。
 
-改编自 DPR 6.generate_docs.py；MIT 归属见 docs/licenses/daily-paper-reader.txt。
-"""
+不将远端文本段落推断为 PDF 页；第三方适配许可见仓库根 NOTICE。"""
 from __future__ import annotations
 
 import hashlib
@@ -17,7 +16,7 @@ from typing import Any
 import httpx
 
 from research_loop.domain.evidence import AssetReference, Document, PageEvidence
-from research_loop.providers.dpr_acquisition import PaperAcquisitionError, pdf_from_detail, resolve_pdf_url
+from research_loop.providers.paper_acquisition import PaperAcquisitionError, pdf_from_detail, resolve_pdf_url
 from research_loop.storage.files import FileStore, sha256_bytes
 
 
@@ -53,7 +52,7 @@ class PDFProvider:
             self.client.close()
 
     def ingest(self, source: str, paper_id: str) -> Document:
-        """复用 DPR 缓存→Jina→PDF/PyMuPDF 路线，本地附件不发送远端。
+        """使用缓存→Jina→PDF/PyMuPDF 路线，本地附件不发送远端。
 
         Args:
             source: 已授权的 URL 或本地 PDF。
@@ -113,7 +112,7 @@ class PDFProvider:
         return self._ingest_pdf(source, paper_id)
 
     def _jina(self, source: str) -> tuple[str, list[dict[str, Any]]]:
-        """按 DPR 最多三次只读 Jina 请求；有效性门失败交给 PDF 回退。
+        """最多三次只读 Jina 请求；有效性门失败交给 PDF 回退。
 
         Args:
             source: 当前论文的解析地址。
@@ -167,7 +166,7 @@ class PDFProvider:
             raise PaperAcquisitionError("PDF_PARSE_FAILED", f"PDF 已取得，解析失败：{type(exc).__name__}",
                                         acquisition=self.last_fetch) from exc
         if not is_usable_paper_text("\n\n".join(page.text for page in pages)):
-            raise PaperAcquisitionError("PDF_TEXT_UNUSABLE", "全文文本未通过 DPR 基本有效性检查", acquisition=self.last_fetch)
+            raise PaperAcquisitionError("PDF_TEXT_UNUSABLE", "全文文本未通过 基本有效性检查", acquisition=self.last_fetch)
         for page in pages:
             page.document_id = document_id
             page.evidence_id = f"evidence:{hashlib.sha256(f'{document_id}:{page.page_number}'.encode()).hexdigest()[:40]}"
@@ -209,7 +208,7 @@ class PDFProvider:
         return out
 
     def _read_source(self, source: str) -> bytes:
-        """获取 PDF 字节；DPR 地址转换后允许一次详情页解析，正文仍交本地解析器。
+        """获取 PDF 字节；来源地址转换后允许一次详情页解析，正文仍交本地解析器。
 
         Args:
             source: 已授权的本地附件、PDF URL 或同论文详情页。
@@ -252,7 +251,7 @@ class PDFProvider:
         return content
 
     def _download(self, url: str) -> tuple[bytes, str, str]:
-        """有界下载并记录每次实际请求；保持 DPR 原始 PDF 的 60 秒默认超时。
+        """有界下载并记录每次实际请求；保持原始 PDF 的 60 秒默认超时。
 
         Args:
             url: 直接 PDF 或详情页地址。
@@ -293,7 +292,7 @@ class PDFProvider:
                                         retryable=True, acquisition=self.last_fetch) from exc
 
     def _parse(self, path: Path) -> list[PageEvidence]:
-        """逐页调用 DPR 同款 get_text('text')，保留物理页；不额外运行 Markdown 转换。
+        """逐页调用 get_text('text')，保留物理页；不额外运行 Markdown 转换。
 
         Args:
             path: 已验证文件头并缓存的 PDF。
@@ -319,7 +318,7 @@ class PDFProvider:
 
 
 def is_usable_paper_text(text: str) -> bool:
-    """沿用 DPR 的 1200 字符基本检查，拒绝代理错误页；这不是语义质量评分。"""
+    """沿用 1200 字符基本检查，拒绝代理错误页；这不是语义质量评分。"""
     value = str(text or "").strip()
     if value.startswith("%PDF-") or len(value) < 1200:
         return False

@@ -162,7 +162,7 @@ class FivePaperResumeTests(unittest.TestCase):
                 validate_messages(messages)
                 if messages[0]['content'].startswith('你是一名资深学术论文分析助手'):
                     self.assertIn('末尾标记-25',messages[1]['content'])
-                    return response(content='## DPR 精读（供应商替身）\n语言信息证据已读。\n（完）')
+                    return response(content='## 论文 精读（供应商替身）\n语言信息证据已读。\n（完）')
                 names = {t['function']['name'] for t in body.get('tools',[])}
                 observations = [json.loads(m['content']) for m in messages if m['role']=='tool']
                 if 'finish_research' in names:

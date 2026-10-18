@@ -221,7 +221,7 @@ class CoverageService:
             if not ids or not set(ids).issubset(known):
                 raise ValueError(f"subtask goal_ids must reference the current research plan; valid goal_ids: {sorted(known)}; do not rename the plan to match invented IDs")
             if spec.get("mode", "deep_read") == "deep_read" and not plan.get("deep_reading_requested", False):
-                raise ValueError("DPR deep_read requires a user-requested deep-reading note; use investigate for full-text analysis/comparison, or screen for search")
+                raise ValueError("论文 deep_read requires a user-requested deep-reading note; use investigate for full-text analysis/comparison, or screen for search")
 
     @staticmethod
     def in_scope(meta: dict, goal: dict, plan: dict, inputs: dict | None = None, paper_id: str | None = None) -> bool:

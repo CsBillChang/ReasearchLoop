@@ -1,4 +1,4 @@
-"""DPR 行为对照：以本地上游函数为预期，比较实际请求序列、返回文本和发布边界。"""
+"""论文 行为对照：以本地上游函数为预期，比较实际请求序列、返回文本和发布边界。"""
 import ast
 import copy
 import json
@@ -12,15 +12,15 @@ from unittest.mock import patch
 
 import httpx
 
-from integration import test_dpr_consolidation as consolidation
-from research_loop.providers import dpr_summary
+from integration import test_reading_regression as consolidation
+from research_loop.providers import paper_summary
 from research_loop.domain.notes import CreateNoteInput, ReviewResult
 from research_loop.domain.tasks import SavePolicy, TaskCreate
 from research_loop.services.notes import NoteService
 from research_loop.services.tasks import TaskService
 from research_loop.workers.executor import TaskExecutor
 
-UPSTREAM = Path(os.environ.get("RESEARCHLOOP_DPR_REFERENCE", str(Path.home() / "Downloads/daily-paper-reader-main/src/6.generate_docs.py")))
+UPSTREAM = Path(os.environ.get("RESEARCHLOOP_READING_REFERENCE") or os.environ.get("RESEARCHLOOP_DPR_REFERENCE") or "/nonexistent-reference")
 FUNCTIONS = ('call_llm_text', 'strip_auto_sections', 'yaml_escape_value',
              'build_markdown_content', 'generate_deep_summary')
 
@@ -34,8 +34,8 @@ def executable_tree(node):
     return ast.dump(node, include_attributes=False)
 
 
-@unittest.skipUnless(UPSTREAM.exists(), 'requires the explicitly downloaded DPR source for differential comparison')
-class DPRSourceComparisonTests(unittest.TestCase):
+@unittest.skipUnless(UPSTREAM.exists(), 'requires the explicitly downloaded 论文 source for differential comparison')
+class ReadingSourceComparisonTests(unittest.TestCase):
     """不执行上游模块全局代码，只抽取五个被复用的纯函数做独立对照。"""
 
     def setUp(self):
@@ -49,7 +49,7 @@ class DPRSourceComparisonTests(unittest.TestCase):
 
     def test_five_functions_match_upstream_executable_ast(self):
         """生成、文本调用、元数据、转义与去旧稿五个函数可执行 AST 必须与上游相同。"""
-        current = ast.parse(Path(dpr_summary.__file__).read_text())
+        current = ast.parse(Path(paper_summary.__file__).read_text())
         actual = {n.name: n for n in current.body if isinstance(n, ast.FunctionDef)}
         for node in self.functions:
             with self.subTest(function=node.name):
@@ -84,22 +84,22 @@ class DPRSourceComparisonTests(unittest.TestCase):
                     expected, actual = Client(case), Client(case)
                     self.waits.clear()
                     value = self.oracle['generate_deep_summary'](str(md), str(txt), client=expected)
-                    with patch.object(dpr_summary, 'time', types.SimpleNamespace(sleep=lambda seconds: None)):
-                        current = dpr_summary.generate_deep_summary(str(md), str(txt), client=actual)
+                    with patch.object(paper_summary, 'time', types.SimpleNamespace(sleep=lambda seconds: None)):
+                        current = paper_summary.generate_deep_summary(str(md), str(txt), client=actual)
                     self.assertEqual(current, value)
                     self.assertEqual(actual.calls, expected.calls)
                     self.assertLessEqual(len(actual.calls), 6)
                     self.assertNotIn('OLD SUMMARY', json.dumps(actual.calls))
             md.unlink()
-            self.assertIsNone(dpr_summary.generate_deep_summary(str(md), str(txt), client=Client([])))
+            self.assertIsNone(paper_summary.generate_deep_summary(str(md), str(txt), client=Client([])))
 
 
-class DPRPublicationTests(unittest.TestCase):
+class ReadingPublicationTests(unittest.TestCase):
     """复用已有真实服务夹具，验证移除额外发布门后的实际 Worker 行为。"""
 
-    setUp = consolidation.DPRConsolidationTests.setUp
-    summary_fixture = consolidation.DPRConsolidationTests.summary_fixture
-    raw = staticmethod(consolidation.DPRConsolidationTests.raw)
+    setUp = consolidation.ReadingRegressionTests.setUp
+    summary_fixture = consolidation.ReadingRegressionTests.summary_fixture
+    raw = staticmethod(consolidation.ReadingRegressionTests.raw)
 
     def test_three_rounds_replay_receipts_and_return_last_initial(self):
         calls = []
@@ -144,7 +144,7 @@ class DPRPublicationTests(unittest.TestCase):
             notes.save(task.task_id, SavePolicy.allow, draft.draft_id, draft.content_hash)
 
     def test_strict_publication_rejects_exhausted_summary(self):
-        """三轮仍未完整时按 DPR 严格入口拒绝发布，不要求 Reviewer 改变结论。"""
+        """三轮仍未完整时按 论文 严格入口拒绝发布，不要求 Reviewer 改变结论。"""
         task = TaskService(self.db).create(TaskCreate(prompt='精读并保存', save_policy='allow'))
         child = self.db.create_subtask(task.task_id, task.task_id, 0, 'read', {}, 'read')
         self.db.save_subtask_result(child['subtask_id'], 'partial', {'deep_reading_status':'partial'})

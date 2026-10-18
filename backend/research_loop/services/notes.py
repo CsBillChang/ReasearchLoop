@@ -73,7 +73,7 @@ class NoteService:
                 raw = json.loads(raw)
             child_result = raw.get("result", raw)
             if child_result.get("deep_reading_status") == "partial":
-                # 对齐 DPR 严格阅读发布入口；不是追加 Reviewer 或逐项事实门。
+                # 对齐 论文 严格阅读发布入口；不是追加 Reviewer 或逐项事实门。
                 raise ValueError("论文精读总结未完整生成")
         exported = draft["markdown"]
         file_hash = hashlib.sha256(exported.encode("utf-8")).hexdigest()

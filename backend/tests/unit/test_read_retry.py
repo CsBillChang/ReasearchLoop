@@ -1,4 +1,4 @@
-"""DPR限流退避合同：用HTTP替身固定状态和时钟，不访问来源。"""
+"""论文限流退避合同：用HTTP替身固定状态和时钟，不访问来源。"""
 from datetime import datetime, timezone
 import unittest
 from unittest.mock import patch
@@ -57,7 +57,7 @@ class ReadRetryTests(unittest.TestCase):
         self.assertNotIn('http_status',log)
         self.assertEqual(log['attempts'][-1]['error'],'ConnectError')
 
-    def test_actual_dpr_adapter_wires_retry_without_credentials_in_log(self):
+    def test_actual_source_adapter_wires_retry_without_credentials_in_log(self):
         """测试实际只读RPC接线，payload与认证头不进入退避诊断。"""
         calls=[];log={}
         def handler(req):

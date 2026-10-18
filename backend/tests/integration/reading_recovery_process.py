@@ -15,18 +15,18 @@ from research_loop.tools.registry import ToolRegistry
 
 def main():
     """在响应落盘但节点 checkpoint 尚未推进时暴露强杀点。"""
-    db = Database(os.environ['DPR_RECOVERY_DB'])
-    task_id = os.environ['DPR_RECOVERY_TASK']
+    db = Database(os.environ['READING_RECOVERY_DB'])
+    task_id = os.environ['READING_RECOVERY_TASK']
     def handler(request):
-        with Path(os.environ['DPR_RECOVERY_COUNTER']).open('a') as output:
+        with Path(os.environ['READING_RECOVERY_COUNTER']).open('a') as output:
             output.write('one physical request\n')
-        return httpx.Response(200,json={'id':'dpr-recovery-receipt','choices':[{'finish_reason':'stop','message':{'content':'# 固定精读\n（完）'}}],
+        return httpx.Response(200,json={'id':'reading-recovery-receipt','choices':[{'finish_reason':'stop','message':{'content':'# 固定精读\n（完）'}}],
                                       'usage':{'prompt_tokens':2,'completion_tokens':1,'total_tokens':3}})
     original = db.save_model_call
     def blocked(*args, **kwargs):
         result = original(*args, **kwargs)
         if args[2]=='succeeded':
-            Path(os.environ['DPR_RECOVERY_READY']).write_text(task_id)
+            Path(os.environ['READING_RECOVERY_READY']).write_text(task_id)
             time.sleep(60)
         return result
     if sys.argv[1]=='crash':

@@ -16,12 +16,12 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from research_loop.config import Settings
-from research_loop.providers.dpr_acquisition import PaperAcquisitionError
+from research_loop.providers.paper_acquisition import PaperAcquisitionError
 from research_loop.services.papers import PaperService
 from research_loop.services.tasks import TaskService
 from research_loop.storage.mysql import Database
 from research_loop.workers.executor import TaskExecutor
-from scripts.run_dpr_consolidation import snapshot
+from scripts.run_reading_regression import snapshot
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "artifacts/ag2-adaptive-scenarios-20261009"
@@ -77,7 +77,7 @@ def prepare() -> None:
         "max_total_requests": 48, "max_requests_per_case": 16, "tool_limit_per_case": 40,
         "cases": ["S", "C", "P"], "pdfs": pdfs,
         "controlled_injection": "C only: first Researcher accessing GUIDED gets a transient acquisition failure for that child; a newly delegated child can read the same real PDF. This is not a real upstream outage.",
-        "boundaries": "S uses live DPR; C/P use unchanged downloaded real PDFs. Real model decisions, no model replies or summaries replayed."})
+        "boundaries": "S uses live 论文; C/P use unchanged downloaded real PDFs. Real model decisions, no model replies or summaries replayed."})
 
 
 def prepare_correction() -> None:

@@ -22,7 +22,7 @@ class EvaluationSeedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);pdf=root/'sample.pdf'
             with pymupdf.open() as document:
-                # 满足DPR现有1200字符正文检查，不能因测试短文绕开生产解析器。
+                # 满足论文现有1200字符正文检查，不能因测试短文绕开生产解析器。
                 document.new_page().insert_text((40,40),'\n'.join(
                     f'Fixture line {i}: A method with no GPU driver version details.' for i in range(30)),fontsize=9)
                 document.save(pdf)

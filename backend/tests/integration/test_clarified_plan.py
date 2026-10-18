@@ -36,7 +36,7 @@ class ClarifiedScenario(AdaptiveScenario):
         return result
 
     def handler(self, request):
-        """模型替身按实际工具观察决策；DPR输出只在明确精读笔记用例出现。"""
+        """模型替身按实际工具观察决策；论文输出只在明确精读笔记用例出现。"""
         body = json.loads(request.content)
         self.requests.append(body)
         messages = body["messages"]
@@ -83,7 +83,7 @@ class ClarifiedScenario(AdaptiveScenario):
 
 
 class ClarifiedPlanTests(unittest.TestCase):
-    """新旧范围、身份、一次消费、恢复及DPR节点准入的组合回归。"""
+    """新旧范围、身份、一次消费、恢复及论文节点准入的组合回归。"""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -142,8 +142,8 @@ class ClarifiedPlanTests(unittest.TestCase):
         self.assertEqual(plan["sources"], ["cvpr"])
         self.assertEqual(plan["date_from"], "2025-01-01")
         self.assertEqual(len(view["result"]["coverage"]["paper_ids"]), count)
-        dpr_calls = [r for r in scenario.requests if r.get("max_tokens") == 4096 and not r.get("tools")]
-        self.assertEqual(len(dpr_calls), 1 if note else 0)
+        reading_calls = [r for r in scenario.requests if r.get("max_tokens") == 4096 and not r.get("tools")]
+        self.assertEqual(len(reading_calls), 1 if note else 0)
         self.assertEqual(bool(view["result"]["saved_path"]), note)
         if note:
             self.assertEqual(Path(view["result"]["saved_path"]).read_text(), view["result"]["answer_markdown"])
@@ -161,7 +161,7 @@ class ClarifiedPlanTests(unittest.TestCase):
     def test_answered_plan_and_success_receipts_replay_without_resend(self):
         self.run_case(2, replay=True)
 
-    def test_explicit_reading_note_enters_dpr_and_saves(self):
+    def test_explicit_reading_note_enters_reading_and_saves(self):
         self.run_case(1, note=True)
 
     def test_answer_cannot_be_reused_to_weaken_the_plan(self):
@@ -173,7 +173,7 @@ class ClarifiedPlanTests(unittest.TestCase):
 
     def test_plan_without_user_note_request_rejects_deep_read(self):
         tid, _ = self.run_case(2)
-        with self.assertRaisesRegex(ValueError, "DPR deep_read requires"):
+        with self.assertRaisesRegex(ValueError, "论文 deep_read requires"):
             CoverageService(self.db).validate_delegation(tid, [{"goal_ids": ["language"], "mode": "deep_read"}])
 
     def test_foreign_pending_or_fake_answers_do_not_allow_scope_change(self):

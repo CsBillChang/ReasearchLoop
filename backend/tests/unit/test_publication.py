@@ -11,11 +11,13 @@ class PublicationTests(unittest.TestCase):
         """普通源码和空凭据模板可以发布。"""
         self.assertEqual(check_file("backend/research_loop/example.py", b'"""module"""'), [])
         self.assertEqual(check_file(".env.example", b"DEEPSEEK_API_KEY=\n"), [])
+        self.assertEqual(check_file("NOTICE", b"MIT License\nCopyright (c) example\n"), [])
 
     def test_private_locations_and_attachments_are_rejected(self):
         """运行数据、历史说明、依赖目录和论文不进入公开树。"""
-        for name in (".env", "docs/archive/old.md", "data/profile.json",
-                     "artifacts/response.json", "frontend/node_modules/x.js", "docs/paper.pdf"):
+        for name in (".env", "docs/archive/old.md", "docs/status.md", "docs/evidence/retrieval.json",
+                     "data/README.md", "artifacts/README.md", "THIRD_PARTY_NOTICES.md",
+                     "data/profile.json", "artifacts/response.json", "frontend/node_modules/x.js", "docs/paper.pdf"):
             with self.subTest(name=name):
                 self.assertTrue(check_file(name, b"private"))
 

@@ -35,7 +35,7 @@ class Scenario:
         body=json.loads(request.content);self.requests.append(body);messages=body['messages'];validate_messages(messages)
         if body['messages'][0]['content'].startswith('你是一名资深学术论文分析助手'):
             assert body['max_tokens']==4096 and body['temperature']==0.3
-            return self.response(body, content='## DPR 精读（供应商替身）\n语言前缀方法来自提供的正文。\n（完）')
+            return self.response(body, content='## 论文 精读（供应商替身）\n语言前缀方法来自提供的正文。\n（完）')
         names={x['function']['name'] for x in body.get('tools',[])}
         assert 'get_citation_stats' not in names
         obs=[json.loads(m['content']) for m in messages if m['role']=='tool']

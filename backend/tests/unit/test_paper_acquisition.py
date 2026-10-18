@@ -1,4 +1,4 @@
-"""获取层固定响应回归；检查 DPR 地址、错误分类与真实本地解析，不调用模型。"""
+"""获取层固定响应回归；检查 论文 地址、错误分类与真实本地解析，不调用模型。"""
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,8 +10,8 @@ import pymupdf
 from research_loop.domain.evidence import PaperCandidate
 from research_loop.domain.tasks import SavePolicy
 from research_loop.providers.discovery import DiscoveryProvider
-from research_loop.providers.dpr_acquisition import PaperAcquisitionError, pdf_from_detail, resolve_pdf_url
-from research_loop.providers.dpr_sources import resolve_backends
+from research_loop.providers.paper_acquisition import PaperAcquisitionError, pdf_from_detail, resolve_pdf_url
+from research_loop.providers.paper_sources import resolve_backends
 from research_loop.providers.pdf import PDFProvider
 from research_loop.services.papers import PaperService
 from research_loop.storage.files import FileStore
@@ -21,9 +21,9 @@ from research_loop.tools.papers import specs
 from research_loop.tools.registry import ToolRegistry
 
 
-class DPRURLTests(unittest.TestCase):
+class PaperURLTests(unittest.TestCase):
     def test_upstream_conference_routes(self):
-        """DPR 支持的详情地址应确定性转换；编号不是某篇论文的特判。"""
+        """论文 支持的详情地址应确定性转换；编号不是某篇论文的特判。"""
         pairs = [
             ("https://www.ecva.net/papers/eccv_2024/papers_ECCV/html/3396_ECCV_2024_paper.php", "https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/03396.pdf"),
             ("https://www.ecva.net/papers/eccv_2024/papers_ECCV/html/91_ECCV_2024_paper.php", "https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/00091.pdf"),
@@ -60,7 +60,7 @@ class DPRURLTests(unittest.TestCase):
                 self.assertEqual(pdf_from_detail(html, "https://paper.example/detail"), "")
 
 
-class DPRPDFTests(unittest.TestCase):
+class PaperPDFTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -181,11 +181,11 @@ class DPRPDFTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
 
-class DPRRetryTests(unittest.TestCase):
+class PaperRetryTests(unittest.TestCase):
     def provider(self, handler):
         client = httpx.Client(transport=httpx.MockTransport(handler))
         self.addCleanup(client.close)
-        backends = resolve_backends({"supabase": {"url": "https://dpr.example", "anon_key": "private-test-key"}})
+        backends = resolve_backends({"supabase": {"url": "https://papers.example", "anon_key": "private-test-key"}})
         return DiscoveryProvider(backends=backends, client=client, retry_wait_seconds=0)
 
     def test_transient_retry_then_success_with_rpc_timeout(self):

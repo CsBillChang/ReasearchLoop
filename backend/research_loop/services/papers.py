@@ -7,7 +7,7 @@ from typing import Any
 from research_loop.domain.evidence import CitationStats, Document, PaperCandidate, SearchResult
 from research_loop.domain.reading import UserPageRange, user_page_range
 from research_loop.providers.discovery import DiscoveryProvider
-from research_loop.providers.dpr_acquisition import PaperAcquisitionError, resolve_pdf_url
+from research_loop.providers.paper_acquisition import PaperAcquisitionError, resolve_pdf_url
 from research_loop.providers.pdf import PDFProvider
 from research_loop.storage.mysql import Database
 
@@ -114,7 +114,7 @@ class PaperService:
         source = None
         paper_id = target_ref
         if candidate:
-            # DPR 的显式 PDF 优先及来源转换规则；合法详情页不再被误报为非法身份。
+            # 论文 的显式 PDF 优先及来源转换规则；合法详情页不再被误报为非法身份。
             source = resolve_pdf_url(candidate.pdf_url, candidate.paper_url)
         elif attached_authorized:
             if not self.db.task_has_input(task_id, target_ref):
@@ -215,7 +215,7 @@ class PaperService:
         return list(docs.values())
 
     def inspect_media(self, task_id: str, target_ref: str, start_page: int, page_count: int | None, attachments: dict) -> dict:
-        """复用授权读取取得物理 PDF，再调用 DPR 图表适配；无视觉模型时如实返回限制。"""
+        """复用授权读取取得物理 PDF，再调用 论文 图表适配；无视觉模型时如实返回限制。"""
         from research_loop.providers.paper_media import PaperMediaProvider
         # 显式起始范围触发 PDF 页级路径，不能把 Jina 文本 hash 当 PDF hash。
         scope = self.user_scope(task_id)

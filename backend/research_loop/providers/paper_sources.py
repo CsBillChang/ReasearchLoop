@@ -1,4 +1,4 @@
-"""DPR 来源目录：来源别名、RPC 名称与连接配置的统一映射；配置存在不代表来源真实可用。"""
+"""论文来源目录：来源别名、RPC 名称与连接配置的统一映射；配置存在不代表来源真实可用。"""
 from __future__ import annotations
 from typing import Any
 
@@ -24,7 +24,7 @@ def resolve_backends(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     result = {}
     for source in SUPPORTED_SOURCES:
         default = {"enabled": True, "schema": "public", "bm25_rpc": RPC_NAMES[source], "use_bm25_rpc": True}
-        # Share connection settings only, never the arXiv RPC.
+        # 只共享连接字段，不能把 arXiv 的 RPC 复制给其他来源。
         default.update({k: shared[k] for k in ("url", "anon_key", "schema") if k in shared})
         if source == "arxiv":
             default.update(legacy)
