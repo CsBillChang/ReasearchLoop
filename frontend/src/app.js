@@ -15,7 +15,30 @@ const inputs=new Map();let submitRecord=null;
 const taskCache=new Map();
 let conversationItems=[],renameTarget=null,renameRequest=null;
 function error(e){$('#toast').textContent=e.message||String(e);$('#toast').hidden=false;setTimeout(()=>$('#toast').hidden=true,7000);}
-function closeMenu(){$('#sidebar').classList.remove('open');$('#backdrop').hidden=true;}
+const compactNavigation=window.matchMedia('(max-width: 760px)');
+/** 窄屏抽屉关闭时退出焦点树；打开时隔离正文，保持键盘焦点在导航内。 */
+function setMenu(open,{restoreFocus=true}={}) {
+  const sidebar=$('#sidebar'),wasOpen=sidebar.classList.contains('open');
+  const expanded=open&&compactNavigation.matches;
+  sidebar.classList.toggle('open',expanded);sidebar.inert=compactNavigation.matches&&!expanded;
+  $('#main-content').inert=expanded;$('#backdrop').hidden=!expanded;
+  $('#menu').setAttribute('aria-expanded',String(expanded));
+  if(expanded){sidebar.setAttribute('role','dialog');sidebar.setAttribute('aria-modal','true');$('#sidebar-close').focus();}
+  else{sidebar.removeAttribute('role');sidebar.removeAttribute('aria-modal');if(wasOpen&&restoreFocus)$('#menu').focus();}
+}
+function closeMenu(){setMenu(false);}
+compactNavigation.addEventListener('change',()=>setMenu(false,{restoreFocus:false}));
+setMenu(false,{restoreFocus:false});
+$('#sidebar').addEventListener('keydown',event=>{
+  if(!compactNavigation.matches||!$('#sidebar').classList.contains('open'))return;
+  if(event.key==='Escape'){event.preventDefault();closeMenu();}
+  if(event.key==='Tab'){
+    const targets=[...$('#sidebar').querySelectorAll('a[href],button:not(:disabled)')].filter(el=>el.getClientRects().length);
+    const first=targets[0],last=targets.at(-1);
+    if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}
+    else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}
+  }
+});
 function cacheInput(){inputs.set(cid||'new',{text:$('#prompt').value,attachments,feedback,allow:$('#save-permission').checked});}
 function restoreInput(){const d=inputs.get(cid||'new')||{};$('#prompt').value=d.text||'';attachments=d.attachments||[];feedback=d.feedback||null;$('#save-permission').checked=!!d.allow;renderAttachments();renderFeedback();}
 function renderAttachments(){$('#attachments').innerHTML=attachments.map((a,i)=>'<span class="chip">▤ '+escape(a.filename||a.url||a.input_ref)+' <button type="button" data-remove="'+i+'" aria-label="移除附件">×</button></span>').join('');}
@@ -104,7 +127,7 @@ $('#attachments').onclick=e=>{if(e.target.dataset.remove!==undefined){attachment
 $('#add-link').onclick=()=>$('#link-dialog').showModal();$('#link-close').onclick=()=>$('#link-dialog').close();
 $('#link-form').onsubmit=e=>{e.preventDefault();const url=$('#paper-url').value.trim();if(!/^https?:\/\//.test(url))return error(new Error('请使用 http 或 https 论文地址'));attachments.push({input_ref:'link-'+key(),url,filename:new URL(url).hostname});renderAttachments();cacheInput();$('#paper-url').value='';$('#link-dialog').close();};
 $('#reading-list').onclick=()=>showReadingList(error,readOnly).catch(error);
-$('#panel-close').onclick=()=>$('#artifact-panel').close();$('#menu').onclick=()=>{$('#sidebar').classList.toggle('open');$('#backdrop').hidden=!$('#sidebar').classList.contains('open');};$('#backdrop').onclick=closeMenu;
+$('#panel-close').onclick=()=>$('#artifact-panel').close();$('#menu').onclick=()=>setMenu(!$('#sidebar').classList.contains('open'));$('#backdrop').onclick=closeMenu;$('#sidebar-close').onclick=closeMenu;
 $('#new-chat').onclick=()=>openConversation(null).catch(error);
 $('#conversations').onclick=e=>{
   const rename=e.target.closest('[data-rename]');

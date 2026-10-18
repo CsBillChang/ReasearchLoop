@@ -26,9 +26,16 @@ PATTERNS = {
 # 仅放行逐图检查过的合成展示截图；换图须重新核对像素内容和字节身份。
 # hash 白名单不等于自动隐私识别，其他图片仍按原发布边界拒绝。
 REVIEWED_SCREENSHOTS = {
-    "frontend/assets/screenshots/chat.jpg": "538c4266b661a555558352ff04fbee1058a1f3da9f5a7ce2ba5474d2834ed1a2",
-    "frontend/assets/screenshots/profile.jpg": "4a59bb6d3611a87e4b6cefe2559cdbea1088f25c43aa31ccee346bb2abf81e90",
+    "frontend/assets/screenshots/chat.jpg": "95d68d97c868ee9f51bd8cbc51af37786fc06c4122ae79d12907df5b43431743",
+    "frontend/assets/screenshots/profile.jpg": "83996dd4c8bc299a6a847ca27b515653947628d8abe0241b30a70f18045ebf6a",
 }
+# GPT-image 生成并逐图核对的 README 素材；不放行原始桌宠参考或其他图片。
+# 仍按精确路径、内容 hash 和 PNG 文件签名检查，不作整目录豁免。
+REVIEWED_ARTWORK = {
+    "frontend/assets/brand/researchloop-logo.png": "7c9bbf530070310f50c2fc4ef851140db514b60381a20a6e4de72a6dfae82511",
+    "frontend/assets/diagrams/researchloop-workflow.png": "7b4137d4720009e1cc77dc1d4f13b25b944d0b420e8b523825d6459761840b7c",
+}
+REVIEWED_IMAGES = {**REVIEWED_SCREENSHOTS, **REVIEWED_ARTWORK}
 
 
 def check_file(name: str, content: bytes, mode: str = "100644") -> list[dict]:
@@ -49,15 +56,17 @@ def check_file(name: str, content: bytes, mode: str = "100644") -> list[dict]:
     if (not allowed or path.is_absolute() or ".." in path.parts
             or any(part in BLOCKED_PARTS for part in path.parts)
             or (path.name.startswith(".env") and name != ".env.example")
-            or (path.suffix.lower() in BLOCKED_SUFFIXES and name not in REVIEWED_SCREENSHOTS)):
+            or (path.suffix.lower() in BLOCKED_SUFFIXES and name not in REVIEWED_IMAGES)):
         findings.append({"path": name, "rule": "excluded_path"})
     if mode not in {"100644", "100755"}:
         findings.append({"path": name, "rule": "unsupported_file_mode"})
-    if name in REVIEWED_SCREENSHOTS:
+    if name in REVIEWED_IMAGES:
         if mode != "100644":
             findings.append({"path": name, "rule": "image_mode_not_regular"})
-        if (len(content) > 1_000_000 or not content.startswith(b"\xff\xd8\xff")
-                or hashlib.sha256(content).hexdigest() != REVIEWED_SCREENSHOTS[name]):
+        signature = b"\x89PNG\r\n\x1a\n" if name in REVIEWED_ARTWORK else b"\xff\xd8\xff"
+        limit = 4_000_000 if name in REVIEWED_ARTWORK else 1_000_000
+        if (len(content) > limit or not content.startswith(signature)
+                or hashlib.sha256(content).hexdigest() != REVIEWED_IMAGES[name]):
             findings.append({"path": name, "rule": "unreviewed_image_bytes"})
         return findings
     if len(content) > 1_000_000 or b"\x00" in content:

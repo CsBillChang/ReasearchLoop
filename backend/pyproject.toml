@@ -1,6 +1,6 @@
 [project]
 name = "research-loop-agent"
-version = "0.2.0"
+version = "1.0.0"
 description = "ResearchLoop clean foundation"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"

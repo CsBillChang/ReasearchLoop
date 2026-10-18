@@ -2,7 +2,7 @@
 import unittest
 from pathlib import Path
 
-from scripts.check_publication import check_file, REVIEWED_SCREENSHOTS
+from scripts.check_publication import check_file, REVIEWED_SCREENSHOTS, REVIEWED_ARTWORK
 
 
 class PublicationTests(unittest.TestCase):
@@ -54,3 +54,23 @@ class PublicationTests(unittest.TestCase):
                      'frontend/assets/private.png'):
             with self.subTest(name=name):
                 self.assertTrue(check_file(name, b'\xff\xd8\xffunreviewed'))
+
+    def test_only_reviewed_generated_artwork_is_allowed(self):
+        """仅审核过的生成 Logo 与架构图放行；篡改和符号链接均拒绝。"""
+        root = Path(__file__).resolve().parents[3]
+        for name in REVIEWED_ARTWORK:
+            with self.subTest(name=name):
+                data = (root / name).read_bytes()
+                self.assertTrue(data.startswith(b'\x89PNG\r\n\x1a\n'))
+                self.assertEqual(check_file(name, data), [])
+                self.assertTrue(check_file(name, data + b'changed'))
+                self.assertTrue(check_file(name, data, '120000'))
+                self.assertTrue(check_file(name, data, '100755'))
+
+    def test_pet_reference_and_unreviewed_artwork_are_rejected(self):
+        """参考原件留本机，生成素材目录也不允许任意新图混入。"""
+        for name in ('artifacts/pet-reference.png',
+                     'frontend/assets/brand/pet-reference.png',
+                     'frontend/assets/diagrams/unreviewed.png'):
+            with self.subTest(name=name):
+                self.assertTrue(check_file(name, b'\x89PNG\r\n\x1a\nunreviewed'))

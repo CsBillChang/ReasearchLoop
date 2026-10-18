@@ -1,21 +1,75 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ResearchLoop · 科研对话</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/vendor/katex.css"><link rel="stylesheet" href="/src/styles.css"></head>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="ResearchLoop 个人科研工作台：从研究问题出发，阅读论文、追溯证据并积累研究笔记。">
+  <title>ResearchLoop · 科研对话</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='9' fill='%23f2e3e0'/%3E%3Cpath d='M10 11h8q4 0 4 4v17q0-4-4-4h-8zm20 0h-4q-4 0-4 4' fill='none' stroke='%2352664f' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/vendor/katex.css">
+  <link rel="stylesheet" href="/src/styles.css">
+</head>
 <body>
-<div class="app-shell">
-<aside class="sidebar" id="sidebar"><a class="brand" href="#"><span class="brand-icon">R</span><span>ResearchLoop<small>你的个人科研助手</small></span></a>
-<button id="new-chat" class="new-chat">＋ 新建对话</button>
-<button id="profile-nav" class="profile-nav" aria-label="个人面板"><span class="profile-symbol" aria-hidden="true">◎</span><span>个人面板<small>偏好、兴趣与研究积累</small></span><span class="nav-arrow" aria-hidden="true">›</span></button>
-<div class="nav-label">最近对话</div><nav id="conversations" aria-label="对话历史"></nav>
-<div class="sidebar-bottom"><span id="connection" role="status">正在连接…</span></div></aside>
-<div class="mobile-backdrop" id="backdrop" hidden></div>
-<main><header class="topbar"><button id="menu" class="icon" aria-label="打开侧栏">☰</button><span id="view-title">科研对话</span><button id="reading-list" aria-label="打开阅读清单">阅读清单</button><span class="top-hint">ReAct · Reflection · Memory</span></header>
-<section id="chat-view"><div id="conversation-scroll"><div id="welcome"><div class="intro-icon">✳</div><p class="eyebrow">从好问题开始</p><h1>今天想研究什么？</h1><p>找论文、读原文，把想法变成有依据的研究。</p><div class="suggestions"><button data-prompt="找两篇近三年的开放词汇目标检测论文，比较它们如何利用语言信息。">⌕<strong>探索一个方向</strong><span>发现论文，比较研究方法</span></button><button data-prompt="请精读我上传的论文，生成八点精读笔记。">▤<strong>精读一篇论文</strong><span>上传 PDF，梳理方法与实验</span></button><button data-prompt="回顾我之前的研究，概括关注的方向和未解决的问题。">◷<strong>接着上次研究</strong><span>从历史记录与记忆继续</span></button></div></div>
-<button id="older" hidden>加载更早消息</button><div id="messages" aria-live="polite"></div><div id="live" hidden></div></div>
-<div class="composer-wrap"><div id="feedback-target" hidden></div><div id="attachments"></div><form id="composer"><label class="sr-only" for="prompt">研究问题</label><textarea id="prompt" rows="2" placeholder="描述你的研究目标，或继续追问…"></textarea><div class="composer-toolbar"><div class="input-tools"><button type="button" id="attach" title="上传 PDF" aria-label="上传 PDF">＋</button><input id="pdf-input" type="file" accept="application/pdf,.pdf" multiple hidden><button type="button" id="add-link">论文链接</button><label class="save-option"><input type="checkbox" id="save-permission">允许本次保存笔记</label></div><button type="button" id="cancel" hidden>停止任务</button><button type="submit" id="send" class="primary">发送 ↑</button></div></form><p class="composer-help" id="composer-help">Enter 发送 · Shift+Enter 换行 · 结果可能存在不确定性，请结合原文使用</p></div></section>
-<section id="profile-view" hidden></section></main>
-</div>
-<dialog id="artifact-panel"><div class="panel-head"><span id="panel-title">研究产物</span><button id="panel-close" aria-label="关闭面板">✕</button></div><div id="panel-body"></div></dialog>
-<dialog id="link-dialog"><form id="link-form"><h2>添加论文链接</h2><label for="paper-url">论文详情页或 PDF 地址</label><input id="paper-url" type="url" required placeholder="https://…"><div class="dialog-actions"><button type="button" id="link-close">取消</button><button class="primary">添加</button></div></form></dialog>
-<dialog id="rename-dialog" aria-labelledby="rename-heading"><form id="rename-form"><p class="eyebrow">整理你的研究</p><h2 id="rename-heading">修改对话名称</h2><label for="conversation-title">对话名称</label><input id="conversation-title" maxlength="200" required autocomplete="off"><p class="form-hint">只修改名称，消息和研究成果都会保留。</p><div class="dialog-actions"><button type="button" id="rename-cancel">取消</button><button class="primary" id="rename-submit">保存名称</button></div><p id="rename-error" role="alert" hidden></p></form></dialog>
-<div id="toast" role="alert" hidden></div><script type="module" src="/src/app.js"></script></body></html>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="研究导航">
+      <div class="sidebar-heading">
+        <a class="brand" href="#main-content" aria-label="ResearchLoop，返回新对话">
+          <span class="brand-icon" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M5 7h6c3 0 5 2 5 4v16c0-3-2-5-5-5H5V7Zm22 0h-6c-3 0-5 2-5 4v16c0-3 2-5 5-5h6V7Z"/><path d="M9 12h3m-3 4h3m8-4h3m-3 4h3"/></svg></span>
+          <span>ResearchLoop<small>你的个人科研助手</small></span>
+        </a>
+        <button id="sidebar-close" class="icon" aria-label="关闭侧栏">×</button>
+      </div>
+      <button id="new-chat" class="new-chat"><span aria-hidden="true">＋</span> 新建研究对话</button>
+      <button id="profile-nav" class="profile-nav" aria-label="个人面板"><span class="profile-symbol" aria-hidden="true">◎</span><span>个人面板<small>偏好、兴趣与研究积累</small></span><span class="nav-arrow" aria-hidden="true">›</span></button>
+      <div class="nav-label">研究记录 <span aria-hidden="true">/</span> 最近对话</div>
+      <nav id="conversations" aria-label="对话历史"></nav>
+      <div class="sidebar-bottom"><span class="workspace-label">个人研究工作台</span><span id="connection" role="status">正在连接…</span></div>
+    </aside>
+    <div class="mobile-backdrop" id="backdrop" hidden></div>
+    <main id="main-content" tabindex="-1">
+      <header class="topbar">
+        <button id="menu" class="icon" aria-label="打开侧栏" aria-controls="sidebar" aria-expanded="false">☰</button>
+        <div class="view-heading"><span class="topbar-label">Research workspace</span><span id="view-title">科研对话</span></div>
+        <span class="top-hint">从问题出发，循证而行</span>
+        <button id="reading-list" aria-label="打开阅读清单"><svg class="inline-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 3h10v14l-5-3-5 3V3Z"/></svg>阅读清单</button>
+      </header>
+      <section id="chat-view" aria-label="科研对话">
+        <div id="conversation-scroll">
+          <div id="welcome">
+            <p class="eyebrow"><span class="intro-rule" aria-hidden="true"></span>ResearchLoop / 研究工作台</p>
+            <h1>让好问题，<br>成为研究的起点。</h1>
+            <p class="welcome-description">从一篇论文、一处疑问开始。<br>阅读原文，梳理证据，让每次探索都有迹可循。</p>
+            <div class="suggestions" aria-label="研究问题示例">
+              <button data-prompt="找两篇近三年的开放词汇目标检测论文，比较它们如何利用语言信息。"><span class="suggestion-index" aria-hidden="true">01</span><span class="suggestion-copy"><strong>探索一个方向</strong><span>发现相关论文，比较研究方法</span></span><span class="suggestion-arrow" aria-hidden="true">↗</span></button>
+              <button data-prompt="请精读我上传的论文，生成八点精读笔记。"><span class="suggestion-index" aria-hidden="true">02</span><span class="suggestion-copy"><strong>精读一篇论文</strong><span>从 PDF 出发，梳理方法与实验</span></span><span class="suggestion-arrow" aria-hidden="true">↗</span></button>
+              <button data-prompt="回顾我之前的研究，概括关注的方向和未解决的问题。"><span class="suggestion-index" aria-hidden="true">03</span><span class="suggestion-copy"><strong>接着上次研究</strong><span>回到已有线索，继续未解的问题</span></span><span class="suggestion-arrow" aria-hidden="true">↗</span></button>
+            </div>
+          </div>
+          <button id="older" hidden>加载更早消息</button>
+          <div id="messages" aria-live="polite"></div>
+          <div id="live" hidden></div>
+        </div>
+        <div class="composer-wrap">
+          <div id="feedback-target" hidden></div><div id="attachments"></div>
+          <form id="composer">
+            <label class="sr-only" for="prompt">研究问题</label>
+            <textarea id="prompt" rows="2" placeholder="写下你的研究问题，或添加一篇论文…"></textarea>
+            <div class="composer-toolbar">
+              <div class="input-tools"><button type="button" id="attach" title="上传 PDF" aria-label="上传 PDF">＋</button><input id="pdf-input" type="file" accept="application/pdf,.pdf" multiple hidden><button type="button" id="add-link">论文链接</button><label class="save-option"><input type="checkbox" id="save-permission">允许本次保存笔记</label></div>
+              <div class="send-actions"><button type="button" id="cancel" hidden>停止任务</button><button type="submit" id="send" class="primary">发送 ↑</button></div>
+            </div>
+          </form>
+          <p class="composer-help" id="composer-help">Enter 发送 · Shift+Enter 换行 · 结果请结合原文使用</p>
+        </div>
+      </section>
+      <section id="profile-view" aria-label="个人面板" hidden></section>
+    </main>
+  </div>
+  <dialog id="artifact-panel" aria-labelledby="panel-title"><div class="panel-head"><span id="panel-title">研究产物</span><button id="panel-close" class="icon" aria-label="关闭面板">×</button></div><div id="panel-body"></div></dialog>
+  <dialog id="link-dialog" aria-labelledby="link-heading"><form id="link-form"><p class="eyebrow">研究材料</p><h2 id="link-heading">添加论文链接</h2><label for="paper-url">论文详情页或 PDF 地址</label><input id="paper-url" type="url" required placeholder="https://…"><div class="dialog-actions"><button type="button" id="link-close">取消</button><button class="primary">添加</button></div></form></dialog>
+  <dialog id="rename-dialog" aria-labelledby="rename-heading"><form id="rename-form"><p class="eyebrow">整理研究记录</p><h2 id="rename-heading">修改对话名称</h2><label for="conversation-title">对话名称</label><input id="conversation-title" maxlength="200" required autocomplete="off"><p class="form-hint">只修改名称，消息和研究成果都会保留。</p><div class="dialog-actions"><button type="button" id="rename-cancel">取消</button><button class="primary" id="rename-submit">保存名称</button></div><p id="rename-error" role="alert" hidden></p></form></dialog>
+  <div id="toast" role="alert" hidden></div>
+  <script type="module" src="/src/app.js"></script>
+</body>
+</html>
