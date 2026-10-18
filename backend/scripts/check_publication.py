@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -21,6 +22,12 @@ PATTERNS = {
     "github_token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})"),
     "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
     "personal_home": re.compile(r"/(?:Users|home)/[A-Za-z0-9_.-]+/"),
+}
+# 仅放行逐图检查过的合成展示截图；换图须重新核对像素内容和字节身份。
+# hash 白名单不等于自动隐私识别，其他图片仍按原发布边界拒绝。
+REVIEWED_SCREENSHOTS = {
+    "frontend/assets/screenshots/chat.jpg": "d5596e3834cf9723ba5326958e4de8889563c569f91164684db21775b93395dd",
+    "frontend/assets/screenshots/profile.jpg": "763d7a6da1b15ca03d34ac58e2c84fd91ef06babb01175536397d34ce971c183",
 }
 
 
@@ -42,10 +49,17 @@ def check_file(name: str, content: bytes, mode: str = "100644") -> list[dict]:
     if (not allowed or path.is_absolute() or ".." in path.parts
             or any(part in BLOCKED_PARTS for part in path.parts)
             or (path.name.startswith(".env") and name != ".env.example")
-            or path.suffix.lower() in BLOCKED_SUFFIXES):
+            or (path.suffix.lower() in BLOCKED_SUFFIXES and name not in REVIEWED_SCREENSHOTS)):
         findings.append({"path": name, "rule": "excluded_path"})
     if mode not in {"100644", "100755"}:
         findings.append({"path": name, "rule": "unsupported_file_mode"})
+    if name in REVIEWED_SCREENSHOTS:
+        if mode != "100644":
+            findings.append({"path": name, "rule": "image_mode_not_regular"})
+        if (len(content) > 1_000_000 or not content.startswith(b"\xff\xd8\xff")
+                or hashlib.sha256(content).hexdigest() != REVIEWED_SCREENSHOTS[name]):
+            findings.append({"path": name, "rule": "unreviewed_image_bytes"})
+        return findings
     if len(content) > 1_000_000 or b"\x00" in content:
         findings.append({"path": name, "rule": "large_or_binary"})
     try:

@@ -1,7 +1,8 @@
 """验证公开边界扫描不会放行私有配置，也不会回显发现的密钥。"""
 import unittest
+from pathlib import Path
 
-from scripts.check_publication import check_file
+from scripts.check_publication import check_file, REVIEWED_SCREENSHOTS
 
 
 class PublicationTests(unittest.TestCase):
@@ -34,3 +35,22 @@ class PublicationTests(unittest.TestCase):
         self.assertTrue(check_file("docs/x.md", b"\x00"))
         self.assertTrue(check_file("docs/x.md", b"x" * 1_000_001))
         self.assertTrue(check_file("docs/x.md", b"target", "120000"))
+
+    def test_only_reviewed_screenshot_bytes_are_allowed(self):
+        """两份已审查图片能发布；同名图片的任何字节变化都拒绝。"""
+        root = Path(__file__).resolve().parents[3]
+        for name in REVIEWED_SCREENSHOTS:
+            with self.subTest(name=name):
+                data = (root / name).read_bytes()
+                self.assertEqual(check_file(name, data), [])
+                self.assertTrue(check_file(name, data + b'changed'))
+                self.assertTrue(check_file(name, data, '120000'))
+                self.assertTrue(check_file(name, data, '100755'))
+
+    def test_unreviewed_image_path_is_still_rejected(self):
+        """截图目录不是整目录豁免；新图片及路径变形仍拒绝。"""
+        for name in ('frontend/assets/screenshots/private.jpg',
+                     'frontend/assets/screenshots/../screenshots/chat.jpg',
+                     'frontend/assets/private.png'):
+            with self.subTest(name=name):
+                self.assertTrue(check_file(name, b'\xff\xd8\xffunreviewed'))

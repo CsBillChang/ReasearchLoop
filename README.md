@@ -13,6 +13,7 @@
 </p>
 
 <p align="center">
+  <a href="#preview">界面预览</a> ·
   <a href="#features">核心功能</a> ·
   <a href="#scenarios">使用场景</a> ·
   <a href="#architecture">工作流架构</a> ·
@@ -23,6 +24,28 @@
 **ResearchLoop** 是一个以自然语言对话为入口的个人科研 Agent 应用。你提出研究目标，Agent 选择工具、分派研究任务、阅读原文，并将发现、证据和待确认问题组织成可继续追问的成果。
 
 从找论文、问论文，到精读和跨论文比较，都在同一个对话中完成。个人面板维护研究兴趣、长期偏好和论文简报订阅，让后续研究能够接着已有记录继续。
+
+<a id="preview"></a>
+
+## 🖼️ 界面预览
+
+> 下图为当前前端的实际截图。对话、回答、研究统计、偏好与兴趣均使用**合成展示数据**，不代表真实用户记录或模型评测结果。
+
+### 💬 科研对话
+
+用自然语言提出问题，在同一对话中阅读比较表格、查看关联成果，并继续追问。
+
+<p align="center">
+  <img src="frontend/assets/screenshots/chat.jpg" alt="ResearchLoop 聊天界面：合成问题、方法比较表格与继续研究入口" width="100%" />
+</p>
+
+### 🧠 个人面板
+
+查看研究积累，用自然语言记录长期偏好，并管理可以撤销的兴趣推断。
+
+<p align="center">
+  <img src="frontend/assets/screenshots/profile.jpg" alt="ResearchLoop 个人面板：合成统计、自然语言偏好与兴趣推断" width="100%" />
+</p>
 
 <a id="features"></a>
 
