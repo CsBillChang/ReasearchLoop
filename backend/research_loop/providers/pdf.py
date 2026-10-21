@@ -30,6 +30,7 @@ SOFTWARE.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 import re
@@ -38,13 +39,18 @@ import os
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
 import httpx
 
 from research_loop.domain.evidence import AssetReference, Document, PageEvidence
-from research_loop.providers.paper_acquisition import PaperAcquisitionError, pdf_from_detail, resolve_pdf_url
+from research_loop.providers.read_retry import cancellable_wait
+from research_loop.providers.paper_acquisition import PaperAcquisitionError, access_challenge_reason, pdf_from_detail, resolve_pdf_url
 from research_loop.storage.files import FileStore, sha256_bytes
+
+
+class PaperReadCancelled(PermissionError):
+    """读取已被取消或执行权失效；不能作为网络失败重试。"""
 
 
 class PDFProvider:
@@ -74,6 +80,34 @@ class PDFProvider:
         """替换当前线程诊断；不影响其他并行 Researcher 的读取记录。"""
         self._fetch_state.diagnostics = value
 
+    @contextmanager
+    def cancellation_scope(self, cancelled: Callable[[], bool]) -> Iterator[None]:
+        """绑定当前读取线程的取消回调，嵌套结束后恢复外层回调。
+
+        Args:
+            cancelled: 取消或租约失效时返回 True；不修改既有网络超时。
+
+        Yields:
+            当前读取作用域；不能中断尚未返回的同步 socket 读取。
+
+        Raises:
+            PaperReadCancelled: 已取消，不继续请求、解析或写缓存。
+        """
+        previous = getattr(self._fetch_state, "cancelled", None)
+        self._fetch_state.cancelled = cancelled
+        try:
+            self._check_cancelled()
+            yield
+            self._check_cancelled()
+        finally:
+            self._fetch_state.cancelled = previous
+
+    def _check_cancelled(self) -> None:
+        """在同步操作边界检查取消，不将取消混入可重试的来源错误。"""
+        cancelled = getattr(self._fetch_state, "cancelled", None)
+        if cancelled is not None and cancelled():
+            raise PaperReadCancelled("论文读取已取消或执行权失效，未继续获取或授予正文")
+
     def close(self) -> None:
         if self._owns_client:
             self.client.close()
@@ -88,6 +122,7 @@ class PDFProvider:
         Returns:
             可用正文快照；Jina 文本的 total_pages 为 None，不冒充物理页覆盖。
         """
+        self._check_cancelled()
         if not source.startswith(("https://", "http://")):
             return self._ingest_pdf(source, paper_id)
         source = resolve_pdf_url(None, source)
@@ -95,16 +130,29 @@ class PDFProvider:
         index_path = self.file_store.parse_dir / ("source-" + key + ".json")
         if index_path.exists():
             try:
-                document = Document.model_validate(json.loads(index_path.read_text()))
-                cached = json.loads(Path(document.cache_path).read_text())
-                if is_usable_paper_text("\n\n".join(p["text"] for p in cached["pages"])):
-                    if document.parser_name == "jina" and sha256_bytes(cached["pages"][0]["text"].encode()) != document.content_sha256:
-                        raise ValueError("text cache hash mismatch")
-                    self.last_fetch = {"kind": "text_cache", "source": source, "attempts": [], "cache_path": document.cache_path}
-                    return document.model_copy(update={"paper_id": paper_id})
+                source_cache = json.loads(index_path.read_text())
+                document = Document.model_validate(source_cache)
+                if not self.parse_contract_matches(document):
+                    raise ValueError("source cache parser contract mismatch")
             except (ValueError, OSError, KeyError, TypeError):
-                pass  # 损坏或过期格式不能当成有效全文，重新走同论文获取路线。
+                document = None  # 可重建URL索引缺失/过期沿原miss路线；内容快照另行校验。
+            if document is not None:
+                self.last_fetch = {'kind': 'text_cache', 'source': source, 'requested_source': source,
+                                   'attempts': [], 'cache_path': document.cache_path}
+                try:
+                    self._cached_pages(document, missing_is_miss=True)
+                except FileNotFoundError:
+                    pass
+                else:
+                    self._check_cancelled()
+                    self.last_fetch = {"kind": "text_cache", "source": source, "attempts": [], "cache_path": document.cache_path}
+                    # URL缓存也保留实际下载终点，不能在缓存命中时丢掉重定向版本校验。
+                    provenance = source_cache.get("_source_fetch") or {}
+                    if provenance.get("final_url"):
+                        self.last_fetch["final_url"] = provenance["final_url"]
+                    return document.model_copy(update={"paper_id": paper_id})
         text, attempts = self._jina(source)
+        self._check_cancelled()
         if is_usable_paper_text(text):
             digest = sha256_bytes(text.encode())
             document_id = "text:" + digest[:32]
@@ -113,10 +161,15 @@ class PDFProvider:
             cache_path = self.file_store.cache_parse_path("jina-" + digest)
             payload = {"total_pages": None, "pages": [page.model_dump(mode="json")],
                        "gaps": ["Jina 正文无可靠物理页码；全文覆盖和图表公式解释未逐页验证"]}
-            self.file_store.write_bytes_atomic(cache_path, json.dumps(payload, ensure_ascii=False).encode())
             document = Document(document_id=document_id, paper_id=paper_id, content_sha256=digest,
                                 parser_name="jina", parser_version="reader-v1", config_sha256=sha256_bytes(b"dpr-jina-v1"),
                                 total_pages=None, cache_path=str(cache_path), gaps=payload["gaps"])
+            self._validate_parse_payload(document, payload)
+            self._check_cancelled()
+            if cache_path.exists():
+                self._cached_pages(document)
+            else:
+                self.file_store.write_bytes_atomic(cache_path, json.dumps(payload, ensure_ascii=False).encode())
             self.last_fetch = {"kind": "jina", "source": source, "attempts": attempts, "hash_kind": "extracted_text"}
         else:
             try:
@@ -124,19 +177,117 @@ class PDFProvider:
             finally:
                 self.last_fetch["jina_attempts"] = attempts
         # 只更新可重建的 URL 缓存索引；正文/解析快照由内容 hash 命名并保留历史。
+        self._check_cancelled()
         fd, temporary = tempfile.mkstemp(dir=index_path.parent, prefix=".source-")
         try:
             with os.fdopen(fd, "w") as handle:
-                handle.write(document.model_dump_json())
+                source_cache = document.model_dump(mode="json")
+                source_cache["_source_fetch"] = {key: self.last_fetch[key] for key in ("requested_source", "final_url", "kind") if key in self.last_fetch}
+                handle.write(json.dumps(source_cache, ensure_ascii=False))
+            self._check_cancelled()
             os.replace(temporary, index_path)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
         return document
 
+    def parse_contract_matches(self, document: Document) -> bool:
+        """按实际载体验证解析合同，不用PDF配置误判独立Jina文本版本。
+
+        Args:
+            document: 已有文档元数据；不改写历史解析快照。
+
+        Returns:
+            当前provider可安全复用该解析合同；未知解析器返回False。
+        """
+        if document.parser_name == "jina":
+            return (document.parser_version == "reader-v1" and document.total_pages is None
+                    and document.config_sha256 == sha256_bytes(b"dpr-jina-v1"))
+        config_hash = hashlib.sha256(json.dumps(self.parser_config, sort_keys=True).encode()).hexdigest()
+        return (document.parser_name == "pymupdf" and document.parser_version == self.parser_version
+                and document.config_sha256 == config_hash
+                and isinstance(document.total_pages, int) and document.total_pages > 0)
+
     def ingest_pages(self, source: str, paper_id: str) -> Document:
         """物理页请求必须直接解析 PDF，不能用 Jina 正文片段冒充指定页。"""
         return self._ingest_pdf(source, paper_id)
+
+    def _validate_parse_payload(self, document: Document, payload: dict) -> list[PageEvidence]:
+        """统一校验解析合同、定位、页身份及基本正文，不修补历史快照。
+
+        Args:
+            document: 当前解析版本与内容身份。
+            payload: 缓存命中或待提交的新解析结果。
+
+        Returns:
+            按原顺序验证过的页；不把文本段落推成物理页。
+
+        Raises:
+            PaperAcquisitionError: 快照损坏，不可重试且不覆盖原文件。
+        """
+        try:
+            if not self.parse_contract_matches(document):
+                raise ValueError('parser contract mismatch')
+            if document.parser_name == 'jina':
+                expected_id = 'text:' + document.content_sha256[:32]
+            else:
+                key = sha256_bytes(f'{document.content_sha256}:pymupdf:{document.parser_version}:{document.config_sha256}'.encode())
+                expected_id = 'doc:' + key[:32]
+            if document.document_id != expected_id:
+                raise ValueError('content/parser document identity mismatch')
+            total = payload['total_pages']
+            if total != document.total_pages or type(total) is not type(document.total_pages):
+                raise ValueError('total pages mismatch')
+            raw_pages = payload['pages']
+            if not isinstance(raw_pages, list) or not raw_pages:
+                raise ValueError('pages missing')
+            numbers = [raw['page_number'] for raw in raw_pages]
+            if total is None:
+                if numbers != [None]:
+                    raise ValueError('Jina has no physical pages')
+            elif (any(type(number) is not int for number in numbers)
+                  or numbers != list(range(1, total + 1))):
+                raise ValueError('physical pages mismatch')
+            pages = [PageEvidence.model_validate(raw) for raw in raw_pages]
+            if (any(page.document_id != document.document_id or not page.evidence_id.strip() for page in pages)
+                    or len({page.evidence_id for page in pages}) != len(pages)):
+                raise ValueError('page identity mismatch')
+            if not is_usable_paper_text('\n\n'.join(page.text for page in pages)):
+                raise ValueError('unusable text')
+            if total is None and sha256_bytes(pages[0].text.encode()) != document.content_sha256:
+                raise ValueError('Jina text hash mismatch')
+            return pages
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise PaperAcquisitionError('PDF_CACHE_INVALID', '解析快照合同损坏，未返回页证据且未覆盖原快照',
+                                        acquisition=dict(self.last_fetch)) from exc
+
+    def _cached_pages(self, document: Document, *, missing_is_miss: bool = False) -> list[PageEvidence]:
+        """读回后共同验证；仅URL索引允许缺解析文件沿既有miss路线。
+
+        Args:
+            document: 待读取的解析快照。
+            missing_is_miss: URL索引指向文件已丢失时交回原获取路线。
+
+        Returns:
+            验证过的页列表。
+
+        Raises:
+            FileNotFoundError: 显式允许缺文件按miss处理。
+            PaperAcquisitionError: 存在但损坏或无法读取，不自动重试/重建。
+        """
+        self._check_cancelled()
+        try:
+            payload = json.loads(Path(document.cache_path).read_text(encoding='utf-8'))
+        except FileNotFoundError as exc:
+            if missing_is_miss:
+                raise
+            raise PaperAcquisitionError('PDF_CACHE_INVALID', '解析快照缺失，未返回页证据', acquisition=dict(self.last_fetch)) from exc
+        except (OSError, ValueError) as exc:
+            raise PaperAcquisitionError('PDF_CACHE_INVALID', '解析快照无法读取，未返回页证据且未覆盖原快照',
+                                        acquisition=dict(self.last_fetch)) from exc
+        pages = self._validate_parse_payload(document, payload)
+        self._check_cancelled()
+        return pages
 
     def _jina(self, source: str) -> tuple[str, list[dict[str, Any]]]:
         """最多三次只读 Jina 请求；有效性门失败交给 PDF 回退。
@@ -149,49 +300,84 @@ class PDFProvider:
         """
         attempts = []
         for number in range(1, 4):
+            self._check_cancelled()
             attempt = {"provider": "jina", "attempt": number, "url": "https://r.jina.ai/" + source}
             attempts.append(attempt)
             try:
                 with self.client.stream("GET", attempt["url"], timeout=60, follow_redirects=True) as response:
+                    self._check_cancelled()
                     attempt["http_status"] = response.status_code
+                    if response.status_code in {401, 403}:
+                        attempt["retry_stopped_reason"] = "authentication_or_access_denied"
+                        return "", attempts
                     parts, size = [], 0
                     for part in response.iter_bytes():
+                        self._check_cancelled()
                         size += len(part)
                         if size > self.max_bytes:
-                            raise ValueError("Jina response exceeds byte limit")
+                            attempt.update(error="ValueError", failure_kind="response_too_large",
+                                           usable=False, retry_stopped_reason="response_byte_limit")
+                            return "", attempts
                         parts.append(part)
+                    self._check_cancelled()
                     text = b"".join(parts).decode("utf-8", errors="replace")
+                    challenge = access_challenge_reason(str(response.url), text,
+                                                        content_type=response.headers.get("content-type", ""))
+                    if challenge:
+                        attempt.update(failure_kind="access_challenge", challenge_reason=challenge,
+                                       usable=False, retry_stopped_reason="access_challenge")
+                        return "", attempts
                     attempt["usable"] = is_usable_paper_text(text)
                     if response.status_code == 200 and text.strip():
                         return text, attempts
+                    if response.status_code not in {429} and response.status_code < 500:
+                        attempt["retry_stopped_reason"] = "non_retryable_http"
+                        return "", attempts
             except (httpx.HTTPError, ValueError) as exc:
                 attempt["error"] = type(exc).__name__
+            self._check_cancelled()
             if number < 3:
-                time.sleep(self.jina_retry_wait * number)
+                check = self._check_cancelled if getattr(self._fetch_state, "cancelled", None) is not None else None
+                cancellable_wait(self.jina_retry_wait * number, check, sleep=time.sleep)
+                self._check_cancelled()
         return "", attempts
 
     def _ingest_pdf(self, source: str, paper_id: str) -> Document:
         """读取完整 PDF，以内容 hash、解析器版本和配置组成缓存键；命中缓存时不重复解析。"""
+        self._check_cancelled()
         content = self._read_source(source)
+        self._check_cancelled()
         content_hash = sha256_bytes(content)
         pdf_path = self.file_store.cache_pdf_path(content_hash)
         if not pdf_path.exists():
+            self._check_cancelled()
             self.file_store.write_bytes_atomic(pdf_path, content)
         config_hash = hashlib.sha256(json.dumps(self.parser_config, sort_keys=True).encode()).hexdigest()
         cache_key = hashlib.sha256(f"{content_hash}:pymupdf:{self.parser_version}:{config_hash}".encode()).hexdigest()
         cache_path = self.file_store.cache_parse_path(cache_key)
         document_id = f"doc:{cache_key[:32]}"
         if cache_path.exists():
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            return Document(document_id=document_id, paper_id=paper_id, content_sha256=content_hash,
-                            parser_name="pymupdf", parser_version=self.parser_version,
-                            config_sha256=config_hash, total_pages=cached["total_pages"],
-                            cache_path=str(cache_path), gaps=cached.get("gaps", []))
+            try:
+                cached = json.loads(cache_path.read_text(encoding='utf-8'))
+                document = Document(document_id=document_id, paper_id=paper_id, content_sha256=content_hash,
+                                    parser_name='pymupdf', parser_version=self.parser_version,
+                                    config_sha256=config_hash, total_pages=cached['total_pages'],
+                                    cache_path=str(cache_path), gaps=cached.get('gaps', []))
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise PaperAcquisitionError('PDF_CACHE_INVALID', '解析快照无法读取，未覆盖原快照',
+                                            acquisition=dict(self.last_fetch)) from exc
+            self._validate_parse_payload(document, cached)
+            self._check_cancelled()
+            return document
         try:
+            self._check_cancelled()
             pages = self._parse(pdf_path)
+        except PaperReadCancelled:
+            raise
         except Exception as exc:
             raise PaperAcquisitionError("PDF_PARSE_FAILED", f"PDF 已取得，解析失败：{type(exc).__name__}",
                                         acquisition=self.last_fetch) from exc
+        self._check_cancelled()
         if not is_usable_paper_text("\n\n".join(page.text for page in pages)):
             raise PaperAcquisitionError("PDF_TEXT_UNUSABLE", "全文文本未通过 基本有效性检查", acquisition=self.last_fetch)
         for page in pages:
@@ -199,11 +385,14 @@ class PDFProvider:
             page.evidence_id = f"evidence:{hashlib.sha256(f'{document_id}:{page.page_number}'.encode()).hexdigest()[:40]}"
         payload = {"total_pages": len(pages), "pages": [page.model_dump(mode="json") for page in pages],
                    "gaps": sorted({gap for page in pages for gap in page.gaps})}
+        document = Document(document_id=document_id, paper_id=paper_id, content_sha256=content_hash,
+                            parser_name='pymupdf', parser_version=self.parser_version,
+                            config_sha256=config_hash, total_pages=len(pages), cache_path=str(cache_path),
+                            gaps=payload['gaps'])
+        self._validate_parse_payload(document, payload)
+        self._check_cancelled()
         self.file_store.write_bytes_atomic(cache_path, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-        return Document(document_id=document_id, paper_id=paper_id, content_sha256=content_hash,
-                        parser_name="pymupdf", parser_version=self.parser_version,
-                        config_sha256=config_hash, total_pages=len(pages), cache_path=str(cache_path),
-                        gaps=payload["gaps"])
+        return document
 
     def pages(self, document: Document, start_page: int = 1,
               page_count: int | None = None) -> list[PageEvidence]:
@@ -220,19 +409,42 @@ class PDFProvider:
         Raises:
             ValueError: 起始页越界或页数非正数。
         """
-        cached = json.loads(Path(document.cache_path).read_text(encoding="utf-8"))
+        pages = self._cached_pages(document)
         if document.total_pages is None:
             if start_page != 1 or page_count is not None:
                 raise ValueError("Jina text has no physical page mapping; request direct PDF pages")
-            return [PageEvidence.model_validate(raw) for raw in cached["pages"]]
+            return pages
         if start_page < 1 or start_page > document.total_pages or (page_count is not None and page_count < 1):
             raise ValueError("requested physical pages are outside the document")
         start = start_page
         end = document.total_pages if page_count is None else min(document.total_pages, start + page_count - 1)
-        out: list[PageEvidence] = []
-        for raw in cached["pages"][start - 1:end]:
-            out.append(PageEvidence.model_validate(raw))
-        return out
+        return pages[start - 1:end]
+
+    @staticmethod
+    def local_source_problem(source: str) -> str | None:
+        """只读检查本地入口；URL只标为可尝试，不发网络探测。
+
+        Args:
+            source: 已按读取优先级选择的附件路径或URL。
+
+        Returns:
+            本地文件缺失/类型/访问错误码；当前可尝试时返回None。
+        """
+        from urllib.parse import urlsplit
+        try:
+            if urlsplit(source).scheme in {'http', 'https'}:
+                return None
+            path = Path(source).expanduser().resolve()
+            if not path.is_file():
+                return 'PDF_LOCAL_MISSING'
+            if path.suffix.lower() != '.pdf':
+                return 'PDF_NOT_PDF'
+            # is_file成功仍不代表实际有读权限；不读取正文或复用缓存授予新证据。
+            with path.open('rb') as handle:
+                handle.read(0)
+        except (OSError, ValueError, RuntimeError):
+            return 'PDF_LOCAL_UNREADABLE'
+        return None
 
     def _read_source(self, source: str) -> bytes:
         """获取 PDF 字节；来源地址转换后允许一次详情页解析，正文仍交本地解析器。
@@ -247,17 +459,23 @@ class PDFProvider:
             PaperAcquisitionError: 无主文链接、HTTP/网络失败、错误文件或大小超限。
         """
         from urllib.parse import urlsplit
+        self._check_cancelled()
         self.last_fetch = {"requested_source": source, "attempts": []}
         is_url = urlsplit(source).scheme in {"http", "https"}
         if not is_url:
-            path = Path(source).expanduser().resolve()
-            if not path.is_file():
-                raise PaperAcquisitionError("PDF_LOCAL_MISSING", "授权的本地 PDF 不存在", acquisition=self.last_fetch)
-            if path.suffix.lower() != ".pdf":
-                raise PaperAcquisitionError("PDF_NOT_PDF", "本地附件不是 PDF", acquisition=self.last_fetch)
-            if path.stat().st_size > self.max_bytes:
-                raise PaperAcquisitionError("PDF_TOO_LARGE", f"PDF exceeds configured byte limit {self.max_bytes}", acquisition=self.last_fetch)
-            content = path.read_bytes()
+            problem = self.local_source_problem(source)
+            if problem:
+                raise PaperAcquisitionError(problem, '授权本地PDF当前不可读：' + problem, acquisition=self.last_fetch)
+            try:
+                path = Path(source).expanduser().resolve()
+                if path.stat().st_size > self.max_bytes:
+                    raise PaperAcquisitionError("PDF_TOO_LARGE", f"PDF exceeds configured byte limit {self.max_bytes}", acquisition=self.last_fetch)
+                content = path.read_bytes()
+            except FileNotFoundError as exc:
+                raise PaperAcquisitionError('PDF_LOCAL_MISSING', '授权的本地PDF在读取前已丢失', acquisition=self.last_fetch) from exc
+            except OSError as exc:
+                raise PaperAcquisitionError('PDF_LOCAL_UNREADABLE', '授权的本地PDF当前无法读取', acquisition=self.last_fetch) from exc
+            self._check_cancelled()
             self.last_fetch.update(kind="local", path=str(path), bytes=len(content))
         else:
             target = resolve_pdf_url(None, source)
@@ -271,6 +489,7 @@ class PDFProvider:
                     raise PaperAcquisitionError("PDF_LINK_UNAVAILABLE", "已找到论文详情，但页面没有唯一明确的主文 PDF 链接；论文身份仍有效", acquisition=self.last_fetch)
                 self.last_fetch["detail_url"] = final_url
                 self.last_fetch["resolved_pdf_url"] = pdf_url
+                self._check_cancelled()
                 content, _, _ = self._download(pdf_url)
         if not content.lstrip().startswith(b"%PDF-"):
             raise PaperAcquisitionError("PDF_NOT_PDF", "下载结果不是 PDF，不把 HTML/摘要充当全文", acquisition=self.last_fetch)
@@ -289,6 +508,7 @@ class PDFProvider:
         Raises:
             PaperAcquisitionError: HTTP 错误、网络异常或文件超限。此层不自动重发。
         """
+        self._check_cancelled()
         attempt = {"requested_url": url, "timeout_seconds": self.timeout}
         self.last_fetch["attempts"].append(attempt)
         self.last_fetch["kind"] = "http"
@@ -296,6 +516,7 @@ class PDFProvider:
             with self.client.stream("GET", url, headers={"Accept": "application/pdf,text/html;q=0.9",
                                                         "User-Agent": "ResearchLoop/AG2"},
                                     timeout=self.timeout, follow_redirects=True) as response:
+                self._check_cancelled()
                 attempt.update(final_url=str(response.url), status=response.status_code,
                                content_type=response.headers.get("content-type", ""),
                                redirects=[{"url": str(r.url), "status": r.status_code} for r in response.history])
@@ -306,13 +527,29 @@ class PDFProvider:
                 chunks, size = [], 0
                 # 在流读取过程中限制大小，避免响应全部进入内存后才发现超限。
                 for chunk in response.iter_bytes():
+                    self._check_cancelled()
                     size += len(chunk)
                     if size > self.max_bytes:
                         raise PaperAcquisitionError("PDF_TOO_LARGE", f"PDF exceeds configured byte limit {self.max_bytes}", acquisition=self.last_fetch)
                     chunks.append(chunk)
+                self._check_cancelled()
                 attempt["bytes"] = size
-                return b"".join(chunks), str(response.url), response.headers.get("content-type", "")
+                content = b"".join(chunks)
+                # 已有 PDF 文件头时无需把二进制正文解码为 HTML 验证材料。
+                challenge = None if content.lstrip().startswith(b"%PDF-") else access_challenge_reason(
+                    str(response.url), content[:16000].decode("utf-8", errors="replace"),
+                    content_type=response.headers.get("content-type", ""))
+                if challenge:
+                    details = {"failure_kind": "access_challenge", "challenge_reason": challenge,
+                               "stage": "primary_pdf"}
+                    attempt.update(details)
+                    self.last_fetch.update(details)
+                    raise PaperAcquisitionError("PDF_ACCESS_CHALLENGE",
+                                                "原址返回访问验证页，未取得 PDF；不将验证页视为论文详情或正文",
+                                                acquisition=self.last_fetch)
+                return content, str(response.url), response.headers.get("content-type", "")
         except httpx.HTTPError as exc:
+            self._check_cancelled()
             attempt["error"] = type(exc).__name__
             self.last_fetch["error"] = type(exc).__name__
             raise PaperAcquisitionError("PDF_NETWORK_ERROR", f"PDF 网络请求失败：{type(exc).__name__}",
@@ -329,8 +566,10 @@ class PDFProvider:
         """
         import pymupdf
         pages = []
+        self._check_cancelled()
         with pymupdf.open(path) as doc:
             for index, page in enumerate(doc):
+                self._check_cancelled()
                 text = page.get_text("text")
                 gaps = []
                 if not text.strip():
@@ -348,6 +587,8 @@ def is_usable_paper_text(text: str) -> bool:
     """沿用 1200 字符基本检查，拒绝代理错误页；这不是语义质量评分。"""
     value = str(text or "").strip()
     if value.startswith("%PDF-") or len(value) < 1200:
+        return False
+    if access_challenge_reason("", value):
         return False
     head = value[:1000].lower()
     if re.search(r"warning: target url returned error|has been withdrawn and is unavailable", head):

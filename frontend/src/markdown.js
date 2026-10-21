@@ -1,10 +1,12 @@
 /** Markdown/数学统一渲染：保留公式定界符，经净化后插入DOM，不允许模型HTML执行。 */
-import {marked} from '/vendor/marked.js';
+import {marked,Tokenizer} from '/vendor/marked.js';
 import purify from '/vendor/purify.js';
 import katex from '/vendor/katex.js';
+import {withChineseUrlBoundary} from './markdown-links.js';
 
 // 原始HTML只显示文字；允许的style全部来自KaTeX可信输出。
 marked.use({renderer:{html({text}){return escape(text);}}});
+marked.use({tokenizer:{url:withChineseUrlBoundary(Tokenizer.prototype.url)}});
 
 for (const [name,open,close,display] of [
   ['blockDollar','$$','$$',true],['blockBracket','\\[','\\]',true],

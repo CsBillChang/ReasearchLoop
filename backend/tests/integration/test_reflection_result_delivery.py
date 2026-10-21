@@ -114,15 +114,16 @@ class ReflectionDeliveryTests(unittest.TestCase):
                 CoverageService(self.db).finish(tid, FinishTaskInput(**{**args, **changes}))
 
     def test_result_error_survives_local_stop_and_reaches_delivery(self):
-        """第四次返回坏引句后停止：首因、末因都进父任务，仍有可读交付。"""
+        """坏引句反馈后给一次更正机会，重复失败时交回首因和无进展原因。"""
         tid, result, scenario = self.run_scenario('fault')
-        self.assertEqual(scenario.review_calls, 4)
+        self.assertEqual(scenario.review_calls, 5)
         review = result['research_reviews'][0]
         self.assertEqual(review['quality_status'], 'execution_failed')
         error = review['execution_error']
         self.assertEqual(error['first_error']['stage'], 'result_validation')
         self.assertIn('findings[1]', error['first_error']['message'])
-        self.assertIn('model request budget exhausted', error['stop_reason'])
+        self.assertIn('repeated', error['stop_reason'])
+        self.assertNotIn('budget exhausted', error['stop_reason'])
         self.assertEqual(review['findings'], [])
         self.assertIn(error['first_error']['message'], result['answer_markdown'])
         self.assertIn('不能据此认定原文缺证', result['answer_markdown'])

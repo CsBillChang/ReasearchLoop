@@ -23,8 +23,31 @@ def retry_after(value: str | None, now: datetime) -> float | None:
         return None
 
 
+
+def cancellable_wait(seconds: float, check_cancelled=None, *, sleep=None) -> None:
+    """按原退避总时长等待，允许已有取消检查在等待片段之间终止。
+
+    Args:
+        seconds: 调用方现有退避时长；不增加网络超时或重试额度。
+        check_cancelled: 已有检查回调；取消时直接抛出原异常。
+        sleep: 可注入同步等待函数；无回调时保留原单次等待。
+    """
+    sleep = sleep or time.sleep
+    if check_cancelled is None:
+        sleep(seconds)
+        return
+    check_cancelled()
+    remaining = max(0.0, seconds)
+    # 这是本机取消轮询间隔，不改变请求的等待预算或socket读取超时。
+    while remaining > 0:
+        duration = min(0.1, remaining)
+        sleep(duration)
+        remaining = max(0.0, remaining - duration)
+        check_cancelled()
+
 def read_with_backoff(send, request: dict, *, attempts: int = 4, base: float = 1,
-                      max_wait: float = 60, sleep=None, jitter=None, now=None):
+                      max_wait: float = 60, sleep=None, jitter=None, now=None,
+                      check_cancelled=None):
     """执行显式只读回调，记录尝试与等待；超出等待预算不提前重试。
 
     Args:
@@ -36,6 +59,7 @@ def read_with_backoff(send, request: dict, *, attempts: int = 4, base: float = 1
         sleep: 可注入等待函数。
         jitter: 可注入[0,1]随机值。
         now: 可注入UTC时钟，便于日期边界测试。
+        check_cancelled: 可选的现有取消检查；异常原样传播，不重试。
 
     Returns:
         最后一份HTTP响应；调用方仍需按HTTP状态报告失败。
@@ -49,6 +73,8 @@ def read_with_backoff(send, request: dict, *, attempts: int = 4, base: float = 1
     waited = 0.0
     cap = max(1, min(4, attempts))
     for number in range(1, cap + 1):
+        if check_cancelled is not None:
+            check_cancelled()
         record = {'attempt': number}
         request['attempts'].append(record)
         request.pop('http_status', None)
@@ -56,6 +82,8 @@ def read_with_backoff(send, request: dict, *, attempts: int = 4, base: float = 1
         response, failure = None, None
         try:
             response = send()
+            if check_cancelled is not None:
+                check_cancelled()
             code = response.status_code
             record['http_status'] = code
             request.update(http_status=code, response_content_type=response.headers.get('content-type'))
@@ -80,7 +108,7 @@ def read_with_backoff(send, request: dict, *, attempts: int = 4, base: float = 1
             delay = specified if specified is not None else max(0, base) * 2 ** (number - 1) * (0.5 + 0.5 * jitter())
             record.update(wait_seconds=delay, wait_source='retry_after' if specified is not None else 'exponential_jitter')
             if waited + delay <= max_wait:
-                sleep(delay)
+                cancellable_wait(delay, check_cancelled, sleep=sleep)
                 waited += delay
                 request['total_wait_seconds'] = waited
                 continue

@@ -93,6 +93,48 @@ class VisualIntegrationTests(unittest.TestCase):
         self.assertEqual(self.db.assert_budget_policy(tid,self.settings)['model_used'],1)
         self.assertEqual(TokenBudgetStore(self.db).summary(tid)['used_tokens'],120)
 
+    def test_new_visual_send_honors_frozen_context_with_actual_component_output(self):
+        """生成PNG仍进入容量准入；固定8192输出不能用较小根预留冒充。"""
+        self.settings=self.settings.model_copy(update={'context_window_tokens':4096,
+            'context_output_reserve':1000,'context_safety_tokens':500,'execution_budget_mode':'observe'})
+        tid,actor=self.create()
+        with self.assertRaisesRegex(ValueError,'CONTEXT_CAPACITY'):
+            self.node.run(tid,self.item,**actor)
+        self.assertEqual(self.calls,[])
+        self.assertEqual(self.db.list_model_calls(tid),[])
+        self.assertEqual(self.db.budget_summary(tid)['model_used'],0)
+        self.assertEqual(TokenBudgetStore(self.db).summary(tid)['reserved_tokens'],0)
+        self.assertEqual(self.db.list_task_evidence(tid),[self.pages[0]['evidence_id']])
+        self.assertEqual(self.db.get_page(self.pages[0]['evidence_id'])['text'],self.pages[0]['text'])
+        self.assertTrue(list(self.files.cache_dir.rglob('*.png')))
+
+    def test_frozen_input_capacity_rejects_long_question_before_intent(self):
+        """独立视觉问题超限也不能在observe跳过单次容量检查。"""
+        self.settings=self.settings.model_copy(update={'context_window_tokens':16000,
+            'context_safety_tokens':500,'execution_budget_mode':'observe'})
+        tid,actor=self.create()
+        oversized=self.item.model_copy(update={'question':'synthetic question '*3000})
+        with self.assertRaisesRegex(ValueError,'CONTEXT_CAPACITY'):
+            self.node.run(tid,oversized,**actor)
+        self.assertEqual(self.calls,[])
+        self.assertEqual(self.db.list_model_calls(tid),[])
+
+    def test_observe_visual_counts_past_root_request_quota(self):
+        """仅监测越过根请求数仍记账；同一视觉收据只发送一次。"""
+        self.settings=self.settings.model_copy(update={'max_model_requests':1,
+            'reserve_model_requests':0,'execution_budget_mode':'observe'})
+        tid,actor=self.create()
+        self.assertTrue(self.db.reserve_model_slot(tid,'researcher'))
+        self.assertTrue(self.db.reserve_model_slot(tid,'researcher'))
+        first=self.node.run(tid,self.item,**actor)
+        with patch('research_loop.agents.visual_reading.validate_frozen_request',side_effect=AssertionError('success replay must not re-admit')):
+            second=self.node.run(tid,self.item,**actor)
+        self.assertEqual(len(self.calls),1)
+        self.assertEqual(self.db.budget_summary(tid)['model_used'],3)
+        self.assertTrue(second['replayed'])
+        self.assertEqual(first['request_id'],second['request_id'])
+        self.assertEqual(TokenBudgetStore(self.db).summary(tid)['used_tokens'],120)
+
     def test_ab_same_text_through_actual_http_adapter(self):
         """配对两任务除图片之外实际供应商消息相同。"""
         for group in ('text','visual'):

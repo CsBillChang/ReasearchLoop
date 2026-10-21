@@ -303,7 +303,7 @@ class ResearchReflectionTests(unittest.TestCase):
             with self.subTest(point=point):
                 folder = self.root/point; folder.mkdir()
                 pdf = folder/'A.pdf'; pdf.write_bytes(b'%PDF-fixture')
-                tid = TaskService(self.db).create(TaskCreate(prompt='核验语言条件，禁止保存', save_policy='deny',
+                tid = TaskService(self.db, self.settings).create(TaskCreate(prompt='核验语言条件，禁止保存', save_policy='deny',
                     attachments=[{'input_ref': 'input-A', 'paper_id': 'paper-A', 'local_path': str(pdf)}])).task_id
                 env = {**os.environ, 'REFLECTION_ROOT': str(folder), 'REFLECTION_TASK': tid}
                 command = [sys.executable, str(Path(__file__).with_name('research_reflection_recovery_process.py'))]
@@ -315,7 +315,7 @@ class ResearchReflectionTests(unittest.TestCase):
                 self.db.update_task(tid, lease_until='2000-01-01T00:00:00+00:00')
                 resumed = subprocess.run(command + ['resume'], env=env, capture_output=True, timeout=40)
                 self.assertEqual(resumed.returncode, 0, resumed.stderr.decode())
-                view = TaskService(self.db).view(self.db.get_task(tid))
+                view = TaskService(self.db, self.settings).view(self.db.get_task(tid))
                 self.assertEqual(view.status.value, 'completed', view)
                 requests = [json.loads(line) for line in (folder/'requests.jsonl').read_text().splitlines()]
                 self.assertEqual(sum(r['reviewer'] for r in requests), 2)
@@ -344,10 +344,10 @@ class ResearchReflectionTests(unittest.TestCase):
             return handle(request)
         scenario.handler = timeout
         executor = TaskExecutor(self.settings, self.db, scenario.factory, lambda s, f: ScopedPDF())
-        tid = TaskService(self.db).create(TaskCreate(prompt='核验当前方法，禁止保存', save_policy='deny',
+        tid = TaskService(self.db, self.settings).create(TaskCreate(prompt='核验当前方法，禁止保存', save_policy='deny',
             attachments=[{'input_ref': 'input-A', 'paper_id': 'paper-A', 'local_path': str(self.root/'A.pdf')}])).task_id
         executor.execute(tid)
-        view = TaskService(self.db).view(self.db.get_task(tid))
+        view = TaskService(self.db, self.settings).view(self.db.get_task(tid))
         self.assertTrue(self.db.has_unknown_family_call(tid))
         self.assertIn(scenario.before, view.result.answer_markdown)
         reviews = ReflectionService(self.db).research_context(tid)

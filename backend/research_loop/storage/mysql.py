@@ -274,7 +274,9 @@ class Database:
                     max(0, min(settings.reserve_model_requests, settings.max_model_requests - 1)))
         actual = tuple((row or {}).get(k) for k in ('model_limit', 'tool_limit', 'reserve_tail'))
         tokens = (row or {}).get('tokens') or {}
-        if actual != expected or (tokens.get('token_limit'), tokens.get('tail_tokens')) != (settings.task_token_limit, settings.task_token_tail):
+        policy = row.get('execution_policy') or {}
+        mode_matches = not policy or policy.get('mode', 'enforce') == settings.execution_budget_mode
+        if not mode_matches or actual != expected or (tokens.get('token_limit'), tokens.get('tail_tokens')) != (settings.task_token_limit, settings.task_token_tail):
             raise ValueError('BUDGET_POLICY_MISMATCH: 数据库预算与冻结配置不一致，未授权发送')
         return row
 
@@ -292,7 +294,10 @@ class Database:
         budget = self.fetchone("SELECT * FROM task_budgets WHERE root_task_id=?", (root_task_id,))
         if not budget:
             return True
-        condition = "model_used < model_limit" if role in {"supervisor", "reviewer"} else "model_used < model_limit - reserve_tail"
+        policy = self.execution_policy(root_task_id) or {}
+        condition = ("1=1" if policy.get("mode") == "observe" else
+                     "model_used < model_limit" if role in {"supervisor", "reviewer"} else
+                     "model_used < model_limit - reserve_tail")
         updated = self.execute(f"UPDATE task_budgets SET model_used=model_used+1, reviewer_used=reviewer_used+? WHERE root_task_id=? AND {condition}",
                                (1 if role == "reviewer" else 0, root_task_id))
         return updated == 1
@@ -309,12 +314,34 @@ class Database:
         budget = self.fetchone("SELECT * FROM task_budgets WHERE root_task_id=?", (root_task_id,))
         if not budget:
             return True
+        if (self.execution_policy(root_task_id) or {}).get("mode") == "observe":
+            return self.execute("UPDATE task_budgets SET tool_used=tool_used+1 WHERE root_task_id=?", (root_task_id,)) == 1
         return self.execute("UPDATE task_budgets SET tool_used=tool_used+1 WHERE root_task_id=? AND tool_used < tool_limit - ?",
                             (root_task_id, reserve_tail)) == 1
+
+    def execution_policy(self, root_task_id: str) -> dict | None:
+        """读取根任务冻结策略，历史任务缺失时不回填。"""
+        from research_loop.storage.token_budget import TokenBudgetStore
+        return TokenBudgetStore(self).execution_policy(root_task_id)
+
+    def active_role_count(self, root_task_id: str) -> int:
+        """仅计已占执行槽的子角色，排队项不预占其他角色交接槽。"""
+        row = self.fetchone("SELECT COUNT(*) AS n FROM tasks WHERE root_task_id=? AND parent_task_id IS NOT NULL AND status='running'", (root_task_id,))
+        return int(row["n"])
+
+    def delivery_tool_reserve(self, root_task_id: str) -> int:
+        """根据实际保存权限与成功行动保留尚未完成的创建、保存和交付步骤。"""
+        task = self.get_task(root_task_id) or {}
+        if task.get('save_policy') != 'allow':
+            return 1
+        completed = {a['tool_name'] for a in self.list_actions(root_task_id) if a['status'] == 'succeeded'}
+        return 1 + int('create_note' not in completed) + int('save_note' not in completed)
 
     def budget_summary(self, root_task_id: str) -> dict[str, Any]:
         from research_loop.storage.token_budget import TokenBudgetStore
         result = self.fetchone("SELECT * FROM task_budgets WHERE root_task_id=?", (root_task_id,)) or {}
+        if policy := self.execution_policy(root_task_id):
+            result["execution_policy"] = policy
         if tokens := TokenBudgetStore(self).summary(root_task_id):
             result["tokens"] = tokens
         return result

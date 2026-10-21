@@ -11,4 +11,6 @@
 
 追加版本：005 Reflection、006 Memory、007 产品接续、008 版本化证据索引、009 订阅简报、010 交付后累计Token与阅读清单。010只新增四表，不更新既有任务、预算或论文；历史无Token策略的任务保持原恢复行为。
 
+011 行为兴趣仅新增 `interest_projections` 与 `interest_sources`，保存新会话任务的兴趣投影状态和版本化来源。迁移不扫描旧对话、不回填画像，也不更改历史任务或调用配置。
+
 `make migrate` 调 backend/scripts/migrate.py，根据 schema_version 顺序执行未应用版本。已经部署的迁移不可原地改写；需要改变表结构时新增迁移。测试使用独立库，不重置生产库。storage/mysql.py 另有 ensure_schema 的创建缺表代码；它不替代版本迁移，两个定义存在同步维护责任。

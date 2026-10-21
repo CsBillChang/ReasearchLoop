@@ -105,7 +105,9 @@ def seed(db, settings, case, material):
     """经任务服务绑定原稿与所有既有页；gold不传给角色，不创建笔记文件。"""
     attachment = {'input_ref': case['material'], 'paper_id': material['document']['paper_id'],
                   'local_path': str(ROOT/material['material']['path'])}
-    task = TaskService(db).create(TaskCreate(prompt='独立核验既有短稿并做一次必要局部修订，不保存文件。',
+    # 固定组件合同在创建时冻结；不读取另一份生产配置或事后修改预算行。
+    component_settings = settings.model_copy(update={'max_model_requests':11,'max_tool_actions':30,'reserve_model_requests':0})
+    task = TaskService(db, component_settings).create(TaskCreate(prompt='独立核验既有短稿并做一次必要局部修订，不保存文件。',
         save_policy='deny', attachments=[attachment], idempotency_key='component-'+case['id']))
     papers = FrozenPapers(db, None, FrozenPDF([material]))
     read = papers.read(task.task_id, case['material'], attachments={case['material']: attachment})
@@ -116,7 +118,6 @@ def seed(db, settings, case, material):
     db.append_event(task.task_id, 'feedback_draft_bound', {'draft_id': draft['draft_id'],
         'content_hash': draft['content_hash'], 'evidence_ids': draft['evidence_ids'],
         'origin': 'controlled_component_input', 'review_inherited': False})
-    db.execute('UPDATE task_budgets SET model_limit=11,tool_limit=30,reserve_tail=0 WHERE root_task_id=?', (task.task_id,))
     return task.task_id, draft, papers, notes, attachment
 
 

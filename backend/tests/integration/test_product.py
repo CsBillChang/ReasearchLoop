@@ -36,8 +36,8 @@ class ProductTests(unittest.TestCase):
         if not url.startswith('sqlite:') and not url.rsplit('/',1)[-1].startswith('researchloop_test_ag5_'):
             raise ValueError('AG5 isolated database required')
         self.s=Settings(project_root=root,data_dir=root/'data',output_dir=root/'notes',database_url=url)
-        self.db=Database(url);self.db.ensure_schema();self.ts=TaskService(self.db)
-        self.cid=ConversationService(self.db).create('AG5测试',str(uuid4()))['conversation_id']
+        self.db=Database(url);self.db.ensure_schema();self.ts=TaskService(self.db,self.s)
+        self.cid=ConversationService(self.db,self.s).create('AG5测试',str(uuid4()))['conversation_id']
         self.files=FileStore(self.s.data_dir,self.s.output_dir,root)
         self.notes=NoteService(self.db,self.files)
         from research_loop.main import app
@@ -226,6 +226,32 @@ class ProductTests(unittest.TestCase):
             self.assertEqual(Path(view['result']['saved_path']).read_text(),old.markdown)
         self.assertEqual(len(calls),5 if save else 4)
 
+    def test_feedback_and_continuation_freeze_injected_request_settings(self):
+        """API依赖覆盖必须传至所有根任务创建分支，不泄漏全局.env模型。"""
+        from research_loop.main import app
+        from research_loop.api.dependencies import get_runtime_settings
+        from research_loop.storage.token_budget import TokenBudgetStore
+        request_settings = self.s.model_copy(update={'deepseek_model':'synthetic-request-model', 'max_model_requests':17})
+        app.dependency_overrides[get_runtime_settings] = lambda: request_settings
+        self.addCleanup(lambda: app.dependency_overrides.pop(get_runtime_settings, None))
+        _, body, _ = self._current_draft_feedback()
+        response = self.client.post('/api/feedback', json=body)
+        self.assertEqual(response.status_code,202,response.text)
+        feedback_id = response.json()['task_id']
+        policy = TokenBudgetStore(self.db).counting_policy(feedback_id)
+        self.assertEqual(policy['model'],request_settings.deepseek_model)
+        self.assertEqual(policy['execution']['max_model_requests'],17)
+        # 前任务已终结，接续同步提交可直接验证同一API配置快照。
+        self.ts.complete(feedback_id,TaskStatus.cancelled,TaskResult(answer_markdown='保留当前稿'))
+        continuation = self.client.post('/api/tasks/'+feedback_id+'/continue',json={
+            'conversation_id':self.cid,'prompt':'继续解释，不保存','idempotency_key':str(uuid4())})
+        self.assertEqual(continuation.status_code,202,continuation.text)
+        next_id = continuation.json()['next_task_id']
+        self.assertTrue(next_id)
+        next_policy = TokenBudgetStore(self.db).counting_policy(next_id)
+        self.assertEqual(next_policy['model'],request_settings.deepseek_model)
+        self.assertEqual(next_policy['execution']['max_model_requests'],17)
+
     def test_current_draft_feedback_review_without_save(self):
         """禁存稿复审并完成交付，无整篇重生成或文件写入。"""
         from research_loop.domain.tasks import SavePolicy
@@ -337,7 +363,7 @@ class ProductTests(unittest.TestCase):
         self.ts.complete(tid,TaskStatus.cancelled,TaskResult(answer_markdown=d.markdown,draft_id=d.draft_id))
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=2) as pool:
-            list(pool.map(lambda _:ContinuationService(self.db).release_ready(),range(2)))
+            list(pool.map(lambda _:ContinuationService(self.db,self.s).release_ready(),range(2)))
         row=self.db.fetchone('SELECT * FROM task_continuations WHERE predecessor_id=?',(tid,))
         self.assertEqual(row['status'],'queued')
         self.assertEqual(self.client.post(f"/api/tasks/{row['next_task_id']}/continue",json=body).status_code,409)
@@ -358,10 +384,10 @@ class ProductTests(unittest.TestCase):
             if sql.startswith("UPDATE task_continuations SET status='queued'"):raise RuntimeError('CONTROLLED_COMMIT_INTERRUPTION')
             return original(tx,sql,params)
         with patch.object(Transaction,'execute',fail):
-            with self.assertRaisesRegex(RuntimeError,'CONTROLLED'):ContinuationService(self.db).release_ready()
+            with self.assertRaisesRegex(RuntimeError,'CONTROLLED'):ContinuationService(self.db,self.s).release_ready()
         self.assertIsNone(self.db.fetchone('SELECT task_id FROM tasks WHERE idempotency_key=?',(body['idempotency_key'],)))
         self.ts.cancel(tid)
-        ContinuationService(self.db).release_ready()
+        ContinuationService(self.db,self.s).release_ready()
         self.assertIsNone(self.db.fetchone('SELECT task_id FROM tasks WHERE idempotency_key=?',(body['idempotency_key'],)))
         self.assertEqual(self.db.fetchone('SELECT status FROM task_continuations WHERE predecessor_id=?',(tid,))['status'],'cancelled')
 
@@ -370,8 +396,8 @@ class ProductTests(unittest.TestCase):
         from research_loop.services.continuations import ContinuationService
         tid=self.create();body=TaskCreate(conversation_id=self.cid,prompt='继续但不保存',idempotency_key=str(uuid4()))
         with patch.object(TaskService,'cancel',side_effect=RuntimeError('CONTROLLED_CANCEL_GAP')):
-            with self.assertRaises(RuntimeError):ContinuationService(self.db).request(tid,body)
-        ContinuationService(self.db).release_ready()
+            with self.assertRaises(RuntimeError):ContinuationService(self.db,self.s).request(tid,body)
+        ContinuationService(self.db,self.s).release_ready()
         row=self.db.fetchone('SELECT * FROM task_continuations WHERE predecessor_id=?',(tid,))
         self.assertEqual(self.db.get_task(tid)['status'],'cancelled');self.assertEqual(row['status'],'queued')
         self.ts.cancel(tid)

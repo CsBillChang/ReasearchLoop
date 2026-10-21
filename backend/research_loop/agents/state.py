@@ -21,6 +21,8 @@ class AgentState(TypedDict, total=False):
     tool_actions: int
     # 拒绝回执有独立行动序号，但不消耗工具额度；恢复时两种计数分别沿用。
     action_sequence: int
+    # 新任务共享根冻结策略；历史快照缺失时保持其原额度。
+    execution_policy: dict[str, Any]
     budget_tail: bool
     max_model_requests: int
     max_tool_actions: int
@@ -44,12 +46,14 @@ class AgentState(TypedDict, total=False):
     research_mode: str
     research_plan: dict[str, Any] | None
     delivery: dict[str, Any] | None
+    # 合法失败候选的精确行动引用独立于已解除的资格阻断；正文不进入此字段。
+    finish_candidate_ref: dict[str, str] | None
     coverage_required: bool
     conversation_id: str
     context_metrics: dict[str, Any]
     # 成功行动的派生投影；恢复仍以数据库日志为准。
     research_progress: dict[str, Any]
-    # 重复只读取证后的交接阶段；由成功行动重建，不是新的调用额度。
+    # 重复取证或明确资格阻断的交接；候选只存行动/hash引用，正文保留原观察。
     research_handoff: dict[str, Any] | None
 
     deep_reading: dict[str, Any]

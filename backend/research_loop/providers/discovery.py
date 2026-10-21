@@ -28,6 +28,7 @@ SOFTWARE.
 """
 from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
+import threading
 import time
 from typing import Any
 import httpx
@@ -38,10 +39,13 @@ SOURCE_ROUTES = {s: f"dpr_supabase:{rpc}" for s, rpc in RPC_NAMES.items()}
 
 
 class DiscoveryProvider:
+    """逐源发现论文，并隔离并行或嵌套调用的请求诊断。"""
+
     def __init__(self, supabase_url: str | None = None, supabase_key: str | None = None,
                  bm25_rpc: str = "match_arxiv_papers_bm25", timeout: float | None = None,
                  client: httpx.Client | None = None, *, backends: dict[str, dict[str, Any]] | None = None,
                  retry_wait_seconds: float = 1.0, max_date_windows: int = 8, max_attempts: int = 4):
+        """配置只读来源和重试边界，不在构造时发送请求。"""
         self.backends = backends if backends is not None else resolve_backends({
             "supabase": {"url": supabase_url, "anon_key": supabase_key, "bm25_rpc": bm25_rpc}})
         self.client = client or httpx.Client(follow_redirects=False)
@@ -50,7 +54,21 @@ class DiscoveryProvider:
         self.retry_wait_seconds = retry_wait_seconds
         self.max_date_windows = max(1, max_date_windows)
         self.max_attempts = max(1, min(4, max_attempts))
-        self.last_requests: list[dict[str, Any]] = []
+        # Researcher共享适配器，异常恢复只能读取本次调用的诊断，不能借用其他线程。
+        self._request_state = threading.local()
+        self.last_requests = []
+
+    @property
+    def last_requests(self) -> list[dict[str, Any]]:
+        """返回当前线程最近一次查询的诊断，未查询的线程不继承旧记录。"""
+        if not hasattr(self._request_state, "requests"):
+            self._request_state.requests = []
+        return self._request_state.requests
+
+    @last_requests.setter
+    def last_requests(self, value: list[dict[str, Any]]) -> None:
+        """替换当前线程诊断，保留同步调用后的既有读回接口。"""
+        self._request_state.requests = value
 
     @classmethod
     def from_settings(cls, settings, **kwargs):
@@ -64,11 +82,22 @@ class DiscoveryProvider:
 
     def search(self, query: str, date_from: str | None = None, date_to: str | None = None,
                sources: list[str] | None = None, limit: int = 5) -> SearchResult:
+        """隔离同线程嵌套查询；顶层完成后保留本线程的诊断读回。"""
+        previous = self.last_requests
+        depth = getattr(self._request_state, "depth", 0)
+        self._request_state.depth = depth + 1
+        try:
+            return self._search(query, date_from, date_to, sources, limit)
+        finally:
+            self._request_state.depth = depth
+            if depth:
+                self.last_requests = previous
+
+    def _search(self, query: str, date_from: str | None = None, date_to: str | None = None,
+                sources: list[str] | None = None, limit: int = 5) -> SearchResult:
         """返回有界候选和全部来源状态；未查、空结果、失败相互独立，不能宣称三年全量覆盖。"""
         selected = list(dict.fromkeys(normalize_source(s) for s in (sources or DEFAULT_SEARCH_SOURCES)))
         unknown = set(selected) - set(SUPPORTED_SOURCES)
-        if unknown:
-            raise ValueError("unsupported sources: " + ",".join(sorted(unknown)))
         if date_from: date.fromisoformat(date_from)
         if date_to: date.fromisoformat(date_to)
         if date_from and date_to and date_from > date_to:
@@ -76,7 +105,10 @@ class DiscoveryProvider:
         if not query.strip():
             raise ValueError("query must not be empty")
         cap = max(1, min(limit, 20))
-        results, groups = [], []
+        # 未支持来源单独披露；不能阻断同一授权范围内的合法来源。
+        results = [SourceResult(source=s, status='not_configured', message='unsupported source: ' + s)
+                   for s in selected if s in unknown]
+        groups = []
         self.last_requests = []
         saturated = False
         for source in SUPPORTED_SOURCES:

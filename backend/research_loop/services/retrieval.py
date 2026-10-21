@@ -30,9 +30,15 @@ class RetrievalService:
         pages = self.db.fetchall("SELECT e.evidence_id,e.page_number FROM page_evidence e "
             "JOIN task_evidence t ON t.evidence_id=e.evidence_id WHERE t.task_id=? AND e.document_id=? "
             "ORDER BY e.page_number,e.evidence_id", (task_id, document_id))
-        scope = PaperService(self.db, None, None).user_scope(task_id)
-        if scope:
-            pages = [p for p in pages if p["page_number"] is not None and scope.start <= p["page_number"] <= scope.end]
+        papers = PaperService(self.db, None, None)
+        valid = []
+        for page in pages:
+            try:
+                papers.authorized_source(task_id, page['evidence_id'], with_readback=False)
+                valid.append(page)
+            except PermissionError:
+                continue
+        pages = valid
         if not pages:
             raise PermissionError("RETRIEVAL_DOCUMENT_NOT_AUTHORIZED: read_paper must first grant page evidence")
         refs = [p["evidence_id"] for p in pages]
@@ -75,11 +81,15 @@ class RetrievalService:
         for view in views:
             if view["bm25_status"] != "ready":
                 raise ValueError("RETRIEVAL_BM25_NOT_READY")
+            # 来源标签用于展示，不再从冻结manifest恢复过期附件别名；授权和版本
+            # 仍由authorized_chunks按task_evidence、document及原件hash逐次验证。
+            paper_id = self.db.fetchone("SELECT paper_id FROM documents WHERE document_id=?",
+                                       (view["document_id"],))["paper_id"]
             for item in view["chunks"]:
                 c = item["chunk"]
                 key = point_id(view["index_id"], c["chunk_id"])
                 row = {**c, "key": key, "index_id": view["index_id"],
-                    "paper_id": view["manifest"]["source"]["paper_id"]}
+                    "paper_id": paper_id}
                 records.append(row)
                 by_key[key] = row
                 bags.append(item["terms"])
@@ -133,6 +143,11 @@ class RetrievalService:
         for view in views:
             self.indexing.authorized_chunks(task_id, view["index_id"])
         hits = [{**by_key[row["key"]], **row, "rank": n} for n, row in enumerate(fused[:request.limit], 1)]
+        papers = PaperService(self.db, None, None)
+        for hit in hits:
+            source = papers.validate_source_observation(task_id, hit, {}, kind='hit')
+            hit['readback'] = source['readback']
+            hit['target_ref'] = source['readback']['target_ref']
         return {"status": "degraded" if reasons else "ready" if hits else "empty",
             "query": request.query, "hits": hits,
             "evidence_ids": list(dict.fromkeys(h["evidence_id"] for h in hits)),

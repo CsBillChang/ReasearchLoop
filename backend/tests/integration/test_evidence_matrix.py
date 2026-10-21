@@ -53,6 +53,7 @@ def fixture_read(db,args):
     """返回已建合成页；真实验证不能使用这个替身。"""
     row=args['rows'][0];doc=db.fetchone('SELECT * FROM documents WHERE document_id=?',(row['document_id'],))
     return {'paper_id':doc['paper_id'],'document_id':doc['document_id'],
+            'content_sha256':doc['content_sha256'],'total_pages':doc['total_pages'] or None,
             'pages':[db.get_page(e) for e in row['inspected_evidence_ids']]}
 
 

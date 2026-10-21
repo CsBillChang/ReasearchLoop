@@ -33,7 +33,7 @@ class DynamicProvider:
         if self.calls == 1:
             return ModelResponse(None, [ToolCall("r", "read_paper", {"target_ref": "rarr", "start_page": 1, "page_count": 2})])
         if self.calls == 2:
-            observation = json.loads(messages[-1]["content"])
+            observation = json.loads(next(message["content"] for message in reversed(messages) if message.get("role") == "tool"))
             ids = [page["evidence_id"] for page in observation["data"]["pages"]]
             return ModelResponse(None, [ToolCall("c", "create_note", {
                 "title": "RARR page note",
@@ -41,7 +41,7 @@ class DynamicProvider:
                 "evidence_ids": ids,
             })])
         if self.calls == 3:
-            observation = json.loads(messages[-1]["content"])
+            observation = json.loads(next(message["content"] for message in reversed(messages) if message.get("role") == "tool"))
             return ModelResponse(None, [ToolCall("s", "save_note", {
                 "draft_id": observation["data"]["draft_id"], "content_hash": observation["data"]["content_hash"],
             })])
@@ -78,7 +78,7 @@ class WorkerRecoveryTests(unittest.TestCase):
             settings = self._settings(root)
             db = Database(settings.database_url)
             db.ensure_schema()
-            task = TaskService(db).create(TaskCreate(
+            task = TaskService(db, settings).create(TaskCreate(
                 prompt="只依据附件前两页生成短稿并保存", idempotency_key="worker-success",
                 save_policy="allow", attachments=[{"input_ref": "rarr", "local_path": str(source)}],
             ))
@@ -88,7 +88,7 @@ class WorkerRecoveryTests(unittest.TestCase):
             db.save_checkpoint(task.task_id, initial_state(task.task_id, task.prompt, 'allow',
                 {'rarr': {'input_ref': 'rarr', 'local_path': str(source)}}, 6, 10))
             result = TaskExecutor(settings, db, lambda _: provider).execute(task.task_id)
-            view = TaskService(db).view(db.get_task(task.task_id))
+            view = TaskService(db, settings).view(db.get_task(task.task_id))
             self.assertEqual(view.status.value, "completed")
             self.assertEqual(provider.calls, 4)
             self.assertTrue(result.saved_path)
@@ -101,14 +101,14 @@ class WorkerRecoveryTests(unittest.TestCase):
             settings = self._settings(root)
             db = Database(settings.database_url)
             db.ensure_schema()
-            task = TaskService(db).create(TaskCreate(prompt="unknown", idempotency_key="worker-unknown"))
+            task = TaskService(db, settings).create(TaskCreate(prompt="unknown", idempotency_key="worker-unknown"))
             provider = UnknownProvider()
             executor = TaskExecutor(settings, db, lambda _: provider)
             executor.execute(task.task_id)
             executor.execute(task.task_id)
             self.assertEqual(provider.calls, 1)
             self.assertTrue(db.has_unknown_model_call(task.task_id))
-            self.assertEqual(TaskService(db).view(db.get_task(task.task_id)).status.value, "failed")
+            self.assertEqual(TaskService(db, settings).view(db.get_task(task.task_id)).status.value, "failed")
 
     def test_sigkill_after_receipt_before_checkpoint_recovers_without_new_provider_call(self):
         if os.getenv("RESEARCHLOOP_RUN_MYSQL_TESTS") != "1":
@@ -118,9 +118,10 @@ class WorkerRecoveryTests(unittest.TestCase):
             self.skipTest("RESEARCHLOOP_TEST_DATABASE_URL is required")
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            settings = self._settings(root).model_copy(update={"database_url": url})
             db = Database(url); db.ensure_schema()
             key = "sigkill-" + os.urandom(6).hex()
-            task = TaskService(db).create(TaskCreate(prompt="synthetic recovery", idempotency_key=key))
+            task = TaskService(db, settings).create(TaskCreate(prompt="synthetic recovery", idempotency_key=key))
             counter = root / "provider.calls"
             ready = root / "ready"
             env = {**os.environ, "DATABASE_URL": url, "PYTHONPATH": str(Path(__file__).parents[2]),

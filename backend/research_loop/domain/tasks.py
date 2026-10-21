@@ -6,7 +6,9 @@ from enum import Enum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SkipValidation, field_validator, model_validator
+
+from research_loop.domain.interests import InterestCandidate
 
 
 # 任务生命周期：partial 表示有限交付，不可直接当作完整成功。
@@ -37,8 +39,15 @@ class Role(str, Enum):
 class ResearchGoal(BaseModel):
     goal_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,40}$")
     description: str = Field(min_length=1, max_length=1000)
+    # legacy仅兼容无归属的旧计划；不从描述猜测旧目标是否可撤回。
+    origin: Literal["user", "strategy", "legacy"] = "legacy"
+    status: Literal["active", "withdrawn"] = "active"
+    # user目标引用真实用户原句；程序只核对出处，不证明语义归属正确。
+    source_quote: str | None = Field(default=None, max_length=12000)
+    change_reason: str | None = Field(default=None, max_length=2000)
     min_papers: int = Field(default=1, ge=0, le=20)
     requires_fulltext: bool = False
+    # 目标内来源是本目标资格条件；真实用户硬限制须放在origin=user目标。
     sources: list[str] = Field(default_factory=list)
     input_refs: list[str] = Field(default_factory=list)
     date_from: str | None = None
@@ -54,9 +63,13 @@ class ResearchGoal(BaseModel):
 
     @model_validator(mode="after")
     def ordered_dates(self):
-        """拒绝反向时间窗，避免无法满足的结构条件进入真实检索。"""
+        """核对日期和目标归属；撤回只适用于有理由的自拟步骤。"""
         if self.date_from and self.date_to and self.date_from > self.date_to:
             raise ValueError("date_from must not exceed date_to")
+        if self.origin == "user" and not (self.source_quote and self.source_quote.strip()):
+            raise ValueError("user goal requires source_quote from the actual user request")
+        if self.status == "withdrawn" and (self.origin != "strategy" or not (self.change_reason and self.change_reason.strip())):
+            raise ValueError("only strategy goals may be withdrawn, with change_reason")
         return self
 
 
@@ -66,6 +79,7 @@ class ResearchBrief(BaseModel):
     requested_count: int | None = Field(default=None, ge=1, le=20)
     count_confirmed: bool = False
     suggested_count: int = Field(default=5, ge=1, le=20)
+    # 新建计划顶层来源/日期仅检索偏好；无服务器语义标记的历史计划保留原硬范围。
     date_from: str | None = None
     date_to: str | None = None
     sources: list[str] = Field(default_factory=list)
@@ -113,6 +127,8 @@ class FinishTaskInput(BaseModel):
     reflection_content_hash: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
     matrix_hash: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
     goals: list[GoalDelivery] = Field(min_length=1, max_length=12)
+    # 整个旁路容错，坏画像候选不得阻挡研究交付；终态后独立逐项校验。
+    interest_candidates: SkipValidation[list[InterestCandidate]] = Field(default_factory=list)
 
 
 # 持久化澄清问题：回答绑定 clarification_id，避免恢复到错误暂停点。
@@ -147,7 +163,7 @@ class SubtaskSpec(BaseModel):
     position: int = Field(default=0, ge=0)
     mode: Literal["screen", "investigate", "deep_read"] = Field(default="investigate", description="screen for search; investigate for questions/comparison; deep_read only for a user-requested deep-reading note or eight-point summary.")
     goal_ids: list[str] = Field(default_factory=list, max_length=12)
-    verification_claims: list[str] = Field(default_factory=list, max_length=10, description="Specific claims to verify, not assumed true. When present Researcher must return an assessment for each. Leave empty for ordinary search/comparison.")
+    verification_claims: list[str] = Field(default_factory=list, max_length=10, description="Specific claims to verify, not assumed true. In investigate mode return an assessment for each; in screen/deep_read they are optional follow-up questions, not a scientific-verification completion gate. Leave empty for ordinary search/comparison.")
 
 
 # 子任务交付：发现、证据和缺口并存；failed/partial 不冒充完整成功。

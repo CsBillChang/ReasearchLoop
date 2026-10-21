@@ -26,7 +26,7 @@ class ClarificationPipelineTests(unittest.TestCase):
         self.settings = Settings(project_root=root, data_dir=root/'data', output_dir=root/'notes',
                                  database_url='sqlite:///'+str(root/'researchloop_test_pause.db'), deepseek_api_key='fixture')
         self.db = Database(self.settings.database_url); self.db.ensure_schema()
-        self.service = TaskService(self.db)
+        self.service = TaskService(self.db, self.settings)
         self.task = self.service.create(TaskCreate(prompt='比较论文，先询问数量', idempotency_key='pause'))
         self.requests = []
 
@@ -77,7 +77,7 @@ class ClarificationPipelineTests(unittest.TestCase):
     def test_concurrent_duplicate_resume_single_answer_event(self):
         q=self.pause(); payload=self.payload(q)
         with ThreadPoolExecutor(max_workers=2) as pool:
-            list(pool.map(lambda _:TaskService(Database(self.settings.database_url)).resume(payload,self.task.task_id),range(2)))
+            list(pool.map(lambda _:TaskService(Database(self.settings.database_url), self.settings).resume(payload,self.task.task_id),range(2)))
         self.assertEqual(len([e for e in self.db.list_events(self.task.task_id) if e['event_type']=='task_resumed']),1)
         self.assertEqual(len([m for m in self.db.get_checkpoint(self.task.task_id)['messages'] if m['role']=='user']),2)
 
@@ -131,7 +131,7 @@ class ClarificationPipelineTests(unittest.TestCase):
         import subprocess
         root=Path(self.temp.name)
         env={**os.environ,'PAUSE_TEST_ROOT':str(root),'PAUSE_TEST_URL':self.settings.database_url,
-             'PAUSE_TEST_TASK':self.task.task_id,'PYTHONPATH':str(Path(__file__).parents[2])}
+             'PAUSE_TEST_TASK':self.task.task_id,'PAUSE_TEST_MODEL':self.settings.deepseek_model,'PYTHONPATH':str(Path(__file__).parents[2])}
         child=subprocess.run([str(Path(__file__).parents[3]/'.venv/bin/python'),str(Path(__file__).with_name('clarification_process.py'))],env=env,timeout=20,capture_output=True)
         self.assertEqual(child.returncode,-9,child.stderr.decode())
         self.assertTrue((root/'ready').exists())

@@ -111,7 +111,7 @@ class CollaborationContractTests(unittest.TestCase):
         self.assertEqual(len(scenario.requests),count)
         self.assertEqual(len(self.db.list_subtasks(tid)),3)
     def test_background_worker_does_not_claim_child_tasks(self):
-        task=TaskService(self.db).create(__import__('research_loop.domain.tasks',fromlist=['TaskCreate']).TaskCreate(prompt='root'))
+        task=TaskService(self.db, self.settings).create(__import__('research_loop.domain.tasks',fromlist=['TaskCreate']).TaskCreate(prompt='root'))
         self.db.update_task(task.task_id,status='needs_input')
         child=self.db.create_subtask(task.task_id,task.task_id,0,'child',{},'child')
         # An older child must never beat eligible roots, including fixtures from previous runs.
@@ -137,16 +137,16 @@ class CollaborationContractTests(unittest.TestCase):
         self.assertFalse(r.ok);self.assertIn('page range',r.message)
     def test_reviewer_completed_status_does_not_overwrite_runtime(self):
         tid,_,_=self.run_scenario('insufficient')
-        view=TaskService(self.db).view(self.db.get_task(tid));v=next(c for c in view.subtasks if c.role=='reviewer')
+        view=TaskService(self.db, self.settings).view(self.db.get_task(tid));v=next(c for c in view.subtasks if c.role=='reviewer')
         self.assertEqual(v.status,'completed');self.assertEqual(v.review_status,'insufficient')
     def test_sigkill_reviewer_receipt_restores_entire_family_without_resend(self):
         if not os.getenv('AG2_COLLAB_TEST_DATABASE_URL'):self.skipTest('explicit isolated MySQL test required')
         import subprocess,signal,time,sys
         from research_loop.domain.tasks import TaskCreate,ResumeInput
-        task=TaskService(self.db).create(TaskCreate(prompt='比较高被引论文并保存',save_policy='allow',attachments=[{'input_ref':'input-'+x,'local_path':str(self.root/(x+'.pdf')),'paper_id':'paper-'+x} for x in ['A','B']]))
+        task=TaskService(self.db, self.settings).create(TaskCreate(prompt='比较高被引论文并保存',save_policy='allow',attachments=[{'input_ref':'input-'+x,'local_path':str(self.root/(x+'.pdf')),'paper_id':'paper-'+x} for x in ['A','B']]))
         scenario=Scenario();TaskExecutor(self.settings,self.db,scenario.factory,lambda s,f:FixturePDF()).execute(task.task_id)
-        q=TaskService(self.db).view(self.db.get_task(task.task_id)).clarification
-        TaskService(self.db).resume(ResumeInput(clarification_id=q.clarification_id,answer='2篇',idempotency_key='resume'),task.task_id)
+        q=TaskService(self.db, self.settings).view(self.db.get_task(task.task_id)).clarification
+        TaskService(self.db, self.settings).resume(ResumeInput(clarification_id=q.clarification_id,answer='2篇',idempotency_key='resume'),task.task_id)
         ready=self.root/'ready';counter=self.root/'calls.jsonl'
         env={**os.environ,'AG2_COLLAB_ROOT':str(self.root),'AG2_COLLAB_TASK':task.task_id,'AG2_COLLAB_COUNTER':str(counter),'AG2_COLLAB_READY':str(ready)}
         cmd=[sys.executable,str(Path(__file__).with_name('collaboration_recovery_process.py'))]
@@ -165,7 +165,7 @@ class CollaborationContractTests(unittest.TestCase):
             self.assertEqual(sum(x['researcher'] for x in after),sum(x['researcher'] for x in before))
             self.assertEqual(self.db.list_model_calls(reviewer)[0]['request_id'],receipt['request_id'])
             self.assertEqual(len(self.db.list_subtasks(task.task_id)),3)
-            view=TaskService(self.db).view(self.db.get_task(task.task_id));self.assertTrue(view.result.saved_path)
+            view=TaskService(self.db, self.settings).view(self.db.get_task(task.task_id));self.assertTrue(view.result.saved_path)
             self.assertEqual(len(after)-len(before),2) # only previously unsent Supervisor save + final
             self.assertEqual(self.db.budget_summary(task.task_id)['model_used']-budget_before['model_used'],2)
         finally:
@@ -173,7 +173,7 @@ class CollaborationContractTests(unittest.TestCase):
 
     def test_optional_review_export_preserves_original_markdown_and_hash(self):
         tid,_,_=self.run_scenario('insufficient')
-        view=TaskService(self.db).view(self.db.get_task(tid));draft=self.db.get_draft(view.result.draft_id)
+        view=TaskService(self.db, self.settings).view(self.db.get_task(tid));draft=self.db.get_draft(view.result.draft_id)
         exported=Path(view.result.saved_path).read_text()
         self.assertEqual(exported, draft['markdown'])
         self.assertNotIn('> 待核实草稿', exported)
@@ -183,15 +183,15 @@ class CollaborationContractTests(unittest.TestCase):
         self.assertEqual(record['file_sha256'],draft['content_hash'])
     def test_parent_cancel_during_child_response_cannot_save_or_restart_child(self):
         from research_loop.domain.tasks import TaskCreate,ResumeInput
-        task=TaskService(self.db).create(TaskCreate(prompt='比较高被引论文并保存',save_policy='allow',attachments=[{'input_ref':'input-'+x,'local_path':str(self.root/(x+'.pdf')),'paper_id':'paper-'+x} for x in ['A','B']]))
+        task=TaskService(self.db, self.settings).create(TaskCreate(prompt='比较高被引论文并保存',save_policy='allow',attachments=[{'input_ref':'input-'+x,'local_path':str(self.root/(x+'.pdf')),'paper_id':'paper-'+x} for x in ['A','B']]))
         scenario=Scenario();executor=TaskExecutor(self.settings,self.db,scenario.factory,lambda s,f:FixturePDF())
         executor.execute(task.task_id)
-        q=TaskService(self.db).view(self.db.get_task(task.task_id)).clarification
-        TaskService(self.db).resume(ResumeInput(clarification_id=q.clarification_id,answer='2篇',idempotency_key='cancel-resume'),task.task_id)
+        q=TaskService(self.db, self.settings).view(self.db.get_task(task.task_id)).clarification
+        TaskService(self.db, self.settings).resume(ResumeInput(clarification_id=q.clarification_id,answer='2篇',idempotency_key='cancel-resume'),task.task_id)
         handler=scenario.handler
         def cancelling(request):
             names={t['function']['name'] for t in json.loads(request.content).get('tools',[])}
-            if 'finish_research' in names:TaskService(self.db).cancel(task.task_id)
+            if 'finish_research' in names:TaskService(self.db, self.settings).cancel(task.task_id)
             return handler(request)
         scenario.handler=cancelling
         executor.execute(task.task_id,'cancel-test')

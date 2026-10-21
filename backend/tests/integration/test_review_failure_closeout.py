@@ -101,7 +101,8 @@ class ReviewFailureCloseoutTests(unittest.TestCase):
             self.assertIn('findings[5]', result['answer_markdown'])
             self.assertIn('不能据此认定原文缺证', result['answer_markdown'])
             self.assertEqual(result['answer_markdown'].count(scenario.before), 1)
-            self.assertEqual(scenario.review_calls, 4)
+            # 三次有范围的补读后给一次参数更正机会；重复同一坏判断即无进展停止。
+            self.assertEqual(scenario.review_calls, 5)
             self.assertEqual(len(self.db.list_subtasks(tid)), 1)
             record = next(iter(ReflectionService(self.db).snapshot(tid)['research_targets'].values()))
             self.assertEqual(len(record['attempts']), 1); self.assertEqual(record['attempts'][0]['result']['findings'], [])
@@ -138,6 +139,13 @@ class ReviewFailureCloseoutTests(unittest.TestCase):
 
     def test_failed_review_can_deliver_bound_body_and_summary(self):
         """真实图中的失败核验后仍有一次父角色收尾，不重开核验。"""
+        self.run_case()
+
+    def test_observe_invalid_review_stops_and_preserves_parent_delivery(self):
+        """没有累计额度终止时，同一非法判断仍有界交回父任务保留正文。"""
+        self.settings = self.settings.model_copy(update={'execution_budget_mode': 'observe',
+            'max_model_requests': 1, 'max_tool_actions': 1, 'reserve_model_requests': 0,
+            'task_token_limit': 1, 'task_token_tail': 0})
         self.run_case()
 
     def test_capacity_after_review_preserves_target_and_specific_error(self):

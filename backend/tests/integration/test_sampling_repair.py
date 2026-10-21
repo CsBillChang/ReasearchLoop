@@ -129,8 +129,13 @@ class SamplingRepairTests(unittest.TestCase):
         child=self.db.list_subtasks(tid)[0];spec=child['spec'];ref=spec['input_refs'][0]
         alias=next(a['paper_id'] for a in self.attachments if a['input_ref']==ref)
         self.db.execute('UPDATE subtasks SET idempotency_key=? WHERE subtask_id=?',('legacy-'+self.prefix,child['subtask_id']))
+        # 成功结果复用仍须由合法根Worker发起；旧占位身份不能绕过租约保护。
+        self.db.update_task(tid,status='queued')
+        claimed=self.db.claim_task('alias-recovery',task_id=tid)
+        self.assertIsNotNone(claimed)
         restored=executor._run_research_batch(tid,[spec,{**spec,'paper_ids':[alias],'input_refs':[]}],
-            'no-new-worker','unused',self.settings,None)
+            'alias-recovery',claimed['lease_token'],self.settings,None)
+        self.db.update_task(tid,status=view['status'])
         self.assertEqual(len(restored),1);self.assertEqual(len(scenario.requests),n)
         self.assertEqual(restored[0]['status'],'partial' if invalid else 'completed')
         self.assertTrue(restored[0]['findings'])

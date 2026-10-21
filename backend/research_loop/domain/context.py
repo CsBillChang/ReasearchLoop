@@ -1,5 +1,6 @@
 """上下文摘录纯函数：保留原句和省略标识，不生成新事实。"""
 import json
+from research_loop.providers.token_counting import estimate
 from copy import deepcopy
 import hashlib
 import re
@@ -134,13 +135,33 @@ def project_research_handoffs(messages: list[dict], current_task: dict) -> tuple
     calls = {c['id']: c['function']['name'] for m in messages for c in m.get('tool_calls', [])}
     changed = []
     for message in projected:
-        if message.get('role') != 'tool' or calls.get(message.get('tool_call_id')) != 'delegate_research':
+        tool = calls.get(message.get('tool_call_id'))
+        if message.get('role') != 'tool' or tool not in {'delegate_research', 'record_research_progress', 'finish_research'}:
             continue
         try:
             observation = json.loads(message.get('content') or '')
         except (ValueError, TypeError):
             continue
         if not isinstance(observation, dict) or not observation.get('ok'):
+            continue
+        if tool != 'delegate_research':
+            value = observation.get('data', {}).get('research_progress')
+            # retained只增加行动身份和来源完整性；正文、版本和来源逐字段判等。
+            # 不能只凭revision把旧稿或额外字段折叠成当前稿。
+            def comparable(progress):
+                """移除仅由服务读回添加的字段，不改研究内容或核验状态。"""
+                result = deepcopy(progress)
+                result.pop('action_id', None)
+                for finding in result.get('findings', []):
+                    finding.pop('source_integrity', None)
+                    finding.setdefault('revision', 1)
+                return result
+            if value and own and comparable(value) == comparable(own):
+                observation['data']['research_progress'] = {
+                    **{k: own[k] for k in ('task_id', 'revision', 'action_id') if k in own},
+                    'context_path': 'current_task.research_progress'}
+                message['content'] = json.dumps(observation, ensure_ascii=False, sort_keys=True)
+                changed.append(message['tool_call_id'])
             continue
         for child in observation.get('data', {}).get('subtasks', []):
             progress = child.get('research_progress')
@@ -281,7 +302,7 @@ def compact_tool_exchange(group: list[dict], summary: dict) -> list[dict]:
 def contains_source_exchange(group: list[dict]) -> bool:
     """识别原文或历史读回往返，避免无读回工具时将必要依据摘成摘要。"""
     names = {c["function"]["name"] for m in group for c in m.get("tool_calls", [])}
-    return bool(names & {"read_paper", "retrieve_evidence", "read_memory", "delegate_research"})
+    return bool(names & {"read_paper", "acquire_paper_pdf", "retrieve_evidence", "read_memory", "delegate_research"})
 
 
 def excerpt(text: str, query: str, cap: int = 800) -> str:
@@ -455,7 +476,14 @@ def project_source(observation: dict, query: str, cap: int, readable: bool, targ
             item['context_excerpted'] = len(spans) != 1 or len(spans[0]['text']) != len(text)
             if priority and item['context_excerpted']:
                 item['context_capacity_gap'] = '本次补读因请求容量仅呈现一个连续窗口；其余内容未呈现，不能当作原文缺证。'
-            if readable and target_ref and item.get('page_number') is not None:
+            readback = item.pop('readback', None)
+            if readable and isinstance(readback, dict):
+                if readback.get('available') and readback.get('target_ref'):
+                    item['context_readback'] = {k: readback[k] for k in ('target_ref', 'start_page', 'page_count') if k in readback}
+                else:
+                    item['context_readback_unavailable'] = readback.get('reason', 'no_current_role_read_target')
+            elif readable and target_ref and item.get('page_number') is not None:
+                # 纯投影函数兼容旧调用；业务入口须预先校验并附带readback。
                 item['context_readback'] = {'target_ref': target_ref, 'start_page': item['page_number'], 'page_count': 1}
     data['context_notice'] = ('这是已取得原文的有界投影，完整原文仍持久化；服务读取覆盖不等于模型看到所有文字。'
                               '仅引用具体窗口内原句；' + ('缺失细节可定向read_paper。' if readable else
@@ -495,7 +523,7 @@ def source_history(rows: list, query: str, max_items: int | None = None, protect
         for identity, entry in unique.items():
             ri, _, _, item, function = entry
             args = json.loads(function['arguments'])
-            targeted = function['name'] == 'read_paper' and 0 < (args.get('page_count') or 0) <= 3
+            targeted = function['name'] in {'read_paper', 'acquire_paper_pdf'} and 0 < (args.get('page_count') or 0) <= 3
             score = (ri == newest[identity[0]], targeted, len(keywords & set(terms(item['text']))), ri)
             grouped.setdefault(identity[0], []).append((score, identity))
         for entries in grouped.values():
@@ -565,7 +593,7 @@ def compact_research_exchanges(messages: list[dict], query: str, available: int)
     Args:
         messages: 已校验权限及来源版本的原始消息副本。
         query: 当前问题与阶段缺口，只用于选窗，不产生研究结论。
-        available: 扣除工具 schema/外层上下文后的保守字节容量。
+        available: 扣除工具 schema/外层上下文后的Token估算容量。
 
     Returns:
         投影及容量统计。最新工具组保持配对；原件由 ContextService 归档。
@@ -589,10 +617,13 @@ def compact_research_exchanges(messages: list[dict], query: str, available: int)
         groups.append((i, end))
         for row in messages[i + 1:end]:
             function = calls[row['tool_call_id']]
-            if function['name'] not in {'read_paper', 'retrieve_evidence'}:
+            if function['name'] not in {'read_paper', 'acquire_paper_pdf', 'retrieve_evidence'}:
                 continue
-            observation = json.loads(row['content'])
-            if not observation.get('ok'):
+            try:
+                observation = json.loads(row['content'])
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(observation, dict) or not observation.get('ok'):
                 continue
             args = json.loads(function['arguments'])
             data = observation.get('data', {})
@@ -603,12 +634,12 @@ def compact_research_exchanges(messages: list[dict], query: str, available: int)
                     continue
                 version = source.get('source_sha256') or data.get('content_sha256')
                 key = (doc, version, source.get('evidence_id'), source.get('page_number'))
-                if function['name'] == 'read_paper' and ('start_page' in args or args.get('page_count') is not None):
+                if function['name'] in {'read_paper', 'acquire_paper_pdf'} and ('start_page' in args or args.get('page_count') is not None):
                     batch.setdefault(key[:2], set()).add(key)
                 start = source.get('char_start', 0)
                 end_char = start + len(text)
-                targeted = function['name'] == 'read_paper' and ('start_page' in args or args.get('page_count') is not None)
-                target = args.get('target_ref') if function['name'] == 'read_paper' else None
+                targeted = function['name'] in {'read_paper', 'acquire_paper_pdf'} and ('start_page' in args or args.get('page_count') is not None)
+                target = args.get('target_ref') if function['name'] in {'read_paper', 'acquire_paper_pdf'} else None
                 if target:
                     targets[(doc, version)] = target
                 value = {'source': {**source, 'source_sha256': version}, 'last': i,
@@ -639,8 +670,11 @@ def compact_research_exchanges(messages: list[dict], query: str, available: int)
     names = {c['id']: c['function']['name'] for m in result for c in m.get('tool_calls', [])}
     for message in result:
         if message.get('role') == 'tool' and names.get(message.get('tool_call_id')) == 'retrieve_evidence':
-            value = json.loads(message['content'])
-            if value.get('ok') and isinstance(value.get('data'), dict):
+            try:
+                value = json.loads(message['content'])
+            except (ValueError, TypeError):
+                continue
+            if isinstance(value, dict) and value.get('ok') and isinstance(value.get('data'), dict):
                 compact_retrieval_metadata(value['data'])
                 message['content'] = json.dumps(value, ensure_ascii=False)
     protected = set()
@@ -659,8 +693,8 @@ def compact_research_exchanges(messages: list[dict], query: str, available: int)
     # 为最新观察与固定指令留空间；不是限制可读页数，全部原文仍可读回。
     # 最新组本身过大时仍留少量互补窗口，下游再投影最新组，不能只剩标题页。
     def size(value):
-        """与容量上界同口径计量JSON的UTF-8字节。"""
-        return len(json.dumps(value, ensure_ascii=False).encode('utf-8'))
+        """与整份请求共用Token估算口径。"""
+        return estimate(value)
     # 可用空间应扣除实际保留的消息，而非无条件只给原文三分之一。
     # 最新组过大时仍先保留原有最小窗口份额，交由下游精简最新来源观察。
     window_budget = max(0, available // 3, available - size(result) - 512)
@@ -679,7 +713,7 @@ def compact_research_exchanges(messages: list[dict], query: str, available: int)
     def window_cost(item):
         """窗口会嵌入message.content字符串，必须计入第二层JSON转义开销。"""
         serialized = json.dumps(item, ensure_ascii=False)
-        return len(json.dumps(serialized, ensure_ascii=False).encode('utf-8'))
+        return estimate(serialized)
     protected_size = sum(window_cost(window(v,0,len(v['source']['text'])))+2
                          for values in queues.values() for v in values if v['priority']==3)
     # 同页最新来源观察可以缩短，已定向补读的互补整页优先保留。
@@ -687,9 +721,12 @@ def compact_research_exchanges(messages: list[dict], query: str, available: int)
     # 原始观察仍在档案，上层再按实际整份输入缩短其副本，不扩大全局容量。
     minimum_result = deepcopy(result)
     for message in minimum_result:
-        if message.get('role') == 'tool' and names.get(message.get('tool_call_id')) in {'read_paper', 'retrieve_evidence'}:
-            value = json.loads(message['content'])
-            if value.get('ok') and isinstance(value.get('data'), dict):
+        if message.get('role') == 'tool' and names.get(message.get('tool_call_id')) in {'read_paper', 'acquire_paper_pdf', 'retrieve_evidence'}:
+            try:
+                value = json.loads(message['content'])
+            except (ValueError, TypeError):
+                continue
+            if isinstance(value, dict) and value.get('ok') and isinstance(value.get('data'), dict):
                 message['content'] = json.dumps(project_source(value, query, 80, False, None), ensure_ascii=False)
     if protected_size <= max(0, available - size(minimum_result) - 512):
         window_budget = max(window_budget, protected_size)
@@ -730,5 +767,5 @@ def compact_research_exchanges(messages: list[dict], query: str, available: int)
     last_start = groups[-1][0] - sum(end-start for start,end in groups[:-1])
     result.insert(last_start, {'role':'user','content':json.dumps(notice,ensure_ascii=False)})
     return result, {'archived_groups':len(groups)-1, 'working_source_count':len(working),
-                    'working_sources_bytes':used, 'working_set_budget':window_budget,
+                    'working_sources_estimated_tokens':used, 'working_set_budget':window_budget,
                     'omitted_source_windows':total-len(working)}

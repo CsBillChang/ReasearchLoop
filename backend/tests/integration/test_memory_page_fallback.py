@@ -82,7 +82,7 @@ class MemoryPageFallbackTests(unittest.TestCase):
         self.tasks = TaskService(self.db, self.settings)
         self.memory = MemoryService(self.db)
 
-    def task(self, client=None, cid=None):
+    def task(self, client=None, cid=None, settings=None):
         """通过同一创建合同固定当前禁止保存要求。"""
         payload = TaskCreate(prompt='读回历史材料，保留身份与条件，不保存文件。', conversation_id=cid or self.cid,
                              idempotency_key=uuid4().hex, save_policy='deny')
@@ -90,7 +90,7 @@ class MemoryPageFallbackTests(unittest.TestCase):
             response = client.post('/api/tasks', json=payload.model_dump(mode='json'))
             self.assertEqual(response.status_code, 202, response.text)
             return response.json()['task_id']
-        return self.tasks.create(payload).task_id
+        return (TaskService(self.db,settings) if settings else self.tasks).create(payload).task_id
 
     def archive(self, tid):
         """合成含Unicode、反斜线与换行的原始档案；不伪造真实论文或模型轨迹。"""
@@ -138,7 +138,8 @@ class MemoryPageFallbackTests(unittest.TestCase):
 
     def run_projection(self, count):
         """实际调用prepare触发回退，输入与完整档案保持不变。"""
-        tid = self.task()
+        settings = self.settings.model_copy(update={'context_window_tokens':13000,'context_output_reserve':1000,'context_safety_tokens':500})
+        tid = self.task(settings=settings)
         sid, raw = self.archive(tid)
         messages = self.messages(tid, sid, count)
         before = deepcopy(messages)
@@ -183,7 +184,8 @@ class MemoryPageFallbackTests(unittest.TestCase):
         from research_loop.services.papers import PaperService
         from research_loop.tools.papers import specs as paper_specs
         from integration.test_context_continuity import LongPDF
-        tid = self.task()
+        settings = self.settings.model_copy(update={'context_window_tokens':35000,'context_output_reserve':4096,'context_safety_tokens':1024})
+        tid = self.task(settings=settings)
         sid, _ = self.archive(tid)
         path = self.root / 'mixed.pdf'
         path.write_bytes(b'%PDF-synthetic')
@@ -208,7 +210,7 @@ class MemoryPageFallbackTests(unittest.TestCase):
         messages.append({'role': 'tool', 'tool_call_id': 'mixed-pages', 'content': dump({'ok': True, 'data': pages})})
         before = deepcopy(messages)
         # 只在本合成例设置小窗口，同时覆盖可容纳与明确超容量两侧；不改变运行配置。
-        settings = self.settings.model_copy(update={'context_window_tokens': 45000, 'context_output_reserve': 4096,
+        settings = self.settings.model_copy(update={'context_window_tokens': 35000, 'context_output_reserve': 4096,
                                                     'context_safety_tokens': 1024})
         ctx = ContextService(self.db, self.memory, settings)
         tools = [s.schema() for s in memory_specs() + paper_specs() if s.name in {'read_memory', 'read_paper', 'retrieve_evidence'}]
@@ -256,11 +258,13 @@ class MemoryPageFallbackTests(unittest.TestCase):
 
     def test_oversized_protected_mixed_batch_still_reports_capacity(self):
         """小测试窗口无法容纳大量必要命中时明确报错，不删除身份伪装通过。"""
-        self.run_mixed_projection(count=40, capacity_failure=True)
+        # 新计量比字节计量更贴近容量；增加合成身份数以继续覆盖必要状态超限。
+        self.run_mixed_projection(count=64, capacity_failure=True)
 
     def test_no_readback_tool_preserves_honest_capacity_failure(self):
         """没有档案工具时不裁原件、不制造无法执行的续读提示。"""
-        tid = self.task()
+        settings = self.settings.model_copy(update={'context_window_tokens':13000,'context_output_reserve':1000,'context_safety_tokens':500})
+        tid = self.task(settings=settings)
         sid, _ = self.archive(tid)
         messages = self.messages(tid, sid)
         original = deepcopy(messages)

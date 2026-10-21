@@ -11,7 +11,7 @@ from research_loop.workers.executor import TaskExecutor
 root=Path(os.environ['PAUSE_TEST_ROOT'])
 url=os.environ['PAUSE_TEST_URL']
 if 'researchloop_test_' not in url:raise RuntimeError('isolated test database required')
-settings=Settings(project_root=root,data_dir=root/'data',output_dir=root/'notes',database_url=url,deepseek_api_key='fixture')
+settings=Settings(project_root=root,data_dir=root/'data',output_dir=root/'notes',database_url=url,deepseek_api_key='fixture',deepseek_model=os.environ['PAUSE_TEST_MODEL'])
 class Provider:
     def complete(self,*args,**kwargs):
         with (root/'calls').open('a') as f:f.write('call\n')

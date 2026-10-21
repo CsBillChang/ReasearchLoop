@@ -141,4 +141,5 @@ class ResearchProgressTests(unittest.TestCase):
     def test_unknown_page_number_is_not_reported_as_physical_zero(self):
         """Jina类来源没有物理页码时保留未知，不生成第0页定位。"""
         self.db.execute('UPDATE page_evidence SET page_number=0 WHERE evidence_id=?',(self.eid,))
+        self.db.execute('UPDATE documents SET total_pages=0 WHERE document_id=(SELECT document_id FROM page_evidence WHERE evidence_id=?)', (self.eid,))
         self.assertIsNone(self.service.source(self.tid,self.eid)['page_number'])

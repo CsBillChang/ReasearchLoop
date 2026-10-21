@@ -21,18 +21,26 @@ def fixture(root: Path):
     """生成含矢量图形的两页合成PDF与匹配缓存，不调用解析器或网络。"""
     files = FileStore(root/'data', root/'notes', root)
     doc = fitz.open()
+    page_texts = []
     for n in (1, 2):
         page = doc.new_page(width=600, height=800)
         page.insert_text((70, 80), f'Synthetic Table {n}: A 12.0, B 24.0')
         page.draw_rect((50, 100, 350, 300), color=(1, 0, 0))
         page.draw_line((50, 100), (350, 300), color=(0, 0, 1))
+        # 合成论文实际包含方法正文，缓存按相同PDF提取；原矢量表格和裁区保持。
+        paragraph = ('Synthetic method compares controlled conditions and reports bounded results. '
+                     'The table values describe this fixture only.\n')
+        remaining = page.insert_textbox(fitz.Rect(60, 340, 540, 760), paragraph * 16, fontsize=7)
+        if remaining < 0:
+            raise AssertionError('synthetic methods text must fit the physical page')
+        page_texts.append(page.get_text())
     payload = doc.tobytes(); doc.close()
     h = sha256(payload).hexdigest(); pdf = files.cache_pdf_path(h); files.write_bytes_atomic(pdf, payload)
     parser_config = {'text_route': 'cache-jina-pymupdf', 'min_text_chars': 1200}
     cfg = sha256(json.dumps(parser_config, sort_keys=True).encode()).hexdigest()
     key = sha256(f'{h}:pymupdf:1:{cfg}'.encode()).hexdigest(); did = 'doc:' + key[:32]
     pages = [{'evidence_id': 'evidence:' + sha256(f'{did}:{n}'.encode()).hexdigest()[:40],
-              'document_id': did, 'page_number': n, 'text': f'Synthetic Table {n}: A 12.0, B 24.0',
+              'document_id': did, 'page_number': n, 'text': page_texts[n - 1],
               'parsed_markdown': '', 'assets': [], 'gaps': []} for n in (1, 2)]
     files.write_bytes_atomic(files.cache_parse_path(key), json.dumps({'total_pages': 2, 'pages': pages, 'gaps': []}).encode())
     item = VisualInput(target_ref='input-synthetic', document_id=did, pdf_sha256=h,
@@ -104,12 +112,15 @@ class VisualUnitTests(unittest.TestCase):
         Path(prepared['assets'][0]['path']).write_bytes(b'corrupt')
         with self.assertRaises(ValueError): build_request(prepared, VisualConfig(), self.files.cache_dir)
 
-    def test_legacy_text_estimate_unchanged(self):
-        """文字、工具和Unicode旧预估逐值相等，输入不突变。"""
+    def test_text_estimate_uses_shared_counter(self):
+        """新文字请求共用上下文计量，旧策略显式保持原公式，输入不突变。"""
         request = {'messages':[{'role':'user','content':'中文 test'}], 'tools':[{'name':'x'}], 'max_tokens':8192}
         before = deepcopy(request)
         expected = len(dump({'messages':request['messages'],'tools':request['tools']}).encode()) + 1024 + 8192
-        self.assertEqual(estimate_request(request), expected); self.assertEqual(request, before)
+        from research_loop.providers.token_counting import estimate
+        self.assertEqual(estimate_request(request), estimate({'messages':request['messages'],'tools':request['tools']})+8192)
+        self.assertEqual(estimate_request(request, {'version':1}), expected)
+        self.assertEqual(request, before)
 
     def test_image_estimate_excludes_base64_but_retains_request(self):
         """图片按上限预留，原始请求及hash仍保留实际发送字节。"""

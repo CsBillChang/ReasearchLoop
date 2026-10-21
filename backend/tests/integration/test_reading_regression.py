@@ -58,7 +58,7 @@ class ReadingRegressionTests(unittest.TestCase):
             calls.append(str(req.url))
             return httpx.Response(200, text=text)
         pdf = self.provider(handler)
-        tid = TaskService(self.db).create(TaskCreate(prompt='阅读全文')).task_id
+        tid = TaskService(self.db, self.settings).create(TaskCreate(prompt='阅读全文')).task_id
         papers = PaperService(self.db, None, pdf)
         args = dict(task_id=tid, target_ref='attached', attachments={'attached':{'url':'https://paper.example/main.pdf'}})
         first = papers.read(**args)
@@ -155,7 +155,7 @@ class ReadingRegressionTests(unittest.TestCase):
 
     def summary_fixture(self, handler):
         """准备一个已真实落库的取证交接状态，直接进入生产图的精读节点。"""
-        tid=TaskService(self.db).create(TaskCreate(prompt='只基于已读原文精读，不保存')).task_id
+        tid=TaskService(self.db, self.settings).create(TaskCreate(prompt='只基于已读原文精读，不保存')).task_id
         self.db.save_document(Document(document_id='doc',paper_id='paper',content_sha256='a'*64,parser_name='fixture',parser_version='1',config_sha256='b'*64,total_pages=1,cache_path='fixture').model_dump())
         page=PageEvidence(evidence_id='evidence:one',document_id='doc',page_number=1,text='Source-only fact. Do not use old summary.')
         self.db.save_page(page.model_dump());self.db.mark_task_evidence(tid,page.evidence_id)
@@ -246,7 +246,7 @@ class ReadingRegressionTests(unittest.TestCase):
         self.assertEqual(len(calls),6)
         self.assertEqual(result['deep_reading']['status'],'partial')
         tid2,state2,graph2=self.summary_fixture(lambda r:self.fail('cancelled task sent a model request'))
-        TaskService(self.db).cancel(tid2)
+        TaskService(self.db, self.settings).cancel(tid2)
         result=graph2.invoke(state2)
         self.assertTrue(result['cancelled'])
 
@@ -259,11 +259,11 @@ class ReadingRegressionTests(unittest.TestCase):
             if 'finish_review' in names:raise httpx.ReadTimeout('controlled reviewer timeout',request=req)
             return handler(req)
         scenario.handler=fail_review
-        task=TaskService(self.db).create(TaskCreate(prompt='比较并保存',save_policy='allow',attachments=[{'input_ref':'input-'+c,'url':'https://paper.example/'+c+'.pdf','paper_id':'paper-'+c} for c in ['A','B']]))
+        task=TaskService(self.db, self.settings).create(TaskCreate(prompt='比较并保存',save_policy='allow',attachments=[{'input_ref':'input-'+c,'url':'https://paper.example/'+c+'.pdf','paper_id':'paper-'+c} for c in ['A','B']]))
         executor=TaskExecutor(self.settings,self.db,scenario.factory,lambda s,f:FixturePDF())
         executor.execute(task.task_id)
-        clarif=TaskService(self.db).view(self.db.get_task(task.task_id)).clarification
-        TaskService(self.db).resume(ResumeInput(clarification_id=clarif.clarification_id,answer='2',idempotency_key='resume'),task.task_id)
+        clarif=TaskService(self.db, self.settings).view(self.db.get_task(task.task_id)).clarification
+        TaskService(self.db, self.settings).resume(ResumeInput(clarification_id=clarif.clarification_id,answer='2',idempotency_key='resume'),task.task_id)
         result=executor.execute(task.task_id)
         self.assertTrue(result.draft_id)
         self.assertIn('# Compare',result.answer_markdown)
@@ -303,7 +303,7 @@ class ReadingRegressionTests(unittest.TestCase):
             self.skipTest('explicit isolated MySQL required')
         tid,state,_=self.summary_fixture(lambda r:self.fail('parent must not send'))
         self.db.save_checkpoint(tid,state)
-        env={**os.environ,'READING_RECOVERY_DB':self.db.url,'READING_RECOVERY_TASK':tid,
+        env={**os.environ,'PYTHONPATH':str(Path(__file__).parents[2]),'READING_RECOVERY_DB':self.db.url,'READING_RECOVERY_TASK':tid,
              'READING_RECOVERY_COUNTER':str(self.root/'counter'),'READING_RECOVERY_READY':str(self.root/'ready')}
         command=[sys.executable,str(Path(__file__).with_name('reading_recovery_process.py'))]
         child=subprocess.Popen(command+['crash'],env=env)

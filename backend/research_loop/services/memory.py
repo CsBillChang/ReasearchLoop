@@ -159,9 +159,13 @@ class MemoryService:
         return hits
 
     def _grant_history_papers(self, task_id, record):
-        """显式读取历史后才授予论文读取权限；限定附件任务不自动扩展材料范围。"""
-        task=self.db.get_task(task_id)
-        if json.loads(task['attachments_json']):
+        """合法历史读回授予论文身份；明确仅附件时不扩展材料范围。
+
+        历史摘要不授予旧页证据、核验结论或保存权限；后续读取仍受版本、页范围和角色限制。
+        """
+        from research_loop.domain.source_access import attachment_only, current_instructions
+        _, instructions = current_instructions(self.db, task_id)
+        if attachment_only(instructions):
             return
         for pid in record.get('paper_ids') or []:
             if self.db.get_paper(pid):

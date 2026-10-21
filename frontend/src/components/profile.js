@@ -25,8 +25,13 @@ export async function renderProfile(el,onError,onSource,onConversation,{readOnly
     if(!items.length)group.innerHTML='<div class="profile-empty"><span aria-hidden="true">'+(id==='explicit'?'✧':'◌')+'</span><p>'+(id==='explicit'?'还没有长期偏好':'还没有兴趣推断')+'</p><small>'+(id==='explicit'?'在上方写下你的研究习惯。':'随着研究积累，相关线索会出现在这里。')+'</small></div>';
     for(const entry of items) {
       const card=document.createElement('article');card.className='memory-card';
-      const natural=entry.slot.startsWith('statement:');
+      const natural=entry.slot.startsWith('statement:')||entry.source.type==='behavioral_interest';
       card.innerHTML='<span class="memory-kind">'+(id==='explicit'?'明确偏好':'兴趣推断')+'</span>'+(natural?'':'<strong>'+escape(entry.slot)+'</strong>')+'<p>'+escape(entry.content)+'</p>';
+      if(id==='inferred'&&entry.source.type==='behavioral_interest') {
+        const detail=document.createElement('p');detail.className='form-hint';
+        detail.textContent=(entry.source.strength==='repeated'?'多轮研究线索':'本次研究线索')+' · '+entry.source.distinct_task_count+' 条不同问题依据。'+entry.source.reason;
+        card.append(detail);
+      }
       const actions=document.createElement('div');actions.className='memory-actions';card.append(actions);
       if(entry.source.task_id){const b=document.createElement('button');b.textContent='查看来源';b.onclick=()=>onSource(entry.source.task_id);actions.append(b);}
       if(id==='explicit') {

@@ -94,7 +94,17 @@ class _ReceiptClient:
             root = self.state.get("root_task_id") or task_id
             if self.db.has_unknown_family_call(root):
                 raise _RunInterrupted("task family contains unknown request; no resend")
-            if sequence > self.state.get("max_model_requests", 12):
+            policy = tokens.counting_policy(root)
+            if policy:
+                # 保持上游精读原消息与三轮行为，只在新发送前校验冻结模型和实际容量。
+                from research_loop.providers.token_counting import validate_frozen_request
+                try:
+                    validate_frozen_request(request, policy, getattr(self.provider, "model", policy["model"]))
+                except ValueError as exc:
+                    raise _RunInterrupted(str(exc)) from exc
+            from research_loop.domain.execution_policy import enforcing
+            if (enforcing(self.state) and not self.state.get("execution_policy")
+                    and sequence > self.state.get("max_model_requests", 48)):
                 raise _RunInterrupted("deep reading model request budget exhausted")
             try:
                 tokens.reserve(root, task_id, sequence, request, "researcher")

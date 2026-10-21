@@ -181,7 +181,7 @@ class AdaptiveResearchTests(unittest.TestCase):
 
     def test_synthesis_goal_does_not_require_an_extra_paper(self):
         """有材料核对目标时允许零额外材料汇总；不能把所有取证要求改成零。"""
-        task=TaskService(self.db).create(TaskCreate(prompt='核对已有材料并局部改写',save_policy='deny'))
+        task=TaskService(self.db, self.settings).create(TaskCreate(prompt='核对已有材料并局部改写',save_policy='deny'))
         service=CoverageService(self.db)
         goals=[{'goal_id':'verify','description':'核对已有论文','min_papers':1,'requires_fulltext':True},
                {'goal_id':'deliver','description':'汇总已验证内容','min_papers':0}]
@@ -246,7 +246,7 @@ class AdaptiveResearchTests(unittest.TestCase):
     def test_no_evidence_final_text_cannot_claim_complete(self):
         scenario = AdaptiveScenario()
         scenario.handler = lambda r: scenario.response(content="凭空声称已经找到三篇")
-        task = TaskService(self.db).create(TaskCreate(prompt="找三篇论文"))
+        task = TaskService(self.db, self.settings).create(TaskCreate(prompt="找三篇论文"))
         result = TaskExecutor(self.settings, self.db, scenario.factory).execute(task.task_id)
         self.assertEqual(self.db.get_task(task.task_id)["status"], "partial")
         self.assertTrue(result.gaps)
@@ -267,13 +267,13 @@ class AdaptiveResearchTests(unittest.TestCase):
             return handler(request)
 
         scenario.handler = fail_after_delegation
-        task = TaskService(self.db).create(TaskCreate(prompt="研究不同方法，不保存"))
+        task = TaskService(self.db, self.settings).create(TaskCreate(prompt="研究不同方法，不保存"))
         executor = TaskExecutor(self.settings, self.db, scenario.factory, lambda s, f: FixturePDF())
         with patch("research_loop.providers.discovery.DiscoveryProvider.search", side_effect=scenario.search):
             result = executor.execute(task.task_id)
         self.assertIn("语言嵌入", result.answer_markdown)
         self.assertEqual(self.db.get_task(task.task_id)["status"], "partial")
-        self.assertEqual(TaskService(self.db).view(self.db.get_task(task.task_id)).usage["unknown"], 1)
+        self.assertEqual(TaskService(self.db, self.settings).view(self.db.get_task(task.task_id)).usage["unknown"], 1)
         replay = executor.execute(task.task_id)
         self.assertIn("语言嵌入", replay.answer_markdown)
         self.assertEqual(len(attempts), 1)
@@ -288,7 +288,7 @@ class AdaptiveResearchTests(unittest.TestCase):
         """会议与附件不能混为一谈；旧计划重放仍拒绝越权附件和范围放宽。"""
         paper = self.settings.project_root / "attachment.pdf"
         paper.write_bytes(b"%PDF-fixture")
-        task = TaskService(self.db).create(TaskCreate(prompt="分析附件", attachments=[
+        task = TaskService(self.db, self.settings).create(TaskCreate(prompt="分析附件", attachments=[
             {"input_ref": "primary", "paper_id": "same-paper", "local_path": str(paper)},
             {"input_ref": "backup", "paper_id": "same-paper", "local_path": str(paper)}]))
         coverage = CoverageService(self.db)

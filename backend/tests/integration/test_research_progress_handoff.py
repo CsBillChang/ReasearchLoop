@@ -198,6 +198,7 @@ class ProgressHandoffTests(unittest.TestCase):
                         # 仅隔离配置触发压缩；不改变模型窗口和产品全局配置。
                         compressed = settings.model_copy(update={'context_compress_ratio': 0.01})
                         provider = FollowupScenario(self)
+                        app.dependency_overrides[get_runtime_settings] = lambda: compressed
                         created = client.post('/api/tasks', json={'conversation_id':cid,
                             'prompt':'基于上次记录解释 input-A 的语言机制；只读取物理第1页，不保存。', 'save_policy':'deny','idempotency_key':uuid4().hex})
                         self.assertEqual(created.status_code,202,created.text)

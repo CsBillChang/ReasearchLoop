@@ -55,7 +55,9 @@ class AG6RepairTests(unittest.TestCase):
 
     def test_large_old_arguments_compact_as_complete_exchange(self):
         """压缩旧长参数及观察；推理字段、最新组/用户指令不改，原件可回读。"""
-        tid=self.task('保留成果，不保存文件')
+        # 容量先随根任务冻结，后续ContextService配置不能改写已存在策略。
+        settings=self.settings.model_copy(update={'context_window_tokens':18000,'context_output_reserve':1000,'context_safety_tokens':500})
+        tid=self.task('保留成果，不保存文件',settings=settings)
         messages=[{'role':'system','content':'system'},{'role':'user','content':'保留成果，不保存文件'}]
         for i in range(3):
             args={'markdown':'旧草稿'*4000 if i<2 else '最新'}
@@ -63,7 +65,6 @@ class AG6RepairTests(unittest.TestCase):
                 'tool_calls':[{'id':str(i),'type':'function','function':{'name':'create_note','arguments':json.dumps(args,ensure_ascii=False)}}]},
                 {'role':'tool','tool_call_id':str(i),'content':'已保存数据库草稿'+str(i)}]
         before=json.dumps(messages,ensure_ascii=False)
-        settings=self.settings.model_copy(update={'context_window_tokens':18000,'context_output_reserve':1000,'context_safety_tokens':500})
         projected,metrics=ContextService(self.db,self.memory,settings).prepare({'task_id':tid,'prompt':'保留成果，不保存文件'},messages,[])
         validate_messages(projected)
         self.assertLess(metrics['after'],metrics['input_capacity'])

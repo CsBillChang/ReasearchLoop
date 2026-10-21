@@ -68,16 +68,16 @@ class MemoryTests(unittest.TestCase):
         self.db=Database(url);self.db.ensure_schema()
         self.conv=ConversationService(self.db)
         self.cid=self.conv.create('AG4测试',str(uuid4()))['conversation_id']
-        self.tasks=TaskService(self.db)
+        self.tasks=TaskService(self.db,self.settings)
         self.files=FileStore(root/'data',root/'notes',root)
         self.notes=NoteVersionService(self.db,self.files)
         self.memory=MemoryService(self.db,self.notes)
         self.context=ContextService(self.db,self.memory,self.settings)
         self.prefix=uuid4().hex
 
-    def task(self,prompt='测试记忆',cid=None,policy='deny'):
+    def task(self,prompt='测试记忆',cid=None,policy='deny',settings=None):
         """创建独立根任务，权限只取当前参数。"""
-        return self.tasks.create(TaskCreate(prompt=prompt,conversation_id=cid or self.cid,idempotency_key=str(uuid4()),save_policy=policy)).task_id
+        return (TaskService(self.db,settings) if settings else self.tasks).create(TaskCreate(prompt=prompt,conversation_id=cid or self.cid,idempotency_key=str(uuid4()),save_policy=policy)).task_id
 
     def done(self,tid,answer='已完成历史研究'):
         """合成任务终态用于派生投影测试，不冒充真实模型完成研究。"""
@@ -170,8 +170,8 @@ class MemoryTests(unittest.TestCase):
 
     def test_compression_pairs_archive_and_readback(self):
         """长工具观察压缩后配对仍合法；原文可读回，当前指令不变。"""
-        tid=self.task('只比较两篇，不保存，保留物理页码')
         s=self.settings.model_copy(update={'context_window_tokens':18000,'context_output_reserve':1000,'context_safety_tokens':500})
+        tid=self.task('只比较两篇，不保存，保留物理页码',settings=s)
         ctx=ContextService(self.db,self.memory,s)
         messages=[{'role':'system','content':'system'},{'role':'user','content':self.db.get_task(tid)['prompt']}]
         for i in range(3):
@@ -195,7 +195,8 @@ class MemoryTests(unittest.TestCase):
         old=self.task('历史材料')
         content='目标检测历史与条件。'*2000
         self.done(old,content)
-        tid=self.task('请继续历史材料，不保存')
+        settings=self.settings.model_copy(update={'context_window_tokens':10000,'context_output_reserve':1000,'context_safety_tokens':500})
+        tid=self.task('请继续历史材料，不保存',settings=settings)
         source=self.db.fetchone("SELECT message_id FROM conversation_messages WHERE task_id=? AND role='assistant'",(old,))['message_id']
         args=HistoryRead(source_type='message',source_id=source,offset=100,limit=16000)
         observation={'ok':True,'data':self.memory.read(tid,args)}
@@ -231,8 +232,8 @@ class MemoryTests(unittest.TestCase):
 
     def test_uncompressible_request_stops_before_model(self):
         """必要输入过大时留下可读原因，零供应商请求。"""
-        tid=self.task('需要保留的当前指令 '*700)
         s=self.settings.model_copy(update={'context_window_tokens':4096,'context_output_reserve':1000,'context_safety_tokens':500})
+        tid=self.task('需要保留的当前指令 '*700,settings=s)
         p=MemoryProvider(None)
         TaskExecutor(s,self.db,lambda s:p).execute(tid)
         result=self.tasks.view(self.db.get_task(tid))

@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
+from copy import copy
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
 from research_loop.agents.state import AgentState
+from research_loop.domain.execution_policy import enforcing, handoff_reservations
 from research_loop.agents.supervisor import append_tool_observation, initial_messages
 from research_loop.domain.tasks import ActionRecord, Observation, SavePolicy
 from research_loop.providers.deepseek import DeepSeekProvider, ModelResponse, InvalidConversation, ProviderResponseError, RequestNotSent, validate_messages
@@ -109,6 +112,91 @@ def handoff_navigation(handoff: dict, actions: list[dict]) -> tuple[dict, bool]:
     return navigation, changed
 
 
+def handoff_progress_changed(handoff: dict, current: dict) -> bool:
+    """按快照实际保存的指纹合同比较，旧格式不能与新格式误作成果变化。
+
+    Args:
+        handoff: 已持久化交接状态；旧快照仅有progress_fingerprint。
+        current: 当前已提交进展，不从模型内部推理猜测发现。
+
+    Returns:
+        当前记录相对同格式基线是否变化。新快照只按实际发现变化继续；
+        旧快照保留原比较合同，不伪造其当时没有保存的发现基线。
+    """
+    from research_loop.services.research_progress import continuation_fingerprint, progress_fingerprint
+    if 'continuation_fingerprint' in handoff:
+        return continuation_fingerprint(current) != handoff['continuation_fingerprint']
+    return progress_fingerprint(current) != handoff.get('progress_fingerprint')
+
+
+def finish_input_hash(arguments: dict) -> str:
+    """按完整原始参数绑定失败交付，不删字段或进行语义归一化。"""
+    return hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def qualification_handoff_active(handoff: dict, coverage: Any, task_id: str) -> bool:
+    """仅由同一目标的资格依赖判断阻断是否解除，旧交接保持原合同。"""
+    blocker = handoff.get('coverage_blocker') or {}
+    if not blocker or not coverage:
+        return False
+    return coverage.qualification_fingerprint(task_id, blocker['goal_id']) == blocker.get('state_fingerprint')
+
+
+def qualification_handoff(actions: list[dict], coverage: Any = None, task_id: str | None = None,
+                          preferred: dict | None = None) -> dict | None:
+    """从明确资格失败重建交接；正文仅留原参数或合法对象，不复制到交接。"""
+    candidates, seen = [], set()
+    for action in reversed(actions):
+        observation = action.get('observation') or {}
+        data = observation.get('data') or {}
+        blocker = data.get('coverage_blocker') or {}
+        if (action.get('tool_name') == 'finish_task' and action.get('status') == 'failed'
+                and not observation.get('ok') and blocker.get('state_fingerprint')
+                and blocker.get('goal_id')):
+            if blocker['goal_id'] in seen:
+                continue
+            seen.add(blocker['goal_id'])
+            candidate = data.get('finish_candidate') or {}
+            identity = {'task_id': action['task_id'], 'action_id': action['action_id'],
+                        'input_hash': finish_input_hash(action['arguments'])}
+            # 业务服务先验证正文/对象权限；图只接受精确行动绑定，不能从args补造候选。
+            bound = all(candidate.get(key) == value for key, value in identity.items())
+            handoff = {'phase': 'qualification_blocked', 'trigger_action_id': action['action_id'],
+                       'coverage_blocker': blocker, 'finish_candidate_ref': identity if bound else None}
+            if coverage is None or qualification_handoff_active(handoff, coverage, task_id):
+                candidates.append(handoff)
+    # 后来的已解除失败不能掩盖其他仍有效的旧目标阻断。
+    preferred_goal = ((preferred or {}).get('coverage_blocker') or {}).get('goal_id')
+    return next((item for item in candidates if item['coverage_blocker']['goal_id'] == preferred_goal),
+                candidates[0] if candidates else None)
+
+
+def qualification_material_navigation(handoff: dict, coverage: Any, task_id: str) -> tuple[dict, bool]:
+    """合并实际授权材料范围；新范围允许继续，但不解除资格阻断。"""
+    navigation = json.loads(json.dumps(handoff.get('material_navigation', {})))
+    initialized = 'material_navigation' in handoff
+    changed = False
+    owners = [task_id, *[child['subtask_id'] for child in coverage.db.list_subtasks(task_id)]]
+    for owner in owners:
+        for source in coverage.source_coverage(owner):
+            identity = json.dumps([source.get(key) for key in
+                ('document_id', 'source_sha256', 'page_number', 'text_sha256')], ensure_ascii=False)
+            start = source.get('char_start') or 0
+            end = source.get('char_end')
+            ranges = navigation.setdefault(identity, [])
+            if any(left <= start and (right is None or (end is not None and end <= right)) for left, right in ranges):
+                continue
+            changed = True
+            merged = []
+            for left, right in sorted(ranges + [[start, end]], key=lambda item: item[0]):
+                if merged and (merged[-1][1] is None or left <= merged[-1][1]):
+                    merged[-1][1] = None if merged[-1][1] is None or right is None else max(merged[-1][1], right)
+                else:
+                    merged.append([left, right])
+            navigation[identity] = merged
+    return navigation, initialized and changed
+
+
 def matrix_thinking(state: AgentState) -> dict[str, str] | None:
     """仅为已取证的矩阵整理与交付选择 论文 相同的非思考模式。
 
@@ -127,8 +215,8 @@ def matrix_thinking(state: AgentState) -> dict[str, str] | None:
 
 
 def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
-                db: Any = None, max_model_requests: int = 12,
-                max_tool_actions: int = 20, reserve_model_requests: int = 1,
+                db: Any = None, max_model_requests: int = 48,
+                max_tool_actions: int = 80, reserve_model_requests: int = 10,
                 checkpoint_store: Any = None, deep_reading: bool = False):
     """构建各角色共用的决策—工具—观察循环。
 
@@ -145,7 +233,7 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
     Returns:
         已编译的 LangGraph，可输入新状态或恢复状态执行。
     """
-    from research_loop.services.research_progress import ResearchProgressService, evidence_progress, readback_handoff, progress_fingerprint
+    from research_loop.services.research_progress import ResearchProgressService, evidence_progress, readback_handoff, continuation_fingerprint
     progress = ResearchProgressService(db) if db else None
 
     def record(state: AgentState, update: dict[str, Any]) -> dict[str, Any]:
@@ -167,6 +255,73 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
         row = db.get_task(task_id) if db and task_id else None
         return bool(row and row.get("cancel_requested"))
 
+    def execution_unavailable(state: AgentState) -> bool:
+        """每次实际工具发送前检查取消及角色/根任务租约，防止旧Worker继续付费。"""
+        if cancelled(state):
+            return True
+        if not db or not state.get('worker_id'):
+            return False
+        root = state.get('root_task_id') or state['task_id']
+        return any(not db.is_owner(task, state['worker_id'], state.get('lease_token'))
+                   for task in {state['task_id'], root})
+
+    def truncated_response(state: AgentState, response: ModelResponse, request: dict,
+                           conversation_messages: list[dict], request_number: int) -> dict[str, Any]:
+        """保留截断正文并终止，供新响应与旧待执行checkpoint共用。
+
+        Args:
+            state: 当前角色已有成果和待执行状态。
+            response: 已取得且落收据的长度截断响应。
+            request: 产生该响应的原请求，不能用新配置替换其上限。
+            conversation_messages: 去除本批待执行工具消息前的对话。
+            request_number: 已发生的请求序号，不增加新的发送。
+
+        Returns:
+            明确截断原因和缺口的终止状态；不包含可执行工具或内部推理。
+        """
+        # 成功收据只说明远端响应与用量已取得。截断不能触发半截工具、
+        # 自动补发或正常完成；推理仅留原始收据，不转成公开研究成果。
+        from research_loop.domain.context import textual_delivery
+        usage = response.usage or {}
+        completion = usage.get("completion_tokens")
+        cap = request.get("max_tokens")
+        output_limited = (type(completion) is int and type(cap) is int
+                          and cap > 0 and completion >= cap)
+        prefix = "OUTPUT_LIMIT_" if output_limited else "MODEL_LENGTH_"
+        cause = ("模型达到单请求输出上限" if output_limited else
+                 "模型响应因长度限制截断（未确认是否耗尽单请求输出额度）")
+        content = response.content or ""
+        candidate = textual_delivery(content)
+        internal_call = content.lstrip().startswith((
+            "<｜｜DSML｜｜ calls>", "<｜DSML｜function_calls>",
+            "<finish_task>", "<finish_research>", "<finish_review>"))
+        if response.tool_calls or internal_call or candidate is not None:
+            code = prefix + "TOOL_CALL"
+            notice = cause + "，工具调用或交付参数可能不完整；该截断响应的待执行工具已阻止，未自动重发。"
+            # 合法独立正文与文本化交付候选可以保留；原始参数不公开。
+            answer = candidate if candidate is not None else ("" if internal_call else content)
+        elif content.strip():
+            code = prefix + "PARTIAL_CONTENT"
+            notice = cause + "，正文已截断；保留已有正文，未完成部分未自动续写。"
+            answer = content
+        else:
+            reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+            reasoning_only = (type(completion) is int and type(reasoning) is int
+                              and completion > 0 and reasoning == completion)
+            code = prefix + ("REASONING_ONLY" if reasoning_only else "NO_CONTENT")
+            notice = (cause + "，本次输出全部计入内部推理，未生成正文或工具调用；已有成果保留，未自动重发。"
+                      if reasoning_only else
+                      cause + "，未生成可交付正文；已有成果保留，未自动重发。")
+            answer = ""
+        return record(state, {
+            "model_requests": request_number, "finished": True, "pending_tool_calls": [],
+            "messages": conversation_messages + [{"role": "assistant", "content": answer}],
+            # 无新正文时保持此前正文；阶段/草稿成果继续由Worker原保留逻辑读回。
+            "final_answer": answer or state.get("final_answer") or "",
+            "final_reason": code + ": " + notice,
+            "gaps": list(state.get("gaps") or []) + [notice],
+        })
+
     def decide(state: AgentState) -> dict[str, Any]:
         """先检查取消、额度和未结算请求，再复用收据或发请求；输出待执行工具或结束状态。"""
         if state.get("finished") or state.get("pending_tool_calls"):
@@ -174,9 +329,11 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
         if cancelled(state):
             return record(state, {"cancelled": True, "finished": True, "final_reason": "cancelled"})
         request_number = int(state.get("model_requests", 0)) + 1
-        if request_number > int(state.get("max_model_requests", max_model_requests)):
+        enforce = enforcing(state)
+        local_enforce = enforce and (not state.get("execution_policy") or db is None)
+        if local_enforce and request_number > int(state.get("max_model_requests", max_model_requests)):
             return record(state, {"finished": True, "final_reason": "model request budget exhausted"})
-        closing = request_number >= int(state.get("max_model_requests", max_model_requests))
+        closing = local_enforce and request_number >= int(state.get("max_model_requests", max_model_requests))
         settling = False
         messages = list(state.get("messages") or [])
         if not messages:
@@ -191,19 +348,24 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
                                   "gaps": list(state.get("gaps") or []) + ["对话工具回复不完整；未发送模型请求"]})
         role = state.get("role", "supervisor")
         local_tools_left = int(state.get('max_tool_actions', max_tool_actions)) - int(state.get('tool_actions', 0))
-        closing = closing or local_tools_left <= 1 or (state.get('budget_tail', False) and role != 'supervisor')
-        settling = role == 'supervisor' and (local_tools_left <= 4 or state.get('budget_tail', False))
-        if db:
-            budget = db.budget_summary(state.get("root_task_id", state["task_id"]))
+        closing = closing or (local_enforce and (local_tools_left <= 1 or (state.get('budget_tail', False) and role != 'supervisor')))
+        settling = local_enforce and role == 'supervisor' and (local_tools_left <= 1 or state.get('budget_tail', False))
+        if db and enforce:
+            root = state.get("root_task_id", state["task_id"])
+            budget = db.budget_summary(root)
             if budget:
+                active = db.active_role_count(root)
+                if role != 'supervisor':
+                    active = max(1, active)
+                parent_delivery = db.delivery_tool_reserve(root)
                 usable_limit = budget["model_limit"] - (budget["reserve_tail"] if role == "researcher" else 0)
-                # 两个并行Researcher各留一次交接；根角色预留段只整理/保存/交付。
-                closing = closing or budget["model_used"] >= usable_limit - (2 if role == "researcher" else 1)
+                # 保护当前实际运行子角色的交接；队列长度不等于并发资源需求。
+                closing = closing or budget["model_used"] >= usable_limit - max(1, active if role != 'supervisor' else 1)
                 settling = settling or (role == 'supervisor' and budget['model_limit'] - budget['model_used'] <= budget['reserve_tail'])
                 tool_remaining = budget['tool_limit'] - budget['tool_used']
-                # 两个子角色交接之外，至少提前给父角色留整理/保存/交付的行动空间。
-                closing = closing or tool_remaining <= (6 if role == 'researcher' else 1)
-                settling = settling or (role == 'supervisor' and tool_remaining <= 4)
+                closing = closing or tool_remaining <= (1 if role == 'supervisor' else
+                    handoff_reservations(role, False, active, parent_delivery) + 1)
+                settling = settling or (role == 'supervisor' and tool_remaining <= active + parent_delivery + 1)
         if db and db.has_unknown_family_call(state.get("root_task_id", state["task_id"])):
             return record(state, {"finished": True, "final_reason": "model response unknown: task family is blocked",
                                   "gaps": list(state.get("gaps") or []) + ["任务链有未结算请求，未自动继续调用"]})
@@ -216,15 +378,32 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
         handoff = readback_handoff(role_actions[last_review + 1:]) if role in {'supervisor','researcher'} else None
         handoff_state = None
         previous_handoff = state.get('research_handoff') or {}
+        qualification = qualification_handoff(role_actions, services.get('coverage'), state['task_id'], previous_handoff)
+        if (qualification and previous_handoff.get('phase') != 'review_failed_closeout'
+                and qualification_handoff_active(qualification, services.get('coverage'), state['task_id'])):
+            if (previous_handoff.get('coverage_blocker') or {}).get('state_fingerprint') == qualification['coverage_blocker']['state_fingerprint']:
+                qualification = {**previous_handoff, **qualification,
+                    'trigger_action_id': previous_handoff['trigger_action_id']}
+            handoff_state = qualification
+            # 保留修订策略、真正新材料/范围及不同目标的工具；后续依赖检查不把
+            # 新增objective、重复读取或无关发现当作旧资格问题已解决。
+            messages = messages + [{'role': 'system', 'content':
+                '当前交付被明确资格条件阻断。请查看coverage_blocker及goal_achievements复用已有成果；'
+                '可修正模型自拟检索策略、补实际缺失的资格信息，或用finish_task将相应目标标unresolved交付。'
+                '改写objective、重复委派/读取相同材料不会解除该条件；新目标、新版本和未处理范围仍可继续。'
+                '资格诊断：' + json.dumps(qualification['coverage_blocker'], ensure_ascii=False)}]
+            handoff = None
+        elif previous_handoff.get('coverage_blocker') and previous_handoff.get('phase') != 'review_failed_closeout':
+            previous_handoff = {}
         failure_closeout = previous_handoff.get('phase') == 'review_failed_closeout'
-        if previous_handoff.get('phase') in {'requested', 'readback', 'review_failed_closeout'}:
+        if not handoff_state and previous_handoff.get('phase') in {'requested', 'readback', 'review_failed_closeout'}:
             # 失败工具不是新取证，不能抹掉已进入的交接边界、重新开放禁用工具。
             # 合法核验/局部版本或阶段成果更新会在执行节点标记progress_recorded。
             handoff = previous_handoff if failure_closeout else (handoff or previous_handoff)
         if handoff and not closing and not settling:
             schemas = handoff_schemas(schemas, role)
             handoff_state = {**handoff, 'phase':'requested',
-                'progress_fingerprint':progress_fingerprint(progress.snapshot(state['task_id'])) if progress else None}
+                'continuation_fingerprint':continuation_fingerprint(progress.snapshot(state['task_id']) if progress else {})}
             if failure_closeout:
                 # 失败观察已持久化；保留档案读回以支持上下文外置，但不再启动核验/取证。
                 schemas = [t for t in schemas if t['function']['name'] in {'finish_task', 'read_memory'}]
@@ -240,7 +419,7 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
                     handoff_state['tool_error'] = previous_handoff['tool_error']
             if not failure_closeout:
                 progress_hint = (
-                    '若确需不同的定向补证，先用record_research_progress记录已形成的发现、缺口和next_question；'
+                    '已有证据可以形成或修订发现，无需强制新增原文；仅改写缺口/next_question不会重新开放重复取证。请用record_research_progress交接实际发现；'
                     if any(t['function']['name'] == 'record_research_progress' for t in schemas) else
                     '请用本次实际列出的核验、修订或结束工具交接已有成果，并明确说明仍需补证的缺口；')
                 messages = messages + [{'role':'system','content':
@@ -276,6 +455,9 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
             request['research_handoff'] = handoff_state
         if settling:
             request['settling'] = True
+        from research_loop.storage.token_budget import TokenBudgetStore
+        tokens = TokenBudgetStore(db) if db else None
+        root = state.get("root_task_id", state["task_id"])
         receipt = db.get_model_call(state["task_id"], request_number) if db else None
         if receipt and receipt.get("request_json"):
             # 已持久请求始终按当时的messages恢复，偏好变化不能改写历史成功收据。
@@ -284,22 +466,29 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
             force_text = request.get("force_text", force_text)
             terminal_only = request.get("terminal_only", False)
             handoff_state = request.get('research_handoff')
-        elif services.get("context") and role in {"supervisor", "researcher"}:
+        elif services.get("context") and role in {"supervisor", "researcher", "reviewer"}:
             try:
-                prepare = (services["context"].prepare if role == "supervisor" else services["context"].prepare_researcher)
+                context = services["context"]
+                from research_loop.config import Settings
+                if (tokens and not tokens.counting_policy(root) and tokens.summary(root)
+                        and isinstance(context.settings, Settings)
+                        and 'context_output_reserve' not in context.settings.model_fields_set):
+                    # 更老的根没有冻结计量策略，不能因新默认改变旧8192合同；
+                    # 显式当前值仍优先，只复制上下文实例，避免污染其他新任务。
+                    context = copy(context)
+                    context.settings = context.settings.model_copy(update={'context_output_reserve': 8192})
+                prepare = context.prepare if role == "supervisor" else context.prepare_role
                 messages, metrics = prepare(state,messages,request["tools"])
                 state = {**state,"context_metrics":metrics}
                 validate_messages(messages)
-                request = {**request,"messages":messages,"max_tokens":services["context"].settings.context_output_reserve}
+                request = {**request,"messages":messages,"max_tokens":metrics["output_reserve_tokens"]}
             except (ValueError, InvalidConversation) as exc:
                 return record(state,{"finished":True,"final_reason":str(exc),
                     "gaps":list(state.get("gaps") or [])+[str(exc)]})
-        from research_loop.storage.token_budget import TokenBudgetStore
-        tokens = TokenBudgetStore(db) if db else None
-        root = state.get("root_task_id", state["task_id"])
         # 只给新策略任务明确输出上限；旧收据和历史调用参数原样恢复。
         if tokens and tokens.summary(root) and not receipt:
-            request.setdefault("max_tokens", 8192)
+            policy = tokens.counting_policy(root)
+            request.setdefault("max_tokens", policy["context_output_reserve"] if policy else 8192)
         # 请求先持久再发送；恢复完全沿用旧参数，不给历史收据补写当前策略。
         if not receipt and (thinking := matrix_thinking(state)) is not None:
             request["thinking"] = thinking
@@ -320,6 +509,13 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
                                       "final_reason": "model response unknown: recovery is blocked",
                                       "gaps": list(state.get("gaps") or []) + ["模型请求结果未知，未自动重发"]})
             if db:
+                # 已冻结但尚未发送的请求同样不能在切换模型后悄悄改用另一计量合同。
+                counting_policy = tokens.counting_policy(root)
+                if (counting_policy and services.get("context")
+                        and counting_policy.get("model") != services["context"].settings.deepseek_model):
+                    reason = "TOKEN_POLICY_MODEL_CHANGED: 当前模型与根任务冻结模型不同；未发送新请求"
+                    return record(state, {"finished": True, "final_reason": reason,
+                                          "gaps": list(state.get("gaps") or []) + [reason]})
                 try:
                     tokens.reserve(root, state["task_id"], request_number, request, role)
                 except ValueError as exc:
@@ -387,6 +583,8 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
                 db.save_model_call(state["task_id"], request_number, "succeeded", request, response=response.raw,
                                    usage=response.usage, request_id=response.request_id,
                                    finish_reason=response.finish_reason, sent_state="sent")
+        if response.finish_reason == "length":
+            return truncated_response(state, response, request, conversation_messages, request_number)
         if response.tool_calls and not force_text:
             assistant_calls = [
                 {"id": call.call_id, "type": "function",
@@ -436,6 +634,22 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
         """按调用顺序执行已授权工具，复用已落库观察；汇总证据、子任务、草稿与文件路径。"""
         if cancelled(state):
             return record(state, {"cancelled": True, "finished": True, "final_reason": "cancelled before tool execution"})
+        if execution_unavailable(state):
+            raise RuntimeError("worker lease lost before tool execution")
+        # 旧版checkpoint可能已把length响应路由成待执行工具；恢复也必须
+        # 以该批成功收据为准终止，不能执行同批完整动作或自动纠正后再发。
+        number = int(state.get('model_requests', 0))
+        prior_call = db.get_model_call(state['task_id'], number) if db else None
+        if prior_call and prior_call.get('status') == 'succeeded' and prior_call.get('response_json'):
+            prior_response = DeepSeekProvider.parse_response(
+                json.loads(prior_call['response_json']), usage=json.loads(prior_call.get('usage_json') or '{}'),
+                finish_reason=prior_call.get('finish_reason'))
+            if prior_response.finish_reason == 'length':
+                original = json.loads(prior_call['request_json'])
+                history = list(state.get('messages') or [])
+                if history and history[-1].get('tool_calls'):
+                    history = history[:-1]
+                return truncated_response(state, prior_response, original, history, number)
         actions = list(state.get("actions") or [])
         prior_reflection, _ = reflection_handoffs(actions)
         prior_review_failures = failed_review_handoffs(actions)
@@ -456,9 +670,11 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
         review_result = state.get("review_result")
         research_plan = state.get("research_plan")
         delivery = state.get("delivery")
+        finish_candidate_ref = state.get('finish_candidate_ref')
         needs_input = False
         structured_result = None
         blocked_repeat = False
+        repeated_failure = False
         pending = list(state.get("pending_tool_calls") or [])
         # 成功响应恢复时仍受原请求范围约束，不给旧checkpoint补上新增工具。
         receipt = db.get_model_call(state['task_id'], state.get('model_requests', 0)) if db else None
@@ -472,7 +688,7 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
             allowed = set(state['pending_tool_scope'])
         else:
             schemas = registry.schemas(state.get('role', 'supervisor'))
-            if state.get('research_handoff'):
+            if state.get('research_handoff') and not state['research_handoff'].get('coverage_blocker'):
                 schemas = handoff_schemas(schemas, state.get('role', 'supervisor'))
                 if state['research_handoff'].get('phase') == 'review_failed_closeout':
                     schemas = [t for t in schemas if t['function']['name'] in {'finish_task', 'read_memory'}]
@@ -481,18 +697,19 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
         recoverable_error = None
         context = ToolContext(
             task_id=state["task_id"], save_policy=SavePolicy(state.get("save_policy", SavePolicy.deny.value)),
-            attachments=state.get("attachments") or {}, cancelled=lambda: cancelled(state), services=services,
+            attachments=state.get("attachments") or {}, cancelled=lambda: execution_unavailable(state), services=dict(services),
             role=state.get("role", "supervisor"), root_task_id=state.get("root_task_id", state["task_id"]),
             parent_task_id=state.get("parent_task_id"),
         )
         for call in pending:
             sequence += 1
             terminal = call['name'] in {'finish_task', 'finish_research', 'finish_review'}
-            settling_tool = call['name'] in {'create_note', 'save_note', 'report_task_gap'}
-            researcher = context.role == 'researcher'
-            local_tail = 0 if terminal else (4 if context.role == 'supervisor' and not settling_tool else 1)
-            # 两个Researcher各一次交接加父任务四个收尾槽；并发竞争由数据库条件UPDATE裁决。
-            shared_tail = (4 if terminal else 6) if researcher else local_tail
+            local_tail = 0 if terminal else 1
+            active = db.active_role_count(context.root_task_id) if db else 0
+            if context.role != 'supervisor':
+                active = max(1, active)
+            parent_delivery = db.delivery_tool_reserve(context.root_task_id) if db else 1
+            shared_tail = handoff_reservations(context.role, terminal, active, parent_delivery)
             prior = db.get_action(state["task_id"], sequence) if db else None
             replayable = prior and prior.get("status") in {"succeeded", "failed", "cancelled"} and prior.get("observation")
             rejection = None
@@ -510,7 +727,12 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
                     # 核验/修订/保存/结束等状态操作留给观察错误后的下一轮决策。
                     rejection = '本批前序调用被范围检查拒绝，依赖关系未确认；请观察错误后重新选择本操作。'
                     rejection_code = 'TOOL_DEPENDENCY_UNRESOLVED'
-                elif tool_count >= int(state.get('max_tool_actions', max_tool_actions)) - local_tail:
+                elif isinstance(call['arguments'], dict) and '_invalid_json' in call['arguments']:
+                    # 已知截断参数没有执行机会；在预留工具槽之前拒绝，根/角色
+                    # 计数均保持真实，不用“空默认参数”消耗最后的交接槽。
+                    rejection = '工具参数不是完整JSON，未执行；请提交合法参数或交付已保留成果。'
+                    rejection_code = 'INVALID_TOOL_JSON'
+                elif enforcing(state) and (not state.get('execution_policy') or db is None) and tool_count >= int(state.get('max_tool_actions', max_tool_actions)) - local_tail:
                     rejection = '本地工具收尾预留已到达；未执行本调用，请交付已有成果及未完成项。'
                     rejection_code = 'TOOL_TAIL_RESERVED'
                 elif db and not db.reserve_tool_slot(context.root_task_id, shared_tail):
@@ -519,10 +741,11 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
             action = ActionRecord(task_id=state["task_id"], sequence=sequence, tool_name=call["name"],
                                   arguments=call["arguments"])
             if replayable:
+                action.action_id = prior['action_id']
                 result = Observation.model_validate(prior.get("observation") or {})
             elif rejection:
-                result = Observation(ok=False, kind='validation_error' if rejection_code == 'TOOL_NOT_AVAILABLE' else 'execution_error',
-                                     retryable=rejection_code in {'TOOL_NOT_AVAILABLE', 'TOOL_DEPENDENCY_UNRESOLVED'}, message=rejection,
+                result = Observation(ok=False, kind='validation_error' if rejection_code in {'TOOL_NOT_AVAILABLE', 'INVALID_TOOL_JSON'} else 'execution_error',
+                                     retryable=rejection_code in {'TOOL_NOT_AVAILABLE', 'TOOL_DEPENDENCY_UNRESOLVED', 'INVALID_TOOL_JSON'}, message=rejection,
                                      data={'error_code': rejection_code,
                                            'tool_executed': False, 'budget_counted': False})
                 if rejection_code == 'TOOL_NOT_AVAILABLE':
@@ -540,13 +763,17 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
                                          message="相同的不可重试操作已失败；未重复执行。请选择其他行动或结束并交付已有结果。",
                                          data={"error_code": "REPEATED_NONRETRYABLE_ACTION"})
                 else:
+                    context.services['finish_action_identity'] = {
+                        'task_id': state['task_id'], 'action_id': action.action_id,
+                        'input_hash': finish_input_hash(call['arguments'])}
                     cached = None
                     if progress and call['name'] == 'read_paper' and not context.cancelled():
                         try:
                             spec = registry.get(call['name'])
                             if context.role in spec.roles:
                                 spec.args_model.model_validate(call['arguments'])
-                                cached = progress.cached_read(context.task_id, call['arguments'], context.attachments)
+                                cached = progress.cached_read(context.task_id, call['arguments'], context.attachments,
+                                    provider=getattr(services.get('papers'), 'pdf', None))
                         except (KeyError, ValueError):
                             pass
                     if state.get('research_handoff') and call['name'] == 'read_memory':
@@ -578,12 +805,26 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
             if result.data.get('error_code') == 'TOOL_TAIL_RESERVED':
                 budget_tail = True
                 terminal_denied = terminal_denied or terminal
-            if not replayable and call['name'] in {'read_paper', 'retrieve_evidence'}:
+            if not replayable and call['name'] in {'read_paper', 'acquire_paper_pdf', 'retrieve_evidence'}:
                 increment = evidence_progress(actions, call['name'], call['arguments'],
                                               result.model_dump(mode='json'), visible_messages)
                 if state.get('model_requests', 0) > 0:
                     increment['request_sequence'] = state['model_requests']
                 result.data['research_increment'] = increment
+            # 相同参数已收到一次失败反馈后仍失败，没有新的研究进展；监测模式
+            # 也必须终止这种无进展循环。更正参数或成功结果不会触发此规则。
+            if (not result.ok and result.kind in {'validation_error', 'execution_error'}
+                    and result.data.get('error_code') not in {'TOOL_TAIL_RESERVED', 'AFTER_TERMINAL'}):
+                # 同一响应批次内的后续调用尚未见过反馈，不能视作模型拒不更正；
+                # 资源收尾拒绝负责引导合法交接，也不是参数无进展。
+                previous = (next(iter(actions[-1:]), None)
+                            if len(actions) == len(state.get('actions') or []) else None)
+                if (previous and previous['tool_name'] == call['name']
+                        and previous['arguments'] == call['arguments']
+                        and not previous.get('observation', {}).get('ok')
+                        and previous.get('observation', {}).get('kind') == result.kind):
+                    repeated_failure = not blocked_repeat
+                    blocked_repeat = True
             action.status = "succeeded" if result.ok else ("cancelled" if result.kind == "cancelled" else "failed")
             action.observation = result.model_dump(mode="json")
             if db and not replayable:
@@ -602,7 +843,14 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
             append_tool_observation(messages, call["call_id"], action.observation)
             if call["name"] == "set_research_plan" and result.ok:
                 research_plan = result.data["research_plan"]
+            if call['name'] == 'finish_task' and not result.ok:
+                candidate = result.data.get('finish_candidate') or {}
+                identity = {'task_id': state['task_id'], 'action_id': action.action_id,
+                            'input_hash': finish_input_hash(call['arguments'])}
+                if candidate and all(candidate.get(key) == value for key, value in identity.items()):
+                    finish_candidate_ref = identity
             if call["name"] == "finish_task" and result.ok:
+                finish_candidate_ref = None
                 delivery = result.data["delivery"]
                 # 继续配齐同批工具回复，但终结之后的副作用调用只记录未执行回执。
             if call["name"] == "request_clarification" and result.ok:
@@ -634,10 +882,55 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
             "evidence_ids": list(dict.fromkeys(evidence_ids)),
             "gaps": list(dict.fromkeys(gaps)), "source_warnings": list(dict.fromkeys(source_warnings)), "draft_id": draft_id, "saved_path": saved_path,
             "pending_tool_calls": [], "pending_tool_scope": [], "subtask_results": subtask_results, "review_result": review_result,
-            "research_plan": research_plan, "delivery": delivery,
+            "research_plan": research_plan, "delivery": delivery, "finish_candidate_ref": finish_candidate_ref,
         }
         handoff = state.get('research_handoff')
-        if handoff and structured_result is None and delivery is None:
+        new_review_failures = {key: value for key, value in failed_review_handoffs(actions).items()
+                               if key not in prior_review_failures}
+        qualification = qualification_handoff(actions, services.get('coverage'), state['task_id'], handoff)
+        if (qualification and not new_review_failures and (handoff or {}).get('phase') != 'review_failed_closeout'
+                and structured_result is None and delivery is None and qualification_handoff_active(
+                qualification, services.get('coverage'), state['task_id'])):
+            same = bool(handoff and (handoff.get('coverage_blocker') or {}).get('state_fingerprint')
+                        == qualification['coverage_blocker']['state_fingerprint'])
+            update['research_handoff'] = {**(handoff or {}), **qualification}
+            if same:
+                update['research_handoff']['trigger_action_id'] = handoff['trigger_action_id']
+            batch = actions[len(state.get('actions') or []):]
+            navigation, advanced = handoff_navigation(handoff or {}, batch)
+            update['research_handoff']['navigation'] = navigation
+            material_navigation, material_advanced = qualification_material_navigation(
+                handoff or {}, services['coverage'], state['task_id'])
+            update['research_handoff']['material_navigation'] = material_navigation
+            advanced = advanced or material_advanced
+            blocked_goal = qualification['coverage_blocker']['goal_id']
+            # 其他明确目标仍可研究；保留旧阻断，不能借新目标把旧条件算已满足。
+            old_goals = {g['goal_id'] for g in (state.get('research_plan') or {}).get('goals', [])}
+            new_goals = {g['goal_id'] for g in (research_plan or {}).get('goals', [])
+                         if g.get('status', 'active') == 'active'} - old_goals
+            def goal_contributions(records: list[dict]) -> set[tuple[str, str]]:
+                """只按具体目标的非空发现正文识别贡献，不按委派/发现ID或改写缺口。"""
+                return {(goal_id, finding) for previous in records
+                    if previous['tool_name'] == 'delegate_research' and (previous.get('observation') or {}).get('ok')
+                    for child in previous['observation'].get('data', {}).get('subtasks', [])
+                    if child.get('status') in {'completed', 'partial'}
+                    for goal_id in child.get('goal_ids', []) if goal_id != blocked_goal
+                    for finding in child.get('findings', []) if isinstance(finding, str) and finding.strip()}
+            # 相同材料可形成新分析，不要求每步新增原文。仅新child/objective或
+            # 精确收据复用不表示贡献；这里不声称识别语义相同的发现改写。
+            outside_goal = bool(new_goals) or bool(goal_contributions(batch) -
+                goal_contributions(state.get('actions') or []))
+            # 沿用已有交接的有界结束；真正新目标、版本和范围仍可继续。
+            # 新档案区间仅允许必要导航，不解除资格条件，也不等于研究进展。
+            if same and not advanced and not outside_goal and handoff.get('qualification_feedback_seen'):
+                update.update(finished=True, final_reason='qualification handoff unresolved',
+                    gaps=list(dict.fromkeys(gaps + ['资格条件仍未解除；保留精确绑定候选，未冒充完成。'])))
+                update['research_handoff']['phase'] = 'unresolved'
+            elif same and not advanced and not outside_goal:
+                update['research_handoff']['qualification_feedback_seen'] = True
+        elif (handoff and (not handoff.get('coverage_blocker') or new_review_failures
+                           or handoff.get('phase') == 'review_failed_closeout')
+              and structured_result is None and delivery is None):
             current = progress.snapshot(state['task_id']) if progress else {}
             artifact_changed = draft_id != state.get('draft_id') or saved_path != state.get('saved_path')
             current_reflection, _ = reflection_handoffs(actions)
@@ -646,7 +939,7 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
             if new_failures and handoff.get('phase') != 'review_failed_closeout':
                 update['research_handoff'] = {**handoff, 'phase': 'review_failed_closeout',
                     'failed_review': next(reversed(new_failures.values()))}
-            elif handoff.get('phase') != 'review_failed_closeout' and (progress_fingerprint(current) != handoff.get('progress_fingerprint') or artifact_changed
+            elif handoff.get('phase') != 'review_failed_closeout' and (handoff_progress_changed(handoff, current) or artifact_changed
                     or bool(current_reflection - prior_reflection)):
                 update['research_handoff'] = {**handoff, 'phase':'progress_recorded'}
             else:
@@ -671,10 +964,12 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
             update.update({'finished': True, 'final_reason': 'tool budget exhausted before terminal handoff',
                            'gaps': list(dict.fromkeys(gaps + ['工具额度不足以完成交接；已有证据保留，未冒充完成']))})
         if blocked_repeat:
-            message = ('相同不可用工具再次请求；未执行，保留已有成果。' if scope_rejected else
+            message = ('相同参数连续失败且没有新进展；已停止并保留已有产物。' if repeated_failure else
+                       '相同不可用工具再次请求；未执行，保留已有成果。' if scope_rejected else
                        '同一不可重试操作重复请求；已停止并保留已有产物')
             update.update({"finished": True, "final_reason":
-                           ('repeated unavailable action stopped: ' + (recoverable_error or {}).get('message', '')
+                           ('repeated failed action made no progress' if repeated_failure else
+                            'repeated unavailable action stopped: ' + (recoverable_error or {}).get('message', '')
                             if scope_rejected else 'repeated nonretryable action stopped'),
                            "gaps": list(dict.fromkeys(gaps + [message]))})
         if needs_input:
@@ -723,8 +1018,8 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
 
 
 def initial_state(task_id: str, prompt: str, save_policy: str, attachments: dict[str, dict[str, Any]] | None = None,
-                  max_model_requests: int = 12, max_tool_actions: int = 20,
-                  reserve_model_requests: int = 1) -> AgentState:
+                  max_model_requests: int = 48, max_tool_actions: int = 80,
+                  reserve_model_requests: int = 10) -> AgentState:
     """创建新任务的图状态；附件以授权 input_ref 注入，计数与产物字段从空状态开始。"""
     return {
         "task_id": task_id, "role": "supervisor", "prompt": prompt, "save_policy": save_policy,

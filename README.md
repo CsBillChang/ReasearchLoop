@@ -6,7 +6,7 @@
 <p align="center"><strong>Research Intelligence &amp; Evidence Reading</strong></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-V1.0.0-446c60?style=flat-square" alt="V1.0.0" />
+  <img src="https://img.shields.io/badge/Version-V1.5-446c60?style=flat-square" alt="V1.5" />
   <img src="https://img.shields.io/badge/Python-3.14-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.14" />
   <img src="https://img.shields.io/badge/FastAPI-009688?style=flat-square&amp;logo=fastapi&amp;logoColor=white" alt="FastAPI" />
   <img src="https://img.shields.io/badge/LangGraph-Multi--Agent-446c60?style=flat-square" alt="LangGraph Multi-Agent" />

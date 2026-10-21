@@ -78,7 +78,7 @@ class MatrixInferenceTests(unittest.TestCase):
                         if streaming:
                             provider.send_stream.return_value = response()
                         context = Mock()
-                        context.prepare.return_value = (messages, {})
+                        context.prepare.return_value = (messages, {'output_reserve_tokens':8192})
                         context.settings.context_output_reserve = 8192
                         state = {'task_id': tid, 'prompt': 'matrix', 'messages': messages, 'role': 'supervisor',
                                  'research_plan': {'evidence_matrix_requested': True}, 'evidence_ids': ['page']}

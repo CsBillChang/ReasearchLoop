@@ -3,12 +3,12 @@ import json
 import unittest
 
 from pydantic import BaseModel
-from research_loop.agents.graph import build_graph, initial_state
+from research_loop.agents.graph import build_graph, initial_state, handoff_progress_changed
 from research_loop.domain.tasks import Observation
 from research_loop.providers.deepseek import validate_messages
 from research_loop.tools.base import ToolSpec
 from research_loop.tools.registry import ToolRegistry
-from research_loop.services.research_progress import progress_fingerprint
+from research_loop.services.research_progress import progress_fingerprint, continuation_fingerprint
 
 
 class NoArgs(BaseModel):
@@ -91,6 +91,26 @@ class RecoverableToolCallTests(unittest.TestCase):
         self.assertIn('unavailable', result['final_reason'])
         self.assertEqual(result['tool_actions'], 0)
         self.assertEqual(self.effects, [])
+
+    def test_old_snapshot_keeps_its_fingerprint_contract_and_real_finding_changes(self):
+        """旧JSON交接不因指纹算法变化重开；真实发现修订仍可继续。"""
+        baseline = {'findings': [{'finding_id': 'synthetic-finding', 'text': '已知机制', 'sources': []}],
+            'gaps': ['未知实验'], 'next_question': '实验条件'}
+        old = json.loads(json.dumps({'phase': 'requested',
+            'progress_fingerprint': progress_fingerprint(baseline)}))
+        self.assertFalse(handoff_progress_changed(old, baseline))
+        changed = json.loads(json.dumps(baseline)); changed['findings'][0]['text'] = '已知机制及其限定'
+        self.assertTrue(handoff_progress_changed(old, changed))
+        new = {'phase': 'requested', 'continuation_fingerprint': continuation_fingerprint(baseline),
+            'progress_fingerprint': 'irrelevant legacy value'}
+        planned = {**baseline, 'gaps': ['改写未知实验'], 'next_question': '另写一句计划'}
+        self.assertFalse(handoff_progress_changed(new, planned))
+        self.assertTrue(handoff_progress_changed(new, changed))
+        # 真实execute_tools恢复仍保留合法导航，不把相同空进展标为progress_recorded。
+        state = json.loads(json.dumps(self.state(['read_memory'])))
+        result = self.node.invoke(state)
+        self.assertEqual(result['research_handoff']['phase'], 'readback')
+        self.assertFalse(result.get('finished'))
 
     def test_recovery_keeps_supplied_scope_instead_of_registry(self):
         """恢复的空/缩小范围不能因日常注册表有同名工具而放行。"""

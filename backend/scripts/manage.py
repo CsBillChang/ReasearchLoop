@@ -18,7 +18,8 @@ from urllib.request import urlopen
 from uuid import uuid4
 
 from research_loop.config import Settings
-from research_loop.services.runtime import application_lock, atomic_json, heartbeat, identity, runtime_root
+from research_loop.services.runtime import (application_lock, atomic_json, heartbeat, identity, runtime_root,
+    runtime_fingerprint, local_component_readiness, configure_runtime)
 from research_loop.storage.mysql import Database
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -63,7 +64,9 @@ def diagnose(settings: Settings) -> dict:
     """分开返回配置、数据库迁移、索引服务和恢复风险；始终零模型调用。"""
     result = {'model_key_present': bool(settings.deepseek_api_key), 'model': settings.deepseek_model,
               'database_ready': False, 'configuration_id': identity(settings),
-              'qdrant': probe(settings.qdrant_url + '/healthz'), 'model_requests': 0}
+              'qdrant': probe(settings.qdrant_url + '/healthz'), 'model_requests': 0,
+              'runtime_fingerprint': runtime_fingerprint(settings),
+              'local_components': local_component_readiness(settings)}
     try:
         db = Database(settings.database_url)
         versions = {r['version'] for r in db.fetchall('SELECT version FROM schema_version')}
@@ -102,11 +105,19 @@ class Manager:
     def status(self) -> dict:
         """进程活着、HTTP 可响应、Worker 就绪分别展示，不混作模型可用。"""
         state = self.read()
+        expected = runtime_fingerprint(self.settings)['fingerprint_id']
+        state['expected_runtime_fingerprint_id'] = expected
+        registered = (state.get('runtime_fingerprint') or {}).get('fingerprint_id')
         for name, row in state['services'].items():
             row['owned_alive'] = owned(row)
             beat = self.directory/(name+'.ready.json')
             report = json.loads(beat.read_text()) if beat.exists() else {}
-            row['runtime'] = report if report.get('token') == row['token'] and row['owned_alive'] else None
+            row['runtime'] = report if (report.get('token') == row['token'] and
+                report.get('pid') == row['pid'] and row['owned_alive']) else None
+            running = (row['runtime'] or {}).get('runtime_fingerprint_id')
+            row['runtime_consistency'] = ('not_running' if not row['owned_alive'] else
+                'unknown_legacy' if not registered or not running else
+                'match' if expected == registered == running else 'mismatch')
         if state.get('api_port'):
             state['api'] = probe(f"http://127.0.0.1:{state['api_port']}/api/health")
         if state.get('frontend_port'):
@@ -125,7 +136,13 @@ class Manager:
                     raise RuntimeError('ALREADY_RUNNING_DIFFERENT_CONFIG')
                 if not all(owned(row) for row in previous['services'].values()):
                     raise RuntimeError('PARTIAL_RUNTIME: 先停止后重启')
-                return self.status()
+                status = self.status()
+                comparisons = [row['runtime_consistency'] for row in status['services'].values()]
+                if 'unknown_legacy' in comparisons:
+                    raise RuntimeError('RUNTIME_FINGERPRINT_UNKNOWN: 旧进程缺少可核对指纹；请显式停止后启动')
+                if any(value != 'match' for value in comparisons):
+                    raise RuntimeError('RUNTIME_FINGERPRINT_MISMATCH: 活动进程与当前预期不同；未自动重启')
+                return status
             if api_port == frontend_port or not all(1024 <= p <= 65535 and available(p) for p in (api_port, frontend_port)):
                 raise RuntimeError('PORT_IN_USE_OR_INVALID')
             diag = diagnose(self.settings)
@@ -137,7 +154,8 @@ class Manager:
                 raise RuntimeError('RESTORE_EXECUTION_HELD: 恢复实例先以 --readonly 检查，不自动执行旧任务')
             if not shutil.which('node') or not (ROOT/'frontend/node_modules/marked').exists():
                 raise RuntimeError('FRONTEND_DEPENDENCIES_MISSING')
-            state = {'configuration_id': identity(self.settings), 'api_port': api_port,
+            state = {'configuration_id': identity(self.settings),
+                'runtime_fingerprint': diag['runtime_fingerprint'], 'api_port': api_port,
                 'frontend_port': frontend_port, 'readonly': readonly, 'scheduler': scheduler,
                 'worker': worker and not readonly, 'services': {}}
             names = ['api', 'frontend'] + (['worker'] if worker and not readonly else []) + (['scheduler'] if scheduler and not readonly else [])
@@ -149,6 +167,7 @@ class Manager:
                         'RESEARCHLOOP_OUTPUT_DIR': str(self.settings.output_dir),
                         'RESEARCHLOOP_RETRIEVAL_NAMESPACE': self.settings.retrieval_namespace,
                         'RESEARCHLOOP_READONLY': '1' if readonly else '0',
+                        'RESEARCHLOOP_EXPECTED_RUNTIME_FINGERPRINT': state['runtime_fingerprint']['fingerprint_id'],
                         'RESEARCHLOOP_PROCESS_TOKEN': token, 'RESEARCHLOOP_HEARTBEAT': str(self.directory/(name+'.ready.json')),
                         'PORT': str(frontend_port), 'RESEARCHLOOP_API_URL': f'http://127.0.0.1:{api_port}'}
                     command = [sys.executable, str(Path(__file__).resolve()), 'serve', '--service', name,
@@ -203,6 +222,7 @@ class Manager:
 def serve(service: str, api_port: int) -> None:
     """受管进程主体；共享锁持续到服务退出，保证冷备份期间不能启动。"""
     with application_lock(ROOT):
+        configure_runtime(Settings.from_env(ROOT))
         if service == 'api':
             import uvicorn
             uvicorn.run('research_loop.main:app', host='127.0.0.1', port=api_port)

@@ -4,9 +4,9 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from research_loop.providers.paper_sources import resolve_backends
 
 
@@ -59,13 +59,25 @@ class Settings(BaseModel):
     max_reflection_rounds: int = Field(default=2, ge=0, le=5)
     task_token_limit: int = Field(default=1000000, ge=1)
     task_token_tail: int = Field(default=32768, ge=0)
+    researcher_concurrency: int = Field(default=2, ge=1)
+    execution_budget_mode: Literal["enforce", "observe"] = "enforce"
+    web_search_enabled: bool = False
+    web_fetch_enabled: bool = False
+    web_tools_timeout_seconds: float = Field(default=30.0, gt=0)
+    web_tools_max_response_bytes: int = Field(default=2*1024*1024, gt=0)
     max_model_requests: int = 48
     max_tool_actions: int = 80
     reserve_model_requests: int = 10
     memory_history_tokens: int = Field(default=12000, ge=256)
     memory_recent_messages: int = Field(default=4, ge=1)
-    context_window_tokens: int = Field(default=128000, ge=4096)
-    context_output_reserve: int = Field(default=8192, ge=256)
+    # 0 表示按模型能力解析；显式环境值（包括旧128000）始终优先。
+    context_window_tokens: int = Field(default=0, ge=0)
+    model_max_output_tokens: int = Field(default=0, ge=0)
+    token_counting_tokenizer_path: Path | None = None
+    token_counting_tokenizer_model: str | None = None
+    token_counting_tokenizer_sha256: str | None = None
+    # None 表示未显式配置；解析后按数值冻结，旧根与显式小值不重新推断。
+    context_output_reserve: int | None = Field(default=None, ge=256)
     context_safety_tokens: int = Field(default=4096, ge=256)
     context_compress_ratio: float = Field(default=0.8, gt=0, lt=1)
     retrieval_enabled: bool = True
@@ -75,6 +87,35 @@ class Settings(BaseModel):
     parser_name: str = "dpr"
     parser_version: str = "1"
     parser_config: dict[str, Any] = Field(default_factory=lambda: {"text_route": "cache-jina-pymupdf", "min_text_chars": 1200})
+
+    @model_validator(mode="after")
+    def resolve_model_capacity(self):
+        """按已知模型补容量与普通角色输出默认，不覆盖显式数值。"""
+        from research_loop.providers.token_counting import model_capabilities
+        capability = model_capabilities(self.deepseek_model)
+        if self.context_output_reserve is None:
+            # 普通角色沿用供应商默认思考模式；矩阵例外仍共享根预留，
+            # 精读与视觉节点的独立请求合同不在此推断模式或修改。
+            value = 8192 if capability['profile'] == 'legacy_or_unknown' else 65536
+            # 保留未显式设置的来源；图仅为无冻结策略的更老根恢复旧默认。
+            # model_copy显式更新仍会进入fields_set，序列化的根数值也视为显式。
+            object.__setattr__(self, 'context_output_reserve', value)
+            self.__pydantic_fields_set__.discard('context_output_reserve')
+        if not self.context_window_tokens:
+            self.context_window_tokens = capability['context_window_tokens']
+        if not self.model_max_output_tokens:
+            self.model_max_output_tokens = capability['max_output_tokens']
+        if capability['profile'] != 'legacy_or_unknown' and self.context_window_tokens > capability['context_window_tokens']:
+            raise ValueError('context_window_tokens exceeds known model capability')
+        if self.context_window_tokens < 4096:
+            raise ValueError('context_window_tokens must be >=4096')
+        if capability['profile'] != 'legacy_or_unknown' and self.model_max_output_tokens > capability['max_output_tokens']:
+            raise ValueError('model_max_output_tokens exceeds known model capability')
+        if self.context_output_reserve+self.context_safety_tokens >= self.context_window_tokens:
+            raise ValueError('context output and safety reserves consume the model window')
+        if self.context_output_reserve > self.model_max_output_tokens:
+            raise ValueError('context_output_reserve exceeds model capability')
+        return self
 
     @classmethod
     def from_env(cls, project_root: str | Path | None = None) -> "Settings":
@@ -109,7 +150,21 @@ class Settings(BaseModel):
             task_token_limit=int(os.getenv("RESEARCHLOOP_TASK_TOKEN_LIMIT", "1000000")),
             task_token_tail=int(os.getenv("RESEARCHLOOP_TASK_TOKEN_TAIL", "32768")),
             max_reflection_rounds=int(os.getenv("RESEARCHLOOP_REFLECTION_ROUNDS", "2")),
-            context_window_tokens=int(os.getenv("RESEARCHLOOP_CONTEXT_WINDOW", "128000")),
+            context_window_tokens=int(os.getenv("RESEARCHLOOP_CONTEXT_WINDOW", "0")),
+            context_output_reserve=int(os.environ["RESEARCHLOOP_CONTEXT_OUTPUT_RESERVE"]) if "RESEARCHLOOP_CONTEXT_OUTPUT_RESERVE" in os.environ else None,
+            context_safety_tokens=int(os.getenv("RESEARCHLOOP_CONTEXT_SAFETY_TOKENS", "4096")),
+            token_counting_tokenizer_path=Path(os.environ["RESEARCHLOOP_TOKENIZER_PATH"]).expanduser() if os.getenv("RESEARCHLOOP_TOKENIZER_PATH") else None,
+            token_counting_tokenizer_model=os.getenv("RESEARCHLOOP_TOKENIZER_MODEL") or None,
+            token_counting_tokenizer_sha256=os.getenv("RESEARCHLOOP_TOKENIZER_SHA256") or None,
+            researcher_concurrency=int(os.getenv("RESEARCHLOOP_RESEARCHER_CONCURRENCY", "2")),
+            execution_budget_mode=os.getenv("RESEARCHLOOP_EXECUTION_BUDGET_MODE", "enforce"),
+            max_model_requests=int(os.getenv("RESEARCHLOOP_MAX_MODEL_REQUESTS", "48")),
+            max_tool_actions=int(os.getenv("RESEARCHLOOP_MAX_TOOL_ACTIONS", "80")),
+            reserve_model_requests=int(os.getenv("RESEARCHLOOP_RESERVE_MODEL_REQUESTS", "10")),
+            web_search_enabled=os.getenv("RESEARCHLOOP_WEB_SEARCH_ENABLED", "0") == "1",
+            web_fetch_enabled=os.getenv("RESEARCHLOOP_WEB_FETCH_ENABLED", "0") == "1",
+            web_tools_timeout_seconds=float(os.getenv("RESEARCHLOOP_WEB_TOOLS_TIMEOUT_SECONDS", "30")),
+            web_tools_max_response_bytes=int(os.getenv("RESEARCHLOOP_WEB_TOOLS_MAX_RESPONSE_BYTES", "2097152")),
             memory_history_tokens=int(os.getenv("RESEARCHLOOP_HISTORY_TOKENS", "12000")),
             retrieval_enabled=os.getenv("RESEARCHLOOP_RETRIEVAL_ENABLED", "1") == "1",
             retrieval_model_manifest=Path(os.environ["RESEARCHLOOP_RETRIEVAL_MODEL_MANIFEST"]) if os.getenv("RESEARCHLOOP_RETRIEVAL_MODEL_MANIFEST") else None,

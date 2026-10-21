@@ -34,17 +34,15 @@ class IndexingService:
         document = self.db.fetchone("SELECT * FROM documents WHERE document_id=?", (document_id,))
         if not document:
             raise ValueError("INDEX_DOCUMENT_NOT_FOUND")
-        scope = PaperService(self.db, None, None).user_scope(task_id)
         pages = []
+        papers = PaperService(self.db, None, None)
         for evidence_id in evidence_ids:
             if not self.db.task_has_evidence(task_id, evidence_id):
                 raise PermissionError("INDEX_EVIDENCE_NOT_AUTHORIZED")
-            page = self.db.get_page(evidence_id)
+            page = papers.authorized_source(task_id, evidence_id, with_readback=False)['page']
             if not page or page["document_id"] != document_id:
                 raise ValueError("INDEX_EVIDENCE_DOCUMENT_MISMATCH")
             number = page["page_number"]
-            if scope and (number is None or number < scope.start or number > scope.end):
-                raise PermissionError("INDEX_PAGE_SCOPE_DENIED")
             if document["total_pages"] and (number is None or not 1 <= number <= document["total_pages"]):
                 raise ValueError("INDEX_PAGE_INVALID")
             if not document["total_pages"] and number is not None:
@@ -67,10 +65,20 @@ class IndexingService:
             pdf = cache_path.parent.parent / "pdf" / (document["content_sha256"] + ".pdf")
             if hashlib.sha256(pdf.read_bytes()).hexdigest() != document["content_sha256"]:
                 raise ValueError("INDEX_SOURCE_HASH_MISMATCH")
-        source = {k: document[k] for k in ("document_id", "paper_id", "content_sha256",
+        # paper_id可能是本次上传的临时input_ref；内容版本和页权限不能由附件别名定义。
+        source = {k: document[k] for k in ("document_id", "content_sha256",
             "parser_name", "parser_version", "config_sha256", "total_pages")}
         source["hash_kind"] = "extracted_text" if document["parser_name"] == "jina" else "pdf_bytes"
         return source, pages
+
+    @staticmethod
+    def _content_source(source: dict) -> dict:
+        """兼容旧索引的来源标签，只排除paper_id，不放宽其他身份字段。
+
+        旧manifest、chunk ID及向量payload继续按原字节对应的身份校验，
+        此投影仅比较当前原件是否仍是同一内容/解析版本，不授予任务权限。
+        """
+        return {key: value for key, value in source.items() if key != "paper_id"}
 
     @staticmethod
     def _page_manifest(pages: list[dict]) -> list[dict]:
@@ -96,16 +104,27 @@ class IndexingService:
         if not 1 <= batch_size <= 8:
             raise ValueError("INDEX_BATCH_SIZE_INVALID")
         source, pages = self._source_pages(task_id, document_id, evidence_ids)
-        chunks = [chunk for page in pages for chunk in split_page(page, source, self.config,
-            self.embedding.tokenizer_id, self.embedding.offsets)]
-        if not chunks:
-            raise ValueError("INDEX_EMPTY_SOURCE")
         model_hash = fingerprint(self.embedding.identity)
         manifest = {"schema": "original-evidence-v1", "source": source, "pages": self._page_manifest(pages),
             "splitter": self.config.model_dump(), "tokenizer": self.embedding.tokenizer_id,
             "model": self.embedding.identity, "model_hash": model_hash,
-            "terms_version": "latin-cjk-bigram-v1", "collection": self.vectors.collection(model_hash),
-            "chunk_ids": [c.chunk_id for c in chunks]}
+            "terms_version": "latin-cjk-bigram-v1", "collection": self.vectors.collection(model_hash)}
+        # 显式重建也复用兼容旧索引，避免检索虽恢复却重新编码整篇。
+        # 只沿用来源标签；其余配置、页快照、原manifest hash必须全部一致。
+        for row in self.db.fetchall("SELECT index_id FROM evidence_index_builds WHERE document_id=? ORDER BY index_id", (document_id,)):
+            old = self.store.get(row["index_id"])["manifest"]
+            header = {key: value for key, value in old.items() if key != "chunk_ids"}
+            header["source"] = self._content_source(old["source"])
+            if header == manifest:
+                if fingerprint(old) != row["index_id"]:
+                    raise ValueError("INDEX_SOURCE_VERSION_CHANGED")
+                manifest["source"] = old["source"]
+                break
+        chunks = [chunk for page in pages for chunk in split_page(page, manifest["source"], self.config,
+            self.embedding.tokenizer_id, self.embedding.offsets)]
+        if not chunks:
+            raise ValueError("INDEX_EMPTY_SOURCE")
+        manifest["chunk_ids"] = [c.chunk_id for c in chunks]
         index_id = fingerprint(manifest)
         encoded = written = 0
         with self.store.lock(index_id):
@@ -197,7 +216,9 @@ class IndexingService:
         manifest = result["manifest"]
         source, pages = self._source_pages(task_id, result["document_id"],
             [p["evidence_id"] for p in manifest["pages"]])
-        if fingerprint(manifest) != index_id or source != manifest["source"] or self._page_manifest(pages) != manifest["pages"]:
+        if (fingerprint(manifest) != index_id
+            or self._content_source(source) != self._content_source(manifest["source"])
+            or self._page_manifest(pages) != manifest["pages"]):
             raise ValueError("INDEX_SOURCE_VERSION_CHANGED")
         members = self._validated_members(index_id, manifest, pages)
         result["chunks"] = [{"chunk": m["chunk"], "terms": m["terms"], "token_count": m["token_count"]} for m in members]

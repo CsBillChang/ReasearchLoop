@@ -1,10 +1,12 @@
 """论文工具：约束已分派论文身份；正文默认全文，页限制只取自用户要求。"""
 from __future__ import annotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from research_loop.domain.tasks import Observation
+from research_loop.domain.source_access import WebSource, normalize_web_sources, source_error_diagnostic
 from research_loop.domain.retrieval import RetrievalQuery
 from research_loop.domain.visual_reading import VisualDelegationInput
 from research_loop.providers.paper_acquisition import PaperAcquisitionError
+from research_loop.providers.pdf import PaperReadCancelled
 from research_loop.tools.base import ToolContext, ToolSpec
 
 
@@ -17,11 +19,38 @@ class SearchPapersArgs(BaseModel):
     limit: int = Field(default=5, ge=1, le=20)
 
 
+# 网页Search的官方参数边界独立于原Supabase查询。
+class SearchWebPapersArgs(BaseModel):
+    query: str = Field(min_length=1, max_length=128)
+    count: int = Field(default=5, ge=1, le=50)
+    date_from: str | None = None
+    date_to: str | None = None
+    sources: list[WebSource] | None = None
+
+    @field_validator('sources', mode='before')
+    @classmethod
+    def normalize_sources(cls, value):
+        """schema声明的来源和执行使用同一归一化合同，非法值不发送请求。"""
+        return normalize_web_sources(value)
+
+    @classmethod
+    def validation_error_data(cls, error, arguments):
+        """只为来源参数提供无请求诊断；其他字段沿用通用参数校验。"""
+        if any(item['loc'] and item['loc'][0] == 'sources' for item in error.errors()):
+            return {**source_error_diagnostic(error), 'tool_executed':False}
+        return {}
+
+
 # 原文读取参数；start_page 从 1 起算，page_count 是本次调用返回页数。
 class ReadPaperArgs(BaseModel):
     target_ref: str = Field(min_length=1, max_length=255)
     start_page: int = Field(default=1, ge=1)
     page_count: int | None = Field(default=None, ge=1)
+
+
+# 备用获取保留显式身份线索；缺省可由当前用户明确且唯一的题录自动衔接。
+class AcquirePaperPdfArgs(ReadPaperArgs):
+    metadata_ref: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 def _search(args: SearchPapersArgs, ctx: ToolContext) -> Observation:
@@ -34,7 +63,7 @@ def _search(args: SearchPapersArgs, ctx: ToolContext) -> Observation:
     if scope.get("sources") and args.sources and not set(x.lower() for x in args.sources).issubset(set(x.lower() for x in scope["sources"])):
         raise PermissionError("search sources exceed assigned scope")
     result = ctx.services["papers"].search(args.query, scope.get("date_from") or args.date_from,
-        scope.get("date_to") or args.date_to, scope.get("sources") or args.sources, args.limit, ctx.task_id)
+        scope.get("date_to") or args.date_to, args.sources if args.sources is not None else scope.get("sources"), args.limit, ctx.task_id)
     kind = "success" if result.candidates else ("empty" if all(item.status not in {"failed", "partial_results"} for item in result.source_results) else "execution_error")
     return Observation(ok=bool(result.candidates), kind=kind, data=result.model_dump(mode="json"),
                        message="search completed" if result.candidates else "no candidate; source statuses are included",
@@ -61,11 +90,57 @@ def _read(args: ReadPaperArgs, ctx: ToolContext) -> Observation:
     if refs and args.target_ref not in refs:
         raise PermissionError("target_ref exceeds assigned references; use: " + ", ".join(refs))
     try:
-        data = ctx.services["papers"].read(ctx.task_id, args.target_ref, args.start_page, args.page_count, ctx.attachments)
+        data = ctx.services["papers"].read(ctx.task_id, args.target_ref, args.start_page, args.page_count,
+                                           ctx.attachments, _cancelled=ctx.cancelled)
+    except PaperReadCancelled as exc:
+        return Observation(ok=False, kind="cancelled", message=str(exc), retryable=False,
+                           data={"target_ref": args.target_ref, "error_code": "PAPER_READ_CANCELLED"})
     except PaperAcquisitionError as exc:
         return Observation(ok=False, kind="execution_error", message=str(exc), retryable=exc.retryable,
                            data={"target_ref": args.target_ref, "error_code": exc.code, "acquisition": exc.acquisition})
     return Observation(ok=True, kind="success", data=data, message="page evidence returned")
+
+
+def _search_web(args: SearchWebPapersArgs, ctx: ToolContext) -> Observation:
+    """显式备用检索；固定论文子目标不能搜索替换，其余权限从原任务读取。"""
+    scope = ctx.services.get('scope') or {}
+    if scope.get('paper_ids') or scope.get('input_refs'):
+        raise PermissionError('fixed references: topic search cannot replace assigned papers')
+    try:
+        data = ctx.services['papers'].search_web(ctx.task_id, args.query, args.count,
+            date_from=scope.get('date_from') or args.date_from, date_to=scope.get('date_to') or args.date_to,
+            sources=args.sources, assigned_sources=scope.get('sources'), cancelled=ctx.cancelled)
+    except PaperAcquisitionError as exc:
+        return Observation(ok=False, kind='execution_error', message=str(exc), retryable=False,
+                           data={'error_code': exc.code, 'acquisition': exc.acquisition})
+    return Observation(ok=bool(data['results']), kind='success' if data['results'] else 'empty',
+                       data=data, message='backup candidates only; publication dates and original evidence are not verified')
+
+
+def _acquire_pdf(args: AcquirePaperPdfArgs, ctx: ToolContext) -> Observation:
+    """仅为已授权论文选择同版本PDF备用链，保留原获取失败与页权限。"""
+    scope = ctx.services.get('scope') or {}
+    refs = (scope.get('paper_ids') or []) + (scope.get('input_refs') or [])
+    try:
+        data = ctx.services['papers'].acquire_pdf(ctx.task_id, args.target_ref, args.start_page, args.page_count,
+            ctx.attachments, cancelled=ctx.cancelled, sources=scope.get('sources'),
+            metadata_ref=args.metadata_ref, allowed_refs=refs)
+    except PaperReadCancelled as exc:
+        return Observation(ok=False, kind='cancelled', message=str(exc), retryable=False,
+                           data={'target_ref': args.target_ref, 'error_code': 'PAPER_READ_CANCELLED'})
+    except PaperAcquisitionError as exc:
+        return Observation(ok=False, kind='execution_error', message=str(exc), retryable=exc.retryable if exc.code == 'PDF_METADATA_VERSION_MISMATCH' else False,
+                           data={'target_ref': args.target_ref, 'error_code': exc.code, 'acquisition': exc.acquisition})
+    if data.get('status') == 'metadata_reference_required':
+        return Observation(ok=False, kind='validation_error', data=data, retryable=True,
+            message='已实际尝试原URL但取文失败；当前用户身份线索不足、冲突或不唯一，未自动绑定题录。按diagnostic明确选择授权metadata_ref，不猜同论文关联。')
+    success = bool(data.get('pages'))
+    locator = (data.get('read_coverage') or {}).get('locator_kind')
+    success_message = ('physical PDF evidence returned' if locator == 'physical_page' else
+                       'document text evidence returned; physical PDF pages are unavailable' if locator == 'document_text' else
+                       'source evidence returned; physical PDF coverage is unconfirmed')
+    return Observation(ok=success, kind='success' if success else 'empty', data=data, retryable=False,
+                       message=success_message if success else 'same-paper/version PDF remains unconfirmed; original failure retained')
 
 
 def _media(args: ReadPaperArgs, ctx: ToolContext) -> Observation:
@@ -105,9 +180,14 @@ def _visual(args: VisualDelegationInput, ctx: ToolContext) -> Observation:
                 else 'visual execution failed: ' + (result.get('error') or 'unknown failure'))
 
 
-def specs() -> list[ToolSpec]:
+def specs(*, web_search_enabled: bool = False, web_fetch_enabled: bool = False) -> list[ToolSpec]:
     """三类Agent共用参数/执行契约；Reviewer另限制只读工具集合。"""
-    return [
+    optional = []
+    if web_search_enabled:
+        optional.append(ToolSpec('search_web_papers', 'Optional backup after configured paper sources are empty or fail. Search official paper metadata with the ORIGINAL query and date/source constraints; no more than 128 Unicode characters. Canonical paper candidates can be selected by paper_id and read_paper; webpage dates are not publication dates, and publication eligibility remains unverified; arbitrary non-paper URLs remain ungranted clues. Preserve prior RPC failures. Search summaries are not original evidence. User instructions forbidding external search always win.', SearchWebPapersArgs, _search_web, ('supervisor',)))
+    if web_search_enabled and web_fetch_enabled:
+        optional.append(ToolSpec('acquire_paper_pdf', 'Optional backup for an already-authorized paper_id or a canonical paper URL explicitly supplied by the current user. A user URL is tried as its own identity first; it is never an alias for a different paper. If original metadata is unavailable, the service automatically continues using a uniquely matching authorized reference only when the current user explicitly provided its full title and complete authors or DOI. Otherwise supply metadata_ref from the returned authorized candidates; never infer identity from a lone candidate. Fetch must still verify title/authors or DOI. Source preference is not a hard restriction: the internal backup route may select other legitimate sources unless the current user or assigned scope forbids them. An unread original URL association stays original_locator_identity_unverified; this does not prove it equals the reference. Preserve assigned materials. When the existing PDF route fails. Search the exact paper identity, Fetch a matching detail page ONLY to locate its PDF, then use the original physical-page parser. Never silently substitute versions; explicit user version/page restrictions block variants. Without that restriction, a verified same-paper alternate is returned with a separate identity and version warning. Do not bypass paywalls/authentication/challenges or treat Fetch Markdown as full text. Retains original failure; may return unconfirmed candidates. Existing page and material restrictions remain.', AcquirePaperPdfArgs, _acquire_pdf, ('supervisor',)))
+    return optional + [
         ToolSpec('delegate_visual_reading', 'Optional single Researcher visual node for an already-read physical PDF page, only when a damaged formula or missing spatial relation needs images. Give its actual evidence_id, specific question, reason and trigger; no paths, hashes or new search. Plain text stays the default. Same source/question/bbox reuses the result; use returned next_offset to read more without another visual request. Model observations are not exact source quotes or Reviewer approval. Failure or uncertainty may be disclosed and delivered.', VisualDelegationInput, _visual, ('supervisor',)),
         ToolSpec("retrieve_evidence", "Search already-read authorized original evidence using BM25 + vector + RRF + local Cross-encoder. Pass exact document_ids returned by read_paper; cannot search ungranted versions. For targeted questions/follow-ups, inspect ranked chunks and explicit degradations; scores are relevance, not factual proof or full-paper coverage. Use read_paper first if no page evidence, and for missing context. This does not generate deep-reading notes.", RetrievalQuery, _retrieve),
         ToolSpec("inspect_paper_media", "Extract authorized PDF figures/tables via optional PaperCropper, fallback embedded images. No image understanding; unknown page/bbox remain null.", ReadPaperArgs, _media),

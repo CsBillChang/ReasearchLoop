@@ -157,6 +157,7 @@ class PaperPDFTests(unittest.TestCase):
         discovery = DiscoveryProvider()
         self.addCleanup(discovery.close)
         papers = PaperService(db, discovery, provider)
+        db.create_task("task", None, "synthetic", "读取已授权题录", "deny", [])
         paper = PaperCandidate(paper_id="eccv-fixture-91", title="Test", source="eccv",
                                paper_url="https://www.ecva.net/papers/eccv_2024/papers_ECCV/html/91_ECCV_2024_paper.php")
         db.save_paper(paper.paper_id, paper.model_dump(mode="json"))

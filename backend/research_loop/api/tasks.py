@@ -100,7 +100,7 @@ def continue_task(
         payload = payload.model_copy(update={
             'attachments': [resolve_upload(service.settings, a) for a in payload.attachments],
         })
-        return ContinuationService(service.db).request(task_id, payload)
+        return ContinuationService(service.db,service.settings).request(task_id, payload)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

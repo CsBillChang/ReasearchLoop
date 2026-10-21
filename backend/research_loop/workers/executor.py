@@ -10,9 +10,11 @@ import hashlib
 import threading
 from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
+
+from research_loop.domain.execution_policy import inherit_execution_policy, graph_run_config
 from typing import Any, Callable
 
-from research_loop.agents.graph import build_graph, initial_state
+from research_loop.agents.graph import build_graph, initial_state, finish_input_hash
 from research_loop.agents.researcher import build_researcher_graph, researcher_state
 from research_loop.agents.reviewer import build_reviewer_graph, reviewer_state
 from research_loop.config import Settings
@@ -110,7 +112,9 @@ class TaskExecutor:
     def _run_research_batch(self, parent_task_id: str, specs: list[dict[str, Any]],
                             worker_id: str, lease_token: str, settings: Settings,
                             papers: PaperService) -> list[dict[str, Any]]:
-        """校验分派范围并持久化子任务；最多并行两个 Researcher，复用已完成结果并回传证据权限。"""
+        """校验分派范围并持久化子任务；按资源槽排队执行全部 Researcher，复用已完成结果并回传证据权限。"""
+        if not self.db.is_owner(parent_task_id, worker_id, lease_token):
+            raise PermissionError('research root lease lost before batch mutation')
         root = self.db.get_task(parent_task_id).get("root_task_id") or parent_task_id
         parent = self.db.get_task(parent_task_id)
         attachments = {a["input_ref"]: a for a in json.loads(parent["attachments_json"])}
@@ -124,6 +128,9 @@ class TaskExecutor:
             for ref in spec.get("input_refs") or []:
                 if ref not in attachments or not self.db.task_has_input(parent_task_id, ref):
                     raise PermissionError("cannot delegate an unauthorized attachment: " + ref)
+        for position, spec in enumerate(specs):
+            if not self.db.is_owner(parent_task_id, worker_id, lease_token):
+                raise PermissionError('research root lease lost before subtask creation')
             key = "research:" + hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
             existing = self.db.fetchone("SELECT * FROM subtasks WHERE parent_task_id=? AND idempotency_key=?", (parent_task_id, key))
             if not existing:
@@ -176,23 +183,44 @@ class TaskExecutor:
             if child.get("status") in {"completed", "partial", "failed", "cancelled"} and child.get("result_json"):
                 return json.loads(child["result_json"])["result"]
             child_id = child["subtask_id"]
+            if not self.db.is_owner(parent_task_id, worker_id, lease_token):
+                raise PermissionError('research root lease lost before queued task mutation')
+            # 已排队的任务取消后不能被工作线程重新标记为运行或再构造供应商。
+            if (self.db.get_task(parent_task_id).get('cancel_requested')
+                    or self.db.get_task(child_id).get('cancel_requested')):
+                result = {'subtask_id': child_id, 'parent_task_id': parent_task_id,
+                          'objective': spec['objective'], 'mode': spec.get('mode', 'deep_read'),
+                          'goal_ids': spec.get('goal_ids') or [], 'status': 'cancelled',
+                          'findings': [], 'gaps': ['排队期间取消，未启动新的模型请求'],
+                          'paper_ids': [], 'evidence_ids': []}
+                result = retain(child_id, result)
+                if not self.db.is_owner(parent_task_id, worker_id, lease_token):
+                    raise PermissionError('research root lease lost before cancelled result commit')
+                self.db.save_subtask_result(child_id, 'cancelled', result)
+                return result
+            if not self.db.is_owner(parent_task_id, worker_id, lease_token):
+                raise PermissionError('research root lease lost before queued task start')
             self.db.update_task(child_id, status="running", claimed_by=worker_id,
                                 lease_token=lease_token, lease_until=self.db.get_task(parent_task_id).get("lease_until"))
             self.db.execute("UPDATE subtasks SET status='running',updated_at=? WHERE subtask_id=?", (self.db_now(), child_id))
-            provider = self.provider_factory(settings)
+            provider = None
             try:
+                provider = self.provider_factory(settings)
                 assigned = {r: attachments[r] for r in spec.get("input_refs") or []}
-                state = CheckpointStore(self.db).load(child_id) or researcher_state(child_id, spec["objective"], "deny", assigned, spec)
+                state = CheckpointStore(self.db).load(child_id)
+                if state is None:
+                    state = inherit_execution_policy(
+                        researcher_state(child_id, spec["objective"], "deny", assigned, spec),
+                        self.db.execution_policy(root), self.db.budget_summary(root))
                 state.update({"worker_id": worker_id, "lease_token": lease_token,
                               "parent_task_id": parent_task_id, "root_task_id": root})
                 from research_loop.agents.memory import ContextService
                 graph = build_researcher_graph(provider, {"papers": papers, "scope": spec, "retrieval": self.retrieval,
                                                "context": ContextService(self.db, None, settings)}, self.db, CheckpointStore(self.db),
-                                               max_model_requests=min(12, settings.max_model_requests),
-                                               # 子角色沿用冻结的本地上限（新任务默认20）；48是根共享额度。
-                                               max_tool_actions=state.get('max_tool_actions', 20),
+                                               max_model_requests=state["max_model_requests"],
+                                               max_tool_actions=state["max_tool_actions"],
                                                deep_reading=state.get("research_mode", "deep_read") == "deep_read")
-                result_state = graph.invoke(state, config={"recursion_limit": 2 * (settings.max_model_requests + settings.max_tool_actions) + 8})
+                result_state = graph.invoke(state, config=graph_run_config(state))
                 evidence_ids = result_state.get("evidence_ids") or []
                 for evidence_id in evidence_ids:
                     self.db.grant_evidence(parent_task_id, evidence_id, child_id)
@@ -207,9 +235,8 @@ class TaskExecutor:
                           else "completed" if complete else "partial")
                 # 搜索授权的候选不等于最终选中或实际读取的论文。
                 selected = structured.get("paper_ids") or []
-                read_ids = list(dict.fromkeys(a["observation"]["data"]["paper_id"]
-                    for a in self.db.list_actions(child_id) if a["tool_name"] == "read_paper"
-                    and a["status"] == "succeeded" and a["observation"].get("data", {}).get("paper_id")))
+                read_ids = sorted({source['paper_id'] for source in CoverageService(self.db).source_coverage(child_id)
+                                   if source['paper_id']})
                 if not selected and mode == "deep_read":
                     selected = read_ids
                 result = {"subtask_id": child_id, "parent_task_id": parent_task_id,
@@ -219,6 +246,8 @@ class TaskExecutor:
                                       if (result_state.get('final_answer') or '').strip() else []),
                           "evidence_ids": evidence_ids, "paper_ids": selected,
                           "assessments": structured.get("assessments") or [],
+                          "assessment_errors": structured.get("assessment_errors") or [],
+                          "pending_verification_claims": structured.get("pending_verification_claims") or [],
                           "evidence_scope": structured.get("evidence_scope") or [],
                           **research_stop_details(result_state, status, read_ids),
                           "deep_reading_status": (result_state.get("deep_reading") or {}).get("status") }
@@ -240,9 +269,10 @@ class TaskExecutor:
                     self.db.save_subtask_result(child_id, result["status"], result, str(exc))
                 return result
             finally:
-                provider.close()
+                if provider is not None:
+                    provider.close()
 
-        with ThreadPoolExecutor(max_workers=min(2, max(1, len(children)))) as pool:
+        with ThreadPoolExecutor(max_workers=min(settings.researcher_concurrency, max(1, len(children)))) as pool:
             return list(pool.map(run_one, children))
 
     def _review_once(self, parent_task_id: str, draft_id: str, content_hash: str,
@@ -272,17 +302,22 @@ class TaskExecutor:
         provider = self.provider_factory(settings)
         try:
             bundle = papers.evidence_bundle(parent_task_id, evidence_ids if evidence_ids is not None else draft.get("evidence_ids", []))
-            state = CheckpointStore(self.db).load(review_task_id) or reviewer_state(review_task_id, draft_id, content_hash, draft["markdown"], evidence_ids if evidence_ids is not None else draft.get("evidence_ids", []), bundle, questions,
+            checkpoint = CheckpointStore(self.db).load(review_task_id)
+            state = checkpoint or reviewer_state(review_task_id, draft_id, content_hash, draft["markdown"], evidence_ids if evidence_ids is not None else draft.get("evidence_ids", []), bundle, questions,
                 ReflectionService(self.db).revision_checks(parent_task_id, draft_id))
+            if checkpoint is None:
+                inherit_execution_policy(state, self.db.execution_policy(parent_task_id), self.db.budget_summary(parent_task_id))
             state["attachments"] = {a["input_ref"]: a for a in parent_attachments}
             state.update({"worker_id": worker_id, "lease_token": lease_token,
                           "parent_task_id": parent_task_id, "root_task_id": parent_task_id})
-            reviewer_services = {"papers": papers, "review_draft_id": draft_id,
+            from research_loop.agents.memory import ContextService
+            reviewer_services = {"papers": papers, "context": ContextService(self.db, None, settings), "review_draft_id": draft_id,
                                  "retrieval": self.retrieval,
                                  "review_content_hash": content_hash, "review_parent_task_id": parent_task_id,
                                  "review_basis_required": state.get("review_basis_required", False)}
-            graph = build_reviewer_graph(provider, reviewer_services, self.db, CheckpointStore(self.db), max_model_requests=4)
-            result_state = graph.invoke(state, config={"recursion_limit": 2 * (settings.max_model_requests + settings.max_tool_actions) + 8})
+            graph = build_reviewer_graph(provider, reviewer_services, self.db, CheckpointStore(self.db),
+                                         max_model_requests=state["max_model_requests"], max_tool_actions=state["max_tool_actions"])
+            result_state = graph.invoke(state, config=graph_run_config(state))
             review_data = next((action["observation"]["data"] for action in reversed(result_state.get("actions", []))
                                 if action["tool_name"] == "finish_review" and action["status"] == "succeeded"), None)
             if not review_data:
@@ -457,13 +492,19 @@ class TaskExecutor:
                     if a['tool_name'] == 'save_note' and a['status'] == 'succeeded'],
                 'unrelated_text_preservation': 'not_checked',
                 'notice': '仅当前父任务已记录的保存动作；不是全文件系统审计或科学证据，未提供段落差异检查。'}
-            current = CheckpointStore(self.db).load(tid) or research_reviewer_state(tid, target, questions, bundle, execution_checks)
+            checkpoint = CheckpointStore(self.db).load(tid)
+            current = checkpoint or research_reviewer_state(tid, target, questions, bundle, execution_checks)
+            if checkpoint is None:
+                inherit_execution_policy(current, self.db.execution_policy(parent_task_id), self.db.budget_summary(parent_task_id))
             current.update(worker_id=worker_id, lease_token=lease_token, parent_task_id=parent_task_id,
                            root_task_id=parent_task_id, attachments={a['input_ref']: a for a in attachments})
+            from research_loop.agents.memory import ContextService
             graph = build_reviewer_graph(provider, {'papers': papers, 'retrieval': self.retrieval,
+                'context': ContextService(self.db, None, settings),
                 'review_target': target, 'review_parent_task_id': parent_task_id}, self.db,
-                CheckpointStore(self.db), max_model_requests=4)
-            end = graph.invoke(current, config={'recursion_limit': 2 * (settings.max_model_requests + settings.max_tool_actions) + 8})
+                CheckpointStore(self.db), max_model_requests=current["max_model_requests"],
+                max_tool_actions=current["max_tool_actions"])
+            end = graph.invoke(current, config=graph_run_config(current))
             result = next((a['observation']['data'] for a in reversed(end.get('actions', []))
                 if a['tool_name'] == 'finish_review' and a['status'] == 'succeeded'), None)
             if not result:
@@ -500,6 +541,19 @@ class TaskExecutor:
         return DeepSeekProvider(settings.deepseek_api_key or "", settings.deepseek_model,
                                 settings.deepseek_base_url, settings.request_timeout_seconds)
 
+    def _project_interests(self, task_id: str | None = None) -> None:
+        """在回答持久化后补投影；故障保留pending，不能改研究终态或发送模型请求。"""
+        from research_loop.services.interests import InterestService
+        try:
+            service = InterestService(self.db)
+            if task_id is None:
+                service.recover_pending()
+            else:
+                service.apply(task_id)
+        except Exception:
+            import logging
+            logging.exception('兴趣投影暂未完成；研究结果保留，后续Worker仅重试数据库投影')
+
     def execute(self, task_id: str, worker_id: str = "direct") -> TaskResult:
         """领取或恢复指定任务，运行角色图并提交持久结果。
 
@@ -520,11 +574,16 @@ class TaskExecutor:
         service = TaskService(self.db)
         # 网页取消queued任务可能已原子结算；Worker收到旧领取请求只读回，不再运行。
         if task["status"] == "cancelled" and task.get("result_json"):
+            self._project_interests(task_id)
             return TaskResult.model_validate_json(task["result_json"])
         if self.db.has_unknown_model_call(task_id) or self.db.has_unknown_family_call(task_id):
-            result = self._deliverable_result(task_id, {}, "已有模型请求结果未知，未自动重发")
+            result = self._deliverable_result(task_id, CheckpointStore(self.db).load(task_id) or {},
+                                              "已有模型请求结果未知，未自动重发")
             if task["status"] not in {"failed", "completed", "partial", "cancelled"}:
-                service.complete(task_id, TaskStatus.partial if result.answer_markdown and result.answer_kind != "failure_report" else TaskStatus.failed, result, result.reason)
+                status = (TaskStatus.cancelled if task.get('cancel_requested') else
+                          TaskStatus.partial if result.answer_markdown and result.answer_kind != "failure_report" else TaskStatus.failed)
+                service.complete(task_id, status, result, result.reason)
+            self._project_interests(task_id)
             return result
         claimed = self.db.claim_task(worker_id, task_id=task_id)
         if not claimed:
@@ -546,6 +605,7 @@ class TaskExecutor:
         if task["cancel_requested"]:
             result = TaskResult(reason="cancelled before worker execution")
             service.complete(task_id, TaskStatus.cancelled, result)
+            self._project_interests(task_id)
             return result
         heartbeat_thread.start()
         self.db.append_event(task_id, "worker_started", {})
@@ -555,13 +615,16 @@ class TaskExecutor:
         pdf = (self.pdf_factory(settings, files) if self.pdf_factory else
                PDFProvider(files, settings.parser_name, settings.parser_version, settings.parser_config,
                            60.0, settings.max_pdf_bytes))
-        papers = PaperService(self.db, discovery, pdf)
+        from research_loop.services.web_acquisition import build_web_acquisition
+        papers = PaperService(self.db, discovery, pdf, web=build_web_acquisition(self.db, settings))
+        supervisor_papers = paper_specs(web_search_enabled=settings.web_search_enabled,
+                                       web_fetch_enabled=settings.web_fetch_enabled)
         notes = NoteService(self.db, files)
-        registry = ToolRegistry(paper_specs() + note_specs() + delegation_specs(), allowed_names=self.supervisor_tools)
+        registry = ToolRegistry(supervisor_papers + note_specs() + delegation_specs(), allowed_names=self.supervisor_tools)
         conversation = self.db.fetchone('SELECT conversation_id FROM conversation_links WHERE task_id=?',(task_id,))
         if conversation:
             from research_loop.tools.memory import specs as memory_specs
-            registry = ToolRegistry(paper_specs() + note_specs() + delegation_specs() + memory_specs(), allowed_names=self.supervisor_tools)
+            registry = ToolRegistry(supervisor_papers + note_specs() + delegation_specs() + memory_specs(), allowed_names=self.supervisor_tools)
         provider = None
         try:
             provider = self.provider_factory(settings)
@@ -576,6 +639,7 @@ class TaskExecutor:
                 added = {'review_research', 'revise_research', 'close_research_issue', 'delegate_visual_reading'}
                 registry = ToolRegistry([registry.get(name) for name in registry.names() if name not in added])
             if not checkpoint:
+                inherit_execution_policy(state, self.db.execution_policy(task_id), self.db.budget_summary(task_id))
                 state["coverage_required"] = True
                 bound=next((e['payload'] for e in self.db.list_events(task_id) if e['event_type']=='feedback_draft_bound'),None)
                 if bound:
@@ -618,7 +682,7 @@ class TaskExecutor:
             graph = build_graph(provider, registry, role_services, self.db,
                                 settings.max_model_requests, settings.max_tool_actions, settings.reserve_model_requests,
                                 CheckpointStore(self.db))
-            state = graph.invoke(state, config={"recursion_limit": 2 * (settings.max_model_requests + settings.max_tool_actions) + 8})
+            state = graph.invoke(state, config=graph_run_config(state))
             CheckpointStore(self.db).save(task_id, state)
             result = self._deliverable_result(task_id, state)
             if state.get("final_reason") == "clarification requested":
@@ -630,12 +694,16 @@ class TaskExecutor:
             if not self.db.is_owner(task_id, worker_id, lease_token):
                 raise RuntimeError("worker lease lost before task completion")
             service.complete(task_id, status, result, owner=(worker_id, lease_token))
+            self._project_interests(task_id)
             return result
         except Exception as exc:
             result = self._deliverable_result(task_id, CheckpointStore(self.db).load(task_id) or {}, type(exc).__name__ + ": " + str(exc))
             if self.db.is_owner(task_id, worker_id, lease_token):
                 self.db.append_event(task_id, "worker_failed", {"error": type(exc).__name__ + ": " + str(exc)})
-                service.complete(task_id, TaskStatus.partial if result.answer_markdown and result.answer_kind != "failure_report" else TaskStatus.failed, result, result.reason, owner=(worker_id, lease_token))
+                status = (TaskStatus.cancelled if self.db.get_task(task_id).get('cancel_requested') else
+                          TaskStatus.partial if result.answer_markdown and result.answer_kind != "failure_report" else TaskStatus.failed)
+                service.complete(task_id, status, result, result.reason, owner=(worker_id, lease_token))
+                self._project_interests(task_id)
             return result
         finally:
             stop_heartbeat.set()
@@ -647,6 +715,8 @@ class TaskExecutor:
                 pass
             discovery.close()
             pdf.close()
+            if papers.web:
+                papers.web.close()
 
     def _delivery_status(self, task_id: str, state: dict, result: TaskResult) -> TaskStatus:
         """按实际执行/生成完成情况结束，不以阅读警告或 Reviewer 意见阻断发布。
@@ -654,6 +724,8 @@ class TaskExecutor:
         论文 的严格阅读入口保留总结结束标记检查；ResearchLoop 的任务外壳还需
         如实表达取消、未结算请求、实际执行失败与明确未满足的用户子要求。
         """
+        if state.get('cancelled') or (self.db.get_task(task_id) or {}).get('cancel_requested'):
+            return TaskStatus.cancelled
         if self.db.has_unknown_family_call(task_id):
             return TaskStatus.partial if result.answer_markdown and result.answer_kind != "failure_report" else TaskStatus.failed
         from research_loop.domain.context import textual_delivery
@@ -681,6 +753,51 @@ class TaskExecutor:
             return TaskStatus.partial
         return TaskStatus.completed
 
+    def _bound_finish_candidate(self, task_id: str, state: dict) -> dict | None:
+        """仅恢复当前交接精确绑定的合法失败候选，拒绝跨任务和篡改身份。
+
+        Args:
+            task_id: 当前交付任务。
+            state: 含行动身份引用的快照，不从模型参数重建正文。
+
+        Returns:
+            原失败观察中经过业务验证的候选；缺字段或身份不符时返回None。
+        """
+        ref = state.get('finish_candidate_ref') or (state.get('research_handoff') or {}).get('finish_candidate_ref') or {}
+        if not ref:
+            # 执行观察已提交而节点快照尚未提交时，仅从冻结待执行批次的精确序号
+            # 和参数绑定恢复；多个可能finish不按时间任取一份。
+            sequence = int(state.get('action_sequence', state.get('tool_actions', 0)))
+            matches = []
+            for offset, call in enumerate(state.get('pending_tool_calls') or [], 1):
+                if call.get('name') != 'finish_task':
+                    continue
+                action = self.db.get_action(task_id, sequence + offset)
+                if (action and action['tool_name'] == 'finish_task' and action['status'] == 'failed'
+                        and action['arguments'] == call.get('arguments')):
+                    matches.append({'task_id': task_id, 'action_id': action['action_id'],
+                                    'input_hash': finish_input_hash(action['arguments'])})
+            if len(matches) == 1:
+                ref = matches[0]
+        if ref.get('task_id') != task_id or not ref.get('action_id') or not ref.get('input_hash'):
+            return None
+        action = next((item for item in self.db.list_actions(task_id)
+                       if item['action_id'] == ref['action_id']), None)
+        if (not action or action['task_id'] != task_id or action['tool_name'] != 'finish_task'
+                or action['status'] != 'failed' or finish_input_hash(action['arguments']) != ref['input_hash']):
+            return None
+        observation = action.get('observation') or {}
+        candidate = (observation.get('data') or {}).get('finish_candidate') or {}
+        if (observation.get('ok') or not (observation.get('data') or {}).get('coverage_blocker')
+                or any(candidate.get(key) != ref[key] for key in ('task_id', 'action_id', 'input_hash'))):
+            return None
+        try:
+            # 正文只从原行动参数或精确绑定且仍合法的稿件/核验对象读回；
+            # 复用业务入口重验身份和版本，不读取后续模型改写字段。
+            return CoverageService(self.db).resolve_finish_candidate(task_id, action, candidate)
+        except (PermissionError, ValueError, KeyError):
+            return None
+
     def _deliverable_result(self, task_id: str, state: dict, reason: str | None = None) -> TaskResult:
         """以已落库产物构建交付，后续模型失败不吞掉草稿；本函数不写文件。
 
@@ -695,9 +812,11 @@ class TaskExecutor:
         delivery = state.get("delivery") or {}
         draft_id = delivery.get("draft_id") if delivery else state.get("draft_id")
         draft = self.db.get_draft(draft_id) if draft_id else None
+        if draft and draft['task_id'] != task_id:
+            draft = None
         if not delivery and (not draft or draft["task_id"] != task_id):
-            row = self.db.fetchone("SELECT draft_id FROM drafts WHERE task_id=? ORDER BY created_at DESC,draft_id DESC LIMIT 1", (task_id,))
-            draft = self.db.get_draft(row["draft_id"]) if row else None
+            rows = self.db.fetchall("SELECT draft_id FROM drafts WHERE task_id=?", (task_id,))
+            draft = self.db.get_draft(rows[0]['draft_id']) if len(rows) == 1 else None
         gaps = list(delivery.get("gaps", state.get("gaps") or []))
         if reason:
             gaps.append(reason)
@@ -714,48 +833,100 @@ class TaskExecutor:
         incomplete_delivery = bool(state.get("coverage_required") and not delivery
                                    and state.get("final_reason") != "clarification requested")
         retained_answer_source, retained_body, retained_summary = None, None, None
-        if not answer or (incomplete_delivery and not draft):
-            retained = []
+        bound_candidate = self._bound_finish_candidate(task_id, state) if not delivery else None
+        if bound_candidate:
+            retained_body = bound_candidate['answer_body_markdown']
+            retained_answer_source = {'source_type': 'failed_finish_candidate',
+                **{key: bound_candidate[key] for key in ('task_id', 'action_id', 'input_hash', 'answer_content_hash')},
+                'is_original_paper_evidence': False, 'save_permission_inherited': False}
+            retained_summary = '\n'.join(filter(None, [bound_candidate.get('processing_summary'),
+                '资格检查未通过，当前正文仅作为候选保留；未宣称目标已完成。',
+                '停止原因：' + (reason or state.get('final_reason') or '执行未完成')]))
+            answer = retained_body + '\n\n处理说明：' + retained_summary
+            gaps.append('资格检查未通过；按当前失败行动身份保留候选正文。')
+            draft = self.db.get_draft(bound_candidate['draft_id']) if bound_candidate.get('draft_id') else None
+            receipt = self.db.get_receipt(draft['draft_id'], draft['content_hash']) if draft else None
+        if not bound_candidate and (not answer or (incomplete_delivery and not draft)):
+            stages = []
             retained_targets = []
             retention_notes = []
             superseded = set()
-            review_state = ReflectionService(self.db).snapshot(task_id)
+            review_service = ReflectionService(self.db)
+            review_state = review_service.snapshot(task_id)
+            answer_targets = []
             for record in review_state.get('research_targets', {}).values():
                 current_target = record['current']
                 if current_target['target_type'] == 'candidates':
                     continue
+                try:
+                    # 只投影仍属于当前任务的当前版本，不改旧对象或历史引用。
+                    current_target = review_service.research_target(task_id, current_target['target_id'],
+                        current_target['content_hash'])['current']
+                except (PermissionError, ValueError):
+                    # 来源失效不删除已有回答；保留原字节并披露不能据此批准。
+                    gaps.append('核验对象来源当前不可用：' + current_target['target_id'])
                 texts = [i['text'] for i in current_target['items'] if i.get('text')]
+                identity = {k: current_target[k] for k in ('target_id', 'content_hash', 'target_type')}
                 if texts:
-                    retained.append('\n\n'.join(texts))
-                    retained_targets.append({k: current_target[k] for k in ('target_id', 'content_hash', 'target_type')})
-                    retention_notes.append('保留当前核验对象正文，实际核验状态见记录；不表示内容已获批准。')
+                    stage = {**identity, 'source_task_id': current_target.get('source_task_id', task_id),
+                        'content_markdown': '\n\n'.join(texts), 'kind': 'research_target'}
+                    stages.append(stage)
+                    retained_targets.append(identity)
+                    if current_target['target_type'] == 'answer':
+                        answer_targets.append(stage)
                 for version in record['versions']:
                     superseded.update(i.get('text') for i in version['items'])
+            # 明确文本绑定优先；只有唯一回答对象时才可无歧义恢复。
+            # 多个独立回答不能按时间或字面相似度挑出“最新统一答案”。
+            selected = [item for item in answer_targets if answer and item['content_markdown'] == answer]
+            bound_id = state.get('reflection_target_id')
+            bound_hash = state.get('reflection_content_hash')
+            if bound_id and bound_hash:
+                selected = [item for item in answer_targets if item['target_id'] == bound_id
+                            and item['content_hash'] == bound_hash]
+            if not selected and len(answer_targets) == 1:
+                selected = answer_targets
+            primary = selected[0] if len(selected) == 1 else None
             own = ResearchProgressService(self.db).retained(task_id)
             own_texts = [f['text'] for f in own['findings'] if f['text'] not in superseded]
             if own_texts:
-                retained.append('\n\n'.join(own_texts))
-                retention_notes.append('已记录阶段成果未独立核验。')
+                stages.append({'kind': 'research_progress', 'source_task_id': task_id,
+                    'revision': own.get('revision'), 'content_markdown': '\n\n'.join(own_texts)})
             gaps.extend(own['gaps'])
             for child in self.db.list_subtasks(task_id):
                 if (self.db.get_task(child['subtask_id']) or {}).get('role') == 'reviewer':
                     continue
-                child_result = (child.get("result") or {}).get("result", {})
+                child_result = (child.get('result') or {}).get('result', {})
                 progress = ResearchProgressService(self.db).retained(child['subtask_id'])
-                findings = list(dict.fromkeys([s for s in child_result.get('findings', []) if isinstance(s, str) and s.strip() and s not in superseded] + [f['text'] for f in progress['findings'] if f['text'] not in superseded]))
+                findings = list(dict.fromkeys([s for s in child_result.get('findings', [])
+                    if isinstance(s, str) and s.strip() and s not in superseded] +
+                    [f['text'] for f in progress['findings'] if f['text'] not in superseded]))
                 gaps.extend(progress['gaps'])
+                gaps.extend(child_result.get('gaps') or [])
                 if findings:
-                    retained.append("\n\n".join(findings))
-                    retention_notes.append("保留子任务成果：" + child["objective"])
-                gaps.extend(child_result.get("gaps") or [])
-            if retained:
-                # 正文逐字来自当前版本；状态、模型末条说明和执行诊断不能混进正文。
-                retained_body = "\n\n".join(dict.fromkeys(retained))
-                if retained_targets:
-                    retained_answer_source = {'source_type': 'research_targets', 'targets': retained_targets,
-                        'is_original_paper_evidence': False, 'save_permission_inherited': False}
+                    stages.append({'kind': 'subtask', 'source_task_id': child['subtask_id'],
+                        'objective': child['objective'], 'status': child['status'],
+                        'revision': progress.get('revision'), 'stop_reason': child_result.get('stop_reason'),
+                        'content_markdown': '\n\n'.join(findings)})
+            if stages:
+                retained_answer_source = {'source_type': 'research_targets' if retained_targets else 'stage_outputs',
+                    'targets': retained_targets, 'stage_outputs': stages,
+                    'primary_target': ({k: primary[k] for k in ('target_id', 'content_hash', 'target_type')}
+                                       if primary else None),
+                    'is_original_paper_evidence': False, 'save_permission_inherited': False}
+                # 当前正文独立保留，其余材料按来源分组。相同文本不跨来源去重，
+                # 也不把可能冲突的子成果拼成一篇已综合结论。
+                other_stages = [item for item in stages if item is not primary]
+                grouped = []
+                for item in other_stages:
+                    label = item.get('target_id') or item['source_task_id']
+                    title = item.get('objective') or item['kind']
+                    grouped.append('### 阶段来源：' + label + '（' + title + '）\n\n' + item['content_markdown'])
+                stage_section = ('独立阶段材料（各自来源保留，未合并为统一结论）：\n\n' + '\n\n'.join(grouped)) if grouped else None
+                retained_body = primary['content_markdown'] if primary else (answer or stage_section)
+                retention_notes.append('保留当前正文及各自来源的阶段材料；实际核验状态见记录，不表示内容已获批准。')
                 diagnostics = []
-                for review in ReflectionService(self.db).research_context(task_id):
+                for review in review_service.research_context(task_id):
                     error = review.get('execution_error') or {}
                     if error:
                         first = error.get('first_error') or {}
@@ -772,7 +943,11 @@ class TaskExecutor:
                     retention_notes.append('执行末条回复（未完成交付）：' + answer)
                 retained_summary = '任务尚未完整完成。' + '；'.join(dict.fromkeys(retention_notes)) + \
                     '停止原因：' + (reason or state.get('final_reason') or '执行未完成')
-                answer = retained_body + '\n\n处理说明：' + retained_summary
+                sections = [retained_body]
+                if stage_section and stage_section != retained_body:
+                    sections.append(stage_section)
+                sections.append('处理说明：' + retained_summary)
+                answer = '\n\n'.join(sections)
             elif not answer and not draft and not delivery and state.get('final_reason') != 'clarification requested':
                 from research_loop.services.conversations import ConversationService
                 referenced = ConversationService(self.db).referenced_answer(task_id)
@@ -797,6 +972,21 @@ class TaskExecutor:
             why = reason or state.get("final_reason") or "没有获得可交付的研究内容"
             answer = "本次任务未完成。\n\n原因：" + why + "\n\n" + "\n".join("- " + x for x in dict.fromkeys(gaps + failures) if x)
             answer += "\n\n未将未取得的论文内容或核验结果宣称为已完成。"
+            # 即使没有形成正文，仍展示已持久化的事实范围；不从模型内部推理
+            # 或截断JSON提炼结论，不将“程序失败”转换成“论文没有说明”。
+            pages = [self.db.get_page(ref) for ref in self.db.list_task_evidence(task_id)]
+            by_document = {}
+            for page in pages:
+                if page:
+                    by_document.setdefault(page['document_id'], []).append(page.get('page_number'))
+            if by_document:
+                ranges = ['文档' + doc + '：' + ('物理页' + ', '.join(map(str, sorted(n for n in nums if n is not None)))
+                          if any(n is not None for n in nums) else '无物理页定位的文本')
+                          for doc, nums in by_document.items()]
+                retained_body = '已取得的材料：\n\n' + '\n'.join('- ' + row for row in ranges)
+                retained_body += '\n\n当前尚未形成可交付的研究结论；已读材料保留，可在后续任务中继续。'
+                retained_summary = answer
+                answer = retained_body + '\n\n处理说明：' + retained_summary
         return TaskResult(source_warnings=state.get("source_warnings") or [],
                           answer_kind=answer_kind, reflection=reflection,
                           research_reviews=ReflectionService(self.db).research_context(task_id),
@@ -817,7 +1007,8 @@ class TaskExecutor:
     def run_once(self, worker_id: str = "worker") -> str | None:
         """原子领取一个可执行根任务；没有任务时返回 None，不扫描重发历史 unknown。"""
         from research_loop.services.continuations import ContinuationService
-        ContinuationService(self.db).release_ready()
+        self._project_interests()
+        ContinuationService(self.db,self.settings).release_ready()
         task = self.db.claim_task(worker_id)
         if not task:
             return None

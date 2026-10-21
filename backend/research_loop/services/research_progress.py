@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from copy import deepcopy
 
 from research_loop.domain.research_progress import ResearchProgressInput
@@ -31,7 +32,7 @@ class ResearchProgressService:
                    'revision': 0, 'findings': [], 'gaps': [], 'next_question': None}
         ranges = {}
         for action in self.db.list_actions(task_id):
-            if action['status'] == 'succeeded' and action['tool_name'] == 'read_paper':
+            if action['status'] == 'succeeded' and action['tool_name'] in {'read_paper', 'acquire_paper_pdf'}:
                 data = (action.get('observation') or {}).get('data', {})
                 if data.get('document_id'):
                     key = (data['document_id'], data.get('content_sha256'))
@@ -49,16 +50,57 @@ class ResearchProgressService:
 
     def source(self, task_id: str, evidence_id: str, tx=None) -> dict:
         """从已授权实际页派生版本和定位，不接受模型自报 hash。"""
+        from research_loop.services.papers import PaperService
+        return PaperService(self.db, None, None).authorized_source(
+            task_id, evidence_id, tx, with_readback=False)['reference']
+
+    @staticmethod
+    def _source_shape(value: dict) -> bool:
+        """复用共同完整引用合同，不接受展示入口等额外字段。"""
+        from research_loop.domain.evidence import valid_source_reference
+        return valid_source_reference(value)
+
+    def _versioned_paper_locator(self, paper_id: str, tx=None) -> tuple | None:
+        """仅从已存题录确认明确同版arXiv地址，不按标题或正文hash猜别名。"""
+        from research_loop.domain.evidence import explicit_versioned_paper_locator
         one = tx.one if tx else self.db.fetchone
-        page = one('SELECT e.* FROM page_evidence e JOIN task_evidence t ON t.evidence_id=e.evidence_id WHERE t.task_id=? AND e.evidence_id=?', (task_id, evidence_id))
-        if not page:
-            raise PermissionError('progress evidence outside current task: ' + evidence_id)
-        doc = one('SELECT * FROM documents WHERE document_id=?', (page['document_id'],))
-        if not page or not doc:
-            raise ValueError('progress source unavailable: ' + evidence_id)
-        return {'evidence_id': evidence_id, 'document_id': doc['document_id'], 'paper_id': doc['paper_id'],
-                'source_sha256': doc['content_sha256'], 'page_number': page['page_number'] or None,
-                'text_sha256': hashlib.sha256(page['text'].encode()).hexdigest()}
+        row = one('SELECT metadata_json FROM papers WHERE paper_id=?', (paper_id,))
+        try:
+            metadata = json.loads(row['metadata_json']) if row else None
+        except (ValueError, TypeError):
+            return None
+        return explicit_versioned_paper_locator(paper_id, metadata)
+
+    def source_version_matches(self, task_id: str, stored: dict, tx=None) -> bool:
+        """比较授权原文版本，仅兼容可证明同一明确版本的论文显示别名。
+
+        Args:
+            task_id: 持有该页证据权限的当前角色，沿用source的授权JOIN。
+            stored: 已提交的来源引用；不会改写旧引用或旧核验结果。
+            tx: 可选当前事务，提交时题录与页版本在同一事务读回。
+
+        Returns:
+            全部不可变字段相同，且paper_id相同或双方题录明确同版时返回True。
+            文档身份包含解析版本/配置；不同文档、内容、页位置或页文本不能兼容。
+
+        Raises:
+            PermissionError: 当前角色没有该evidence权限，不因别名取得新材料授权。
+        """
+        if not self._source_shape(stored):
+            return False
+        try:
+            current = self.source(task_id, stored['evidence_id'], tx)
+        except (ValueError, KeyError, TypeError):
+            return False
+        if not self._source_shape(current):
+            return False
+        if any(current[key] != stored[key] for key in current if key != 'paper_id'):
+            return False
+        if current['paper_id'] == stored['paper_id']:
+            return True
+        # 共享内容缓存可能由另一合法身份重读；这不是授予新paper或新页的入口。
+        original = self._versioned_paper_locator(stored['paper_id'], tx)
+        return original is not None and original == self._versioned_paper_locator(current['paper_id'], tx)
 
     def prepare(self, task_id: str, args: ResearchProgressInput) -> dict:
         """校验并合并阶段发现，仅返回候选；成功行动提交后才成为有效版本。"""
@@ -73,8 +115,18 @@ class ResearchProgressService:
             key = item.finding_id or digest([task_id, ' '.join(item.text.split()).casefold()])[:24]
             if key in findings and not item.finding_id:
                 refs = list({ref['evidence_id']: ref for ref in findings[key]['sources'] + refs}.values())
-            findings[key] = {'finding_id': key, 'text': item.text, 'sources': refs,
-                             'verification_status': 'unreviewed'}
+            previous = findings.get(key)
+            # 现有发现可基于已取得原文继续分析；省略证据不能抹掉其来源身份。
+            if previous and item.finding_id and not item.evidence_ids:
+                refs = deepcopy(previous['sources'])
+            candidate = {'finding_id': key, 'text': item.text, 'sources': refs,
+                         'verification_status': 'unreviewed'}
+            changed = previous is None or any(candidate[k] != previous.get(k) for k in ('text', 'sources'))
+            if previous and not changed:
+                findings[key] = previous
+            else:
+                candidate['revision'] = (previous.get('revision', 1) if previous else 0) + 1
+                findings[key] = candidate
         value = {**old, 'findings': list(findings.values()),
                  'gaps': old['gaps'] if args.gaps is None else list(dict.fromkeys(args.gaps)),
                  'next_question': old.get('next_question') if args.next_question is None else args.next_question}
@@ -82,6 +134,10 @@ class ResearchProgressService:
         changed = any(value.get(k) != old.get(k) for k in ('findings', 'gaps', 'next_question'))
         value['revision'] = old['revision'] + int(changed)
         value['base_revision'] = old['revision']
+        findings_changed = continuation_fingerprint(value) != continuation_fingerprint(old)
+        plan_changed = any(value.get(k) != old.get(k) for k in ('gaps', 'next_question'))
+        value['progress_change'] = {'findings_changed': findings_changed, 'plan_changed': plan_changed,
+                                    'kind': 'finding_revision' if findings_changed else 'plan_only' if plan_changed else 'unchanged'}
         return value
 
     def commit_action(self, action: dict, owner: tuple | None) -> None:
@@ -108,20 +164,20 @@ class ResearchProgressService:
                 raise ValueError('progress changed before commit')
             for finding in progress['findings']:
                 for ref in finding['sources']:
-                    if self.source(task_id, ref['evidence_id'], tx) != ref:
+                    if not self.source_version_matches(task_id, ref, tx):
                         raise ValueError('progress source version changed before commit')
             tx.execute('UPDATE actions SET status=?,observation_json=? WHERE task_id=? AND sequence_no=?',
                        ('succeeded', dump(action['observation']), task_id, action['sequence']))
 
-    def cached_read(self, task_id: str, arguments: dict, attachments: dict) -> dict | None:
+    def cached_read(self, task_id: str, arguments: dict, attachments: dict, *, provider=None) -> dict | None:
         """同任务同参数且本地原文件和页版本未变时复用成功读取。"""
         from pathlib import Path
         if not self.db.task_has_input(task_id, arguments.get('target_ref')):
             return None
         from research_loop.services.papers import PaperService
         try:
-            scope = PaperService(self.db, None, None).user_scope(task_id)
-        except ValueError:
+            scope = PaperService(self.db, None, None).user_scope(task_id, target_ref=arguments.get('target_ref'))
+        except (ValueError, PermissionError):
             return None
         target = attachments.get(arguments.get('target_ref'), {})
         path = Path(target['local_path']) if target.get('local_path') else None
@@ -136,6 +192,16 @@ class ResearchProgressService:
             if not pages or (scope and any(p.get('page_number') is None or not scope.start <= p['page_number'] <= scope.end for p in pages)):
                 continue
             try:
+                contract = getattr(provider, 'parse_contract_matches', None)
+                if callable(contract):
+                    from research_loop.domain.evidence import Document
+                    document = self.db.fetchone('SELECT * FROM documents WHERE document_id=?', (pages[0]['document_id'],))
+                    if not document:
+                        continue
+                    document = {**document, 'total_pages': document['total_pages'] or None,
+                                'gaps': json.loads(document.get('gaps_json') or '[]')}
+                    if not contract(Document.model_validate(document)):
+                        continue
                 if any(self.source(task_id, page['evidence_id'])['source_sha256'] != source_hash or
                        self.db.get_page(page['evidence_id'])['text'] != page['text'] for page in pages):
                     continue
@@ -149,10 +215,11 @@ class ResearchProgressService:
         """返回保留成果和来源完整性；历史内容保留，失效来源不冒充当前可用。"""
         result = self.snapshot(task_id)
         for finding in result['findings']:
+            finding.setdefault('revision', 1)
             finding['source_integrity'] = 'intact'
             for ref in finding['sources']:
                 try:
-                    if self.source(task_id, ref['evidence_id']) != ref:
+                    if not self.source_version_matches(task_id, ref):
                         raise ValueError('source changed')
                 except (ValueError, PermissionError):
                     finding['source_integrity'] = 'stale'
@@ -212,7 +279,7 @@ def visible_evidence(messages: list[dict]) -> list[tuple]:
     output = []
     names = {c['id']: c['function']['name'] for m in messages for c in m.get('tool_calls', [])}
     for message in messages:
-        tool = message.get('role') == 'tool' and names.get(message.get('tool_call_id')) in {'read_paper', 'retrieve_evidence'}
+        tool = message.get('role') == 'tool' and names.get(message.get('tool_call_id')) in {'read_paper', 'acquire_paper_pdf', 'retrieve_evidence'}
         workspace = message.get('role') == 'user' and str(message.get('content', '')).startswith('{"archived_tool_groups"')
         if not (tool or workspace):
             continue
@@ -248,7 +315,7 @@ def evidence_progress(previous: list[dict], name: str, arguments: dict, observat
         return {'kind': 'no_evidence_returned', 'semantic_verdict': False}
     old, same_request = [], False
     for action in previous:
-        if action.get('status') == 'succeeded' and action['tool_name'] in {'read_paper', 'retrieve_evidence'}:
+        if action.get('status') == 'succeeded' and action['tool_name'] in {'read_paper', 'acquire_paper_pdf', 'retrieve_evidence'}:
             old.extend(evidence_spans((action.get('observation') or {}).get('data', {})))
             same_request |= action['tool_name'] == name and action['arguments'] == arguments
     new = sum(not _span_covered(row, old) for row in rows)
@@ -267,6 +334,20 @@ def progress_fingerprint(value: dict) -> str:
     return digest({k:value.get(k) for k in ('findings','gaps','next_question')})
 
 
+def continuation_fingerprint(value: dict) -> str:
+    """仅对实际发现内容与来源取指纹；计划文字和自增版本不构成研究增量。
+
+    Args:
+        value: 当前或历史进展，旧行动无需回写新标签。
+
+    Returns:
+        稳定内容指纹；既有证据上的有效分析修订也会改变指纹。
+    """
+    return digest([{'finding_id': finding.get('finding_id'), 'text': finding.get('text'),
+                    'sources': [{key: val for key, val in source.items() if key != 'paper_id'}
+                                for source in finding.get('sources', [])]} for finding in value.get('findings', [])])
+
+
 def readback_handoff(actions: list[dict]) -> dict | None:
     """重复读回既有材料且没有新阶段成果时，请求一次现有交接步骤。
 
@@ -278,22 +359,22 @@ def readback_handoff(actions: list[dict]) -> dict | None:
         不新增请求数/Token/页数额度。新材料或真实阶段变化会重新开放研究。
     """
     stage = None
-    seen_stages = set()
+    seen_stages = {continuation_fingerprint({})}
     since_stage = []
     for action in actions:
         if action.get('status') != 'succeeded':
-            if action['tool_name'] in {'read_paper','retrieve_evidence'}:
+            if action['tool_name'] in {'read_paper','acquire_paper_pdf','retrieve_evidence'}:
                 since_stage.append(action)
             continue
         data = (action.get('observation') or {}).get('data', {})
         value = data.get('research_progress')
         if action['tool_name'] == 'record_research_progress' and value:
-            signature = progress_fingerprint(value)
+            signature = continuation_fingerprint(value)
             if signature not in seen_stages and value.get('revision',0) > value.get('base_revision',0):
                 since_stage = []
                 stage = action.get('action_id')
             seen_stages.add(signature)
-        elif action['tool_name'] in {'read_paper','retrieve_evidence'}:
+        elif action['tool_name'] in {'read_paper','acquire_paper_pdf','retrieve_evidence'}:
             since_stage.append(action)
     if not since_stage:
         return None
@@ -306,6 +387,13 @@ def readback_handoff(actions: list[dict]) -> dict | None:
     batch, prior = since_stage[batch_start:], since_stage[:batch_start]
     # 同一响应有真实新增材料或可恢复取证错误时，先让模型看到整批结果。
     if any(a.get('status') != 'succeeded' or (a.get('observation') or {}).get('data', {}).get('research_increment', {}).get('kind') in {'new_evidence', 'action_failed'} for a in batch):
+        return None
+    # 新行动已按实际冻结请求记录缺失窗口，不能再用历史原始整页推翻它。
+    # 先让恢复的互补窗口进入下一次决策；只有已可见的重复才请求交接。
+    # 旧记录没有visibility_known时仍按原合同恢复，不回写历史标签。
+    if any((a.get('observation') or {}).get('data', {}).get('research_increment', {}).get('visibility_known')
+           and (a.get('observation') or {}).get('data', {}).get('research_increment', {}).get('kind') == 'context_readback'
+           for a in batch):
         return None
     for current in reversed(batch):
         data = (current.get('observation') or {}).get('data', {})

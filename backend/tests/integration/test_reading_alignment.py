@@ -125,7 +125,7 @@ class ReadingPublicationTests(unittest.TestCase):
         self.assertEqual(len(self.db.list_model_calls(tid)), 1)
 
     def test_optional_reviewer_does_not_rewrite_or_gate_saved_markdown(self):
-        task = TaskService(self.db).create(TaskCreate(prompt='保存笔记', save_policy='allow'))
+        task = TaskService(self.db, self.settings).create(TaskCreate(prompt='保存笔记', save_policy='allow'))
         notes = NoteService(self.db, self.files)
         text = '# 原始 Markdown\n\n原文未提供 GPU 驱动版本。'
         draft = notes.create(task.task_id, CreateNoteInput(title='test', markdown=text))
@@ -145,7 +145,7 @@ class ReadingPublicationTests(unittest.TestCase):
 
     def test_strict_publication_rejects_exhausted_summary(self):
         """三轮仍未完整时按 论文 严格入口拒绝发布，不要求 Reviewer 改变结论。"""
-        task = TaskService(self.db).create(TaskCreate(prompt='精读并保存', save_policy='allow'))
+        task = TaskService(self.db, self.settings).create(TaskCreate(prompt='精读并保存', save_policy='allow'))
         child = self.db.create_subtask(task.task_id, task.task_id, 0, 'read', {}, 'read')
         self.db.save_subtask_result(child['subtask_id'], 'partial', {'deep_reading_status':'partial'})
         notes = NoteService(self.db, self.files)
@@ -162,7 +162,7 @@ class ReadingPublicationTests(unittest.TestCase):
                 self.assertEqual(legacy_prompt, messages[0]['content'])
                 return self.raw('找到符合条件的论文：https://paper.example/title')
             def close(inner): pass
-        task = TaskService(self.db).create(TaskCreate(prompt='找一篇今年CVPR论文'))
+        task = TaskService(self.db, self.settings).create(TaskCreate(prompt='找一篇今年CVPR论文'))
         from research_loop.agents.graph import initial_state
         legacy_state = initial_state(task.task_id, '找一篇今年CVPR论文', 'deny')
         # 历史恢复测试必须冻结旧规则，不能临时从最新版提示词猜测旧措辞。
@@ -177,7 +177,7 @@ class ReadingPublicationTests(unittest.TestCase):
 
     def test_warnings_not_blocking_but_explicit_missing_requirement_is_partial(self):
         from research_loop.domain.tasks import TaskResult
-        task = TaskService(self.db).create(TaskCreate(prompt='查找论文'))
+        task = TaskService(self.db, self.settings).create(TaskCreate(prompt='查找论文'))
         executor = TaskExecutor(self.settings, self.db)
         result = TaskResult(answer_markdown='论文链接', gaps=['全文已覆盖', 'figure not interpreted'])
         self.assertEqual(executor._delivery_status(task.task_id, {'final_reason':'model finished'}, result).value, 'completed')

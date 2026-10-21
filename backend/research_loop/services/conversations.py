@@ -182,6 +182,8 @@ class ConversationService:
         create_policy(tx, tid, self.settings)
         mid = self.add_message(tx,cid,tid,'input:'+tid,'user',payload.prompt)
         tx.execute('INSERT INTO conversation_links(task_id,conversation_id,message_id) VALUES(?,?,?)', (tid,cid,mid))
+        from research_loop.services.interests import InterestService
+        InterestService(self.db).enable_tx(tx, tid)
         for attachment in attachments:
             tx.execute('INSERT INTO task_inputs(task_id,input_ref,granted_by,created_at) VALUES(?,?,?,?)', (tid,attachment['input_ref'],tid,now))
         if inherited_from:

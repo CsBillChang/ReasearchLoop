@@ -5,7 +5,7 @@ import signal
 import threading
 from research_loop.config import get_settings
 from research_loop.workers.executor import TaskExecutor
-from research_loop.services.runtime import application_lock, heartbeat
+from research_loop.services.runtime import application_lock, heartbeat, configure_runtime
 
 
 def main() -> None:
@@ -19,6 +19,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, lambda *_: stopping.set())
     signal.signal(signal.SIGINT, lambda *_: stopping.set())
     settings = get_settings()
+    configure_runtime(settings)
     with application_lock(settings.project_root):
         worker = TaskExecutor(settings)
         worker.db.fetchone('SELECT 1 AS ok')

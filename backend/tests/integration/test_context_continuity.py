@@ -103,13 +103,13 @@ class ContextContinuityTests(unittest.TestCase):
         self.db=Database(url);self.db.ensure_schema()
         self.conv=ConversationService(self.db,self.settings)
         self.cid=self.conv.create('P0接续',uuid4().hex)['conversation_id']
-        self.tasks=TaskService(self.db)
+        self.tasks=TaskService(self.db,self.settings)
         self.files=FileStore(self.settings.data_dir,self.settings.output_dir,self.root)
         self.memory=MemoryService(self.db)
         self.context=ContextService(self.db,self.memory,self.settings)
         self.tools=[s.schema() for s in memory_specs() if s.name=='read_memory']
 
-    def task(self, cid=None, client=None, prompt='比较附件两篇，不保存'):
+    def task(self, cid=None, client=None, prompt='比较附件两篇，不保存', settings=None):
         """提交固定材料与禁止保存，新一轮不继承文件权限。"""
         attachments=[]
         for name in ('A','B'):
@@ -121,13 +121,17 @@ class ContextContinuityTests(unittest.TestCase):
             response=client.post('/api/tasks',json=payload.model_dump(mode='json'))
             self.assertEqual(response.status_code,202,response.text)
             return response.json()['task_id']
-        return self.tasks.create(payload).task_id
+        return (TaskService(self.db,settings) if settings else self.tasks).create(payload).task_id
 
     def test_named_attachment_scope_through_read_service(self):
         """完整用户指令进入服务后读到指定页；工具参数不能扩张用户范围。"""
         tid=self.task(prompt='仅使用附件 Alpha 与 Beta 的物理第1至2页，比较语言信息，不保存。')
         papers=PaperService(self.db,None,LongPDF())
         attachments={a['input_ref']:a for a in json.loads(self.db.get_task(tid)['attachments_json'])}
+        # 分材料合同要求真实名称映射，不能由两个不相干input_ref猜Alpha/Beta。
+        attachments['input-A']['filename'] = 'Alpha.pdf'
+        attachments['input-B']['filename'] = 'Beta.pdf'
+        self.db.execute('UPDATE tasks SET attachments_json=? WHERE task_id=?', (dump(list(attachments.values())), tid))
         for ref in attachments:
             data=papers.read(tid,ref,start_page=1,page_count=2,attachments=attachments)
             self.assertEqual(data['returned_pages'],[1,2])
@@ -176,7 +180,10 @@ class ContextContinuityTests(unittest.TestCase):
         projected,metrics=self.context.prepare({'task_id':tid,'prompt':'比较'},messages,[])
         self.assertIn(messages[5],projected)
         self.assertNotIn('分页read_memory',dump(projected))
-        small=ContextService(self.db,self.memory,self.settings.model_copy(update={'context_window_tokens':12000,'context_output_reserve':1000,'context_safety_tokens':500}))
+        limits=self.settings.model_copy(update={'context_window_tokens':12000,'context_output_reserve':1000,'context_safety_tokens':500})
+        smaller_cid=self.conv.create('固定小容量会话',uuid4().hex)['conversation_id']
+        tid=self.task(cid=smaller_cid,settings=limits);messages,data=self.source_messages(tid)
+        small=ContextService(self.db,self.memory,limits)
         projected, metrics = small.prepare({'task_id':tid,'prompt':'比较'},messages,[])
         self.assertLessEqual(metrics['after'], metrics['input_capacity'])
         self.assertTrue(metrics['source_projected_calls'])
@@ -235,7 +242,8 @@ class ContextContinuityTests(unittest.TestCase):
 
     def test_draft_pending_calls_and_unavailable_ids(self):
         """只注入本任务真实稿件和授权页，跨任务ID不当作可用来源。"""
-        tid=self.task();messages,data=self.source_messages(tid)
+        small=self.settings.model_copy(update={'context_window_tokens':12000,'context_output_reserve':1000,'context_safety_tokens':500})
+        tid=self.task(settings=small);messages,data=self.source_messages(tid)
         draft=NoteService(self.db,self.files).create(tid,CreateNoteInput(title='已有稿',markdown='已有成果',evidence_ids=[]))
         state={'task_id':tid,'draft_id':draft.draft_id,'evidence_ids':['foreign-id'],
                'pending_tool_calls':[{'call_id':'pending','name':'finish_task','arguments':{'answer_markdown':'pending'}}]}
@@ -307,7 +315,8 @@ class ContextContinuityTests(unittest.TestCase):
 
     def test_capacity_exit_keeps_existing_draft(self):
         """没有安全读回且容量不足时，Worker零请求并保留原稿交付partial。"""
-        tid=self.task();messages,data=self.source_messages(tid)
+        small=self.settings.model_copy(update={'context_window_tokens':12000,'context_output_reserve':1000,'context_safety_tokens':500})
+        tid=self.task(settings=small);messages,data=self.source_messages(tid)
         draft=NoteService(self.db,self.files).create(tid,CreateNoteInput(title='已有稿',markdown='既有可读成果',evidence_ids=[]))
         state=initial_state(tid,self.db.get_task(tid)['prompt'],'deny')
         state.update(messages=messages,draft_id=draft.draft_id,coverage_required=True)

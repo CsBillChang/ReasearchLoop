@@ -60,7 +60,8 @@ def finish_spec(require_basis: bool = True) -> ToolSpec:
 
 
 def build_reviewer_graph(provider: Any, services: dict[str, Any], db: Any = None,
-                         checkpoint_store: Any = None, max_model_requests: int = 4):
+                         checkpoint_store: Any = None, max_model_requests: int | None = None,
+                         max_tool_actions: int | None = None):
     """Reviewer仅有原文读取/检索与核验结束；不能自行开启无限修订。"""
     from research_loop.tools.registry import ToolRegistry
     read_only = [spec for spec in __import__("research_loop.tools.papers", fromlist=["specs"]).specs()
@@ -69,8 +70,10 @@ def build_reviewer_graph(provider: Any, services: dict[str, Any], db: Any = None
     finish = (ToolSpec("finish_review", "Return one or more findings per selected item_id; cover every selected item. Each finding states a specific claim, reason and evidence. Repeated item_id for different issues is allowed. Do not edit or save.",
                        FinishResearchReview, _finish_research_review, ("reviewer",))
               if services.get("review_target") else finish_spec(services.get("review_basis_required", True)))
+    limits = {key: value for key, value in {'max_model_requests': max_model_requests,
+              'max_tool_actions': max_tool_actions}.items() if value is not None}
     return build_graph(provider, ToolRegistry(read_only + [finish]), services, db,
-                       max_model_requests, 20, 0, checkpoint_store)
+                       checkpoint_store=checkpoint_store, **limits)
 
 
 def reviewer_state(task_id: str, draft_id: str, content_hash: str, markdown: str,
@@ -92,7 +95,6 @@ def reviewer_state(task_id: str, draft_id: str, content_hash: str, markdown: str
         state["messages"][1]["content"] += "\n程序只读差异检查（不是历史语义意见）：" + json.dumps(artifact_checks, ensure_ascii=False)
     state["role"] = "reviewer"
     state["review_basis_required"] = True
-    state["max_model_requests"] = 4
     state["messages"][0]["content"] = (
         "你是独立 Reviewer，只核对当前稿中的原文支持性。可以 read_paper 补读已授权页，"
         "不能重写草稿、创建/保存笔记，也不能把引用统计当正文证据；结束时调用 finish_review。"
@@ -132,8 +134,6 @@ def research_reviewer_state(task_id: str, target: dict, questions: list[str], bu
     """仅传当前内容、中性问题和原始证据，历史判词留在控制层审计中。"""
     state = initial_state(task_id, '独立核验选定研究对象。', 'deny', {})
     state['role'] = 'reviewer'
-    # 与既有Reviewer相同的角色请求配置，不改变根任务预算。
-    state['max_model_requests'] = 4
     state['messages'][0]['content'] = (
         '你是独立Reviewer，负责选定研究对象的适用性、原文支持性和结论推理，不负责规划整个任务或生成新报告。'
         '输入是当前对象/版本、中性问题和已有依据。item_id标识对象，不是意见ID；每个选定对象至少一条判断。'

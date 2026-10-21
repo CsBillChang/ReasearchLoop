@@ -50,12 +50,21 @@ def execute_spec(spec: ToolSpec, arguments: dict[str, Any], context: ToolContext
     """
     if context.cancelled():
         return Observation(ok=False, kind="cancelled", message="task cancellation requested")
+    if isinstance(arguments, dict) and '_invalid_json' in arguments:
+        # 截断响应不可让全默认参数模型当作空的合法提交，也不能猜测补全。
+        return Observation(ok=False, kind='validation_error', retryable=True,
+            message='工具参数不是完整JSON，未执行；请根据已有成果重新提交合法参数或合理结束。',
+            data={'error_code': 'INVALID_TOOL_JSON', 'tool_executed': False, 'budget_counted': False})
     try:
         parsed = spec.args_model.model_validate(arguments)
     except ValidationError as exc:
         describe = getattr(spec.args_model, 'describe_validation_error', None)
         message = describe(exc, arguments) if callable(describe) else str(exc)
-        return Observation(ok=False, kind="validation_error", message=message, retryable=True)
+        # 个别外部工具需要标明“参数未通过、尚未发送”，避免被当成供应商失败。
+        # 未提供诊断扩展的参数模型保持原来的空data合同。
+        diagnostic = getattr(spec.args_model, 'validation_error_data', None)
+        data = diagnostic(exc, arguments) if callable(diagnostic) else {}
+        return Observation(ok=False, kind="validation_error", message=message, data=data, retryable=True)
     try:
         return spec.handler(parsed, context)
     except PermissionError as exc:

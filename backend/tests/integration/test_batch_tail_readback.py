@@ -157,7 +157,8 @@ class BatchTailReadbackTests(unittest.TestCase):
 
     def test_shared_tail_rejection_does_not_spend_local_slots(self):
         """共享额度先收尾时，批次全部回执配齐，仍给子任务保留交接。"""
-        self.db.execute('UPDATE task_budgets SET tool_used=42 WHERE root_task_id=?', (self.tid,))
+        # 本例没有真实运行子角色，按当前角色自己的一次交接及父交付保留两槽。
+        self.db.execute('UPDATE task_budgets SET tool_used=46 WHERE root_task_id=?', (self.tid,))
         registry = ProbeRegistry(); graph = build_graph(None, registry, {}, self.db)
         state = pending_batch(self.state(2), ['retrieve_evidence']*4)
         state.update(graph.nodes['execute_tools'].invoke(state))
@@ -166,7 +167,7 @@ class BatchTailReadbackTests(unittest.TestCase):
         pending_batch(state, ['finish_research'])
         state.update(graph.nodes['execute_tools'].invoke(state))
         self.assertTrue(state['structured_result'])
-        self.assertEqual(self.db.budget_summary(self.tid)['tool_used'], 43)
+        self.assertEqual(self.db.budget_summary(self.tid)['tool_used'], 47)
 
     def test_terminal_in_middle_blocks_later_calls_and_pairs_messages(self):
         """终结在批次中间时，后续调用不执行，仍记录明确拒绝回执。"""
@@ -264,13 +265,13 @@ class BatchTailReadbackTests(unittest.TestCase):
         """优先材料本身仍太长时明确展示容量缺口，不虚报全文可见。"""
         messages, data = self.sources()
         context = ContextService(self.db, None, self.settings)
-        projected, _ = context._project_sources({'task_id':self.tid,'prompt':'language'}, messages, [], 18000)
+        projected, _ = context._project_sources({'task_id':self.tid,'prompt':'language'}, messages, [], 9000)
         page = json.loads(projected[-1]['content'])['data']['pages'][0]
         self.assertTrue(page['context_excerpted']); self.assertIn('context_capacity_gap', page)
         self.assertEqual(len(page['context_spans']), 1)
         span = page['context_spans'][0]
         self.assertEqual(span['text'], data['pages'][0]['text'][span['start']:span['end']])
-        self.assertLessEqual(estimate({'messages':projected,'tools':[]}), 18000)
+        self.assertLessEqual(estimate({'messages':projected,'tools':[]}), 9000)
 
     def test_targeted_read_precedes_large_retrieval_hits(self):
         """补读页和最新命中竞争容量时，先压命中，仍完整呈现显式补读。"""
@@ -280,18 +281,21 @@ class BatchTailReadbackTests(unittest.TestCase):
                  'source_sha256': data['content_sha256']} for start in (0, 100)]
         messages += exchange('retrieve_evidence', {'query':'language embeddings'}, {'hits': hits}, 'hits')
         context = ContextService(self.db, None, self.settings)
-        projected, _ = context._project_sources({'task_id':self.tid,'prompt':'comparison'}, messages, [], 33000)
+        projected, _ = context._project_sources({'task_id':self.tid,'prompt':'comparison'}, messages, [], 17000)
         target = json.loads(next(m['content'] for m in projected if m.get('tool_call_id')=='targeted'))['data']['pages'][0]
         self.assertEqual(target['text'], page['text']); self.assertFalse(target['context_excerpted'])
         result = json.loads(projected[-1]['content'])['data']
         self.assertTrue(any({**result.get('hits_defaults', {}), **hit}['context_excerpted'] for hit in result['hits']))
-        self.assertLessEqual(estimate({'messages':projected,'tools':[]}), 33000)
+        self.assertLessEqual(estimate({'messages':projected,'tools':[]}), 17000)
 
     def test_necessary_state_over_capacity_stops_without_model(self):
         """连工具身份和必留消息都装不下时明确拒绝，不把截断伪装成功。"""
+        tiny = self.settings.model_copy(update={
+            'context_window_tokens':4096, 'context_output_reserve':3000, 'context_safety_tokens':500})
+        self.tid = TaskService(self.db, tiny).create(TaskCreate(
+            prompt='比较已有材料的有限容量案例', idempotency_key=uuid4().hex)).task_id
         messages, _ = self.sources()
-        context = ContextService(self.db, None, self.settings.model_copy(update={
-            'context_window_tokens':9500, 'context_output_reserve':1000, 'context_safety_tokens':500}))
+        context = ContextService(self.db, None, tiny)
         with self.assertRaisesRegex(ValueError, 'CONTEXT_CAPACITY'):
             context.prepare_researcher({'task_id':self.tid,'prompt':'comparison'}, messages, [])
         self.assertFalse(self.db.list_model_calls(self.tid))

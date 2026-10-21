@@ -81,11 +81,18 @@ class ComponentTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         config = Settings(project_root=root, database_url='sqlite:///'+str(root/'test.db'),
-            data_dir=root/'data', output_dir=root/'notes', retrieval_enabled=False)
+            data_dir=root/'data', output_dir=root/'notes', retrieval_enabled=False,
+            max_model_requests=11,max_tool_actions=30,reserve_model_requests=0)
         db = Database(config.database_url); db.ensure_schema()
         case, material = fixture(kind)
         provider = ScriptedProvider(kind, **options)
         result = execute_case(db, config, case, material, lambda settings: provider)
+        # 组件固定11/30/0在新根创建时冻结，JSON与数据库额度必须一致。
+        tid=result['task']['task_id']
+        db.assert_budget_policy(tid,config)
+        frozen=db.execution_policy(tid)
+        self.assertEqual((frozen['max_model_requests'],frozen['max_tool_actions'],frozen['reserve_model_requests']),(11,30,0))
+        self.assertEqual(frozen['mode'],'enforce')
         self.assertFalse(list(root.rglob('*.md')))
         self.assertTrue(json.loads(result['task']['result_json'])['answer_markdown'])
         self.assertEqual(db.fetchone("SELECT COUNT(*) AS n FROM tasks WHERE status IN ('running','queued')")['n'], 0)

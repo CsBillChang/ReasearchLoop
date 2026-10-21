@@ -10,6 +10,7 @@ from research_loop.providers.deepseek import DeepSeekProvider, ProviderResponseE
 from research_loop.storage.memory import Transaction, check_owner, digest, dump
 from research_loop.storage.mysql import _now
 from research_loop.storage.token_budget import TokenBudgetStore, estimate_details
+from research_loop.providers.token_counting import validate_frozen_request
 
 
 def build_visual_graph(node, task_id: str, item: VisualInput, *, worker_id: str, lease_token: str):
@@ -63,7 +64,11 @@ class VisualReadingNode:
                 return old
             task = tx.one('SELECT * FROM tasks WHERE task_id=?', (task_id,))
             root = task['root_task_id'] or task_id
-            used = tx.execute('UPDATE task_budgets SET model_used=model_used+1 WHERE root_task_id=? AND model_used < model_limit-reserve_tail', (root,)).rowcount
+            frozen = tx.one('SELECT policy_json FROM token_counting_policies WHERE root_task_id=?', (root,))
+            policy = json.loads(frozen['policy_json']) if frozen else {}
+            condition = ('1=1' if policy.get('execution', {}).get('mode') == 'observe'
+                         else 'model_used < model_limit-reserve_tail')
+            used = tx.execute('UPDATE task_budgets SET model_used=model_used+1 WHERE root_task_id=? AND '+condition, (root,)).rowcount
             if used != 1:
                 raise ValueError('shared model budget unavailable')
             tx.execute('INSERT INTO model_calls(call_id,task_id,sequence_no,status,request_json,usage_json,request_hash,sent_state,attempt_no,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
@@ -138,6 +143,12 @@ class VisualReadingNode:
                 raise ValueError('visual provider differs from frozen config')
             if self.provider.client.timeout.read != self.config.timeout_seconds:
                 raise ValueError('visual provider timeout differs from frozen config')
+            # 固定视觉输出合同保持8192，但仍须进入根任务单请求容量与计量准入。
+            # 成功/未知旧收据已在上方处理；不能因后来容量变化重发旧请求。
+            frozen_estimate = validate_frozen_request(request, tokens.counting_policy(root),
+                self.provider.model, allow_model_override=True)
+            if frozen_estimate:
+                estimate = frozen_estimate
             self._guard(task_id, worker_id, lease_token)
             self._intent(task_id, worker_id, lease_token, request)
             try:

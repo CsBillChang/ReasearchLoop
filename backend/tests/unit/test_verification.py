@@ -105,7 +105,11 @@ class VerificationTests(unittest.TestCase):
     def test_jina_unknown_pages_not_full_pdf_coverage(self):
         """无页码正文保留 null，不将未知映射写成全页覆盖。"""
         doc = self.doc.model_copy(update={'total_pages':None}); self.db.save_document(doc.model_dump())
-        scope = self.papers.evidence_bundle(self.tid,[self.ref])[0]['read_scope']
+        # 无物理页文本必须同时去掉旧PDF页号，存储层以0表达未知。
+        self.db.execute('UPDATE page_evidence SET page_number=0 WHERE evidence_id=?', (self.ref,))
+        page = self.papers.evidence_bundle(self.tid,[self.ref])[0]
+        self.assertIsNone(page['page_number'])
+        scope = page['read_scope']
         self.assertIsNone(scope['all_physical_pages_included'])
         self.assertEqual(scope['locator_kind'],'document_text')
 

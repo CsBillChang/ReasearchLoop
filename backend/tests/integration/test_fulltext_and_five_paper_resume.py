@@ -35,17 +35,20 @@ class CachedPDF:
         self.reader = PDFProvider(FileStore(root/'cache', root/'out', root))
 
     def ingest(self, source, paper_id):
+        """构造现有PyMuPDF解析合同的合成快照，保留原长文与页范围测试。"""
         digest = hashlib.sha256(paper_id.encode()).hexdigest()
-        doc_id = 'doc-' + digest[:20]
+        config_hash = hashlib.sha256(json.dumps(self.reader.parser_config, sort_keys=True).encode()).hexdigest()
+        cache_key = hashlib.sha256(f'{digest}:pymupdf:{self.reader.parser_version}:{config_hash}'.encode()).hexdigest()
+        doc_id = 'doc:' + cache_key[:32]
         pages = [PageEvidence(
             evidence_id=f'evidence:{paper_id}:{n}', document_id=doc_id, page_number=n,
             text=f'{paper_id} 第 {n} 页。' + ('完整正文' * 6000 if n == 1 else '语言特征证据。') + f'末尾标记-{n}',
             parsed_markdown=f'# 物理页 {n}\n{paper_id} language evidence; LAST-{n}',
         ).model_dump() for n in range(1, 26)]
-        cache = self.root/(digest + '.json')
+        cache = self.reader.file_store.cache_parse_path(cache_key)
         cache.write_text(json.dumps({'total_pages':25, 'pages':pages}))
         return Document(document_id=doc_id, paper_id=paper_id, content_sha256=digest,
-                        parser_name='fixture', parser_version='1', config_sha256='a'*64,
+                        parser_name='pymupdf', parser_version=self.reader.parser_version, config_sha256=config_hash,
                         total_pages=25, cache_path=str(cache))
 
     def pages(self, document, start, count):
@@ -71,7 +74,7 @@ class FulltextBoundaryTests(unittest.TestCase):
 
     def context(self, prompt, scope=None):
         """创建持久根任务，避免直接用模型 scope 伪造用户授权。"""
-        task = TaskService(self.db).create(TaskCreate(prompt=prompt))
+        task = TaskService(self.db).create(TaskCreate(prompt=prompt, attachments=[{'input_ref': 'pdf', 'local_path': 'fixture.pdf'}]))
         return ToolContext(task_id=task.task_id, save_policy=SavePolicy.deny,
                            attachments={'pdf':{'local_path':'fixture.pdf'}},
                            services={'papers':self.papers, 'scope':scope or {}})
@@ -107,6 +110,9 @@ class FulltextBoundaryTests(unittest.TestCase):
                 else:
                     child = self.db.create_subtask(root.task_id,root.task_id,1 if role=='researcher' else 2,
                                                   'read paper',{},role)
+                    self.db.grant_input(child['subtask_id'], 'pdf', root.task_id)
+                    self.db.execute('UPDATE tasks SET attachments_json=? WHERE task_id=?',
+                        (self.db.get_task(root.task_id)['attachments_json'], child['subtask_id']))
                     ctx = ToolContext(task_id=child['subtask_id'],save_policy=SavePolicy.deny,
                                       role=role,attachments=root.attachments,services=root.services)
                 default = self.registry.execute('read_paper',{'target_ref':'pdf'},ctx)

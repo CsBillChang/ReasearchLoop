@@ -84,6 +84,8 @@ class ReviewHandoffProjectionTests(unittest.TestCase):
     def setUp(self):
         """复用合成材料和隔离数据库入口，不触及生产文件。"""
         base.ResearchReflectionTests.setUp(self)
+        # Token估算小于旧字节估算，显式冻结较早触发投影的测试阈值。
+        self.settings=self.settings.model_copy(update={'context_compress_ratio':0.1})
 
     def run_projection_case(self, kind, without_readback=False, recovery=False):
         """通过当前API→Worker完成大意见交接，并逐字读回完整原件。"""

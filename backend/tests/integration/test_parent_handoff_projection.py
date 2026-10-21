@@ -169,6 +169,8 @@ class LargeHandoffTests(unittest.TestCase):
                         restored={c['call_id']:c for t in db.fetchall('SELECT task_id FROM tasks WHERE root_task_id=?',(tid,)) for c in db.list_model_calls(t['task_id'])}
                         self.assertEqual(frozen,restored)
                     if followup:
+                        # 追问根创建前冻结测试压缩阈值；Worker不能回写既有策略。
+                        settings=settings.model_copy(update={'context_compress_ratio':0.01})
                         prompt = '沿用 input-A 和 input-B 比较两个机制，不保存。' if large_history else '基于上次记录解释 input-A 的语言机制；只读取物理第1页，不保存。'
                         created=client.post('/api/tasks',json={'conversation_id':cid,'prompt':prompt,
                             'save_policy':'deny','idempotency_key':uuid4().hex})

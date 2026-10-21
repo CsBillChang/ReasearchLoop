@@ -76,12 +76,12 @@ class PageReferenceReadingTests(unittest.TestCase):
         """正常取消未执行夹具，收据保持为空，不留下待执行任务。"""
         for tid in self.roots:TaskService(self.db).cancel(tid)
 
-    def create(self, prompt):
+    def create(self, prompt, filenames=None):
         """由正常HTTP路由固定根用户原话与禁止保存权限。"""
         attachments=[]
         for name in ('A','B'):
             path=self.root/(name+'.pdf');path.write_bytes(b'%PDF-fixture')
-            attachments.append({'input_ref':'input-'+name,'paper_id':'paper-'+uuid4().hex,'local_path':str(path)})
+            attachments.append({'input_ref':'input-'+name,'paper_id':'paper-'+uuid4().hex,'local_path':str(path), 'filename': (filenames or {}).get(name)})
         response=self.api.post('/api/tasks',json={'prompt':prompt,'save_policy':'deny','attachments':attachments,'idempotency_key':uuid4().hex})
         self.assertEqual(response.status_code,202,response.text)
         tid=response.json()['task_id'];self.roots.append(tid)
@@ -94,6 +94,10 @@ class PageReferenceReadingTests(unittest.TestCase):
             child=self.db.create_subtask(tid,tid,1 if role=='researcher' else 2,'不影响用户阅读范围的合成子目标',{},uuid4().hex)
             current=child['subtask_id'];self.db.update_task(current,role=role)
         attachments={a['input_ref']:a for a in json.loads(self.db.get_task(tid)['attachments_json'])}
+        if current != tid:
+            for ref in attachments:
+                self.db.grant_input(current, ref, tid)
+            self.db.execute('UPDATE tasks SET attachments_json=? WHERE task_id=?', (json.dumps(list(attachments.values())), current))
         return ToolContext(task_id=current,root_task_id=tid,role=role,save_policy=SavePolicy.deny,attachments=attachments,
                            services={'papers':self.papers,'scope':{'input_refs':['input-A','input-B']}})
 
@@ -131,7 +135,7 @@ class PageReferenceReadingTests(unittest.TestCase):
     def test_unclear_and_conflicting_ranges_do_not_grant_fulltext(self):
         """不明确、冲突、离散范围仍在获取正文前阻断。"""
         for text in ('只看某几页，并注明原文页码。','只读第1页和第3页，并注明原文页码。',
-                     'A仅看第1页，B仅看第2页，并注明原文页码。'):
+                     'A仅看第1页，A仅看第2页，并注明原文页码。'):
             tid=self.create(text);ctx=self.context(tid,'researcher')
             value=self.registry.execute('read_paper',{'target_ref':'input-A'},ctx)
             self.assertFalse(value.ok);self.assertIn('page range',value.message)
@@ -172,7 +176,7 @@ class PageReferenceReadingTests(unittest.TestCase):
         """完整原指令经API/工具/服务读取第4页，三角色均不能扩大范围。"""
         pdf = NamedPageScopePDF()
         self.papers = PaperService(self.db, None, pdf)
-        tid = self.create(ORIGINAL_TEXT_PROMPT)
+        tid = self.create(ORIGINAL_TEXT_PROMPT, {'A': 'LaVer.pdf'})
         for role in ('supervisor', 'researcher', 'reviewer'):
             ctx = self.context(tid, role)
             with self.subTest(role=role):

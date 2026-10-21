@@ -294,7 +294,7 @@ class ReflectionService:
         for item in target['current']['items']:
             for ref in item.get('sources', []):
                 from research_loop.services.research_progress import ResearchProgressService
-                if ResearchProgressService(self.db).source(task_id, ref['evidence_id']) != ref:
+                if not ResearchProgressService(self.db).source_version_matches(task_id, ref):
                     raise ValueError('research source version changed; review current evidence again')
         if target['attempts']:
             last = target['attempts'][-1]

@@ -5,6 +5,7 @@ import copy
 import json
 
 from research_loop.domain.context import excerpt
+from research_loop.providers.token_counting import estimate
 from research_loop.storage.memory import dump
 
 
@@ -59,7 +60,7 @@ def project_workspace(messages, context, tools, archive, archive_id, query, capa
     def size():
         """统一计入工具、系统头和所有消息，不分别用各模块的局部长度判断。"""
         whole = output[:1] + [header(current)] + output[1:]
-        return len(dump({'messages': whole, 'tools': tools}).encode('utf-8'))
+        return estimate({'messages': whole, 'tools': tools})
 
     def pointer(path):
         """读回参数只包含现有 HistoryRead 合同字段；长度信息单独存放。"""
@@ -73,10 +74,29 @@ def project_workspace(messages, context, tools, archive, archive_id, query, capa
     decoded = []
     for i, message in enumerate(output):
         call_id = message.get('tool_call_id')
-        if message.get('role') != 'tool' or calls.get(call_id) != 'delegate_research':
+        tool = calls.get(call_id)
+        if message.get('role') != 'tool' or tool not in {'delegate_research', 'search_papers'}:
             continue
-        value = json.loads(message['content'])
-        if not value.get('ok'):
+        try:
+            value = json.loads(message['content'])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(value, dict) or not value.get('ok'):
+            continue
+        if tool == 'search_papers':
+            if call_id in archive['tool_results']:
+                base = ['tool_results', call_id, 'data']
+                # 身份、标题、日期和链接始终可见；先外置RPC诊断，再摘录长摘要。
+                for j, source in enumerate(value.get('data', {}).get('source_results', [])):
+                    if source.get('request'):
+                        candidates.append((source, 'request', base + ['source_results', j, 'request']))
+                for j, paper in enumerate(value.get('data', {}).get('candidates', [])):
+                    if paper.get('metadata'):
+                        candidates.append((paper, 'metadata', base + ['candidates', j, 'metadata']))
+                for j, paper in enumerate(value.get('data', {}).get('candidates', [])):
+                    if paper.get('abstract'):
+                        candidates.append((paper, 'abstract', base + ['candidates', j, 'abstract']))
+            decoded.append((i, value))
             continue
         for j, child in enumerate(value.get('data', {}).get('subtasks', [])):
             pair = children.get(child.get('subtask_id'))
@@ -126,7 +146,7 @@ def project_workspace(messages, context, tools, archive, archive_id, query, capa
         detail = {'readback': readback, 'value_chars': chars, 'original_path': path,
                   'notice': '仅保留相关摘录；按 readback 分页读取累计 value_chars 字符即为完整原值。摘录不是核验通过或原文替代。'}
         replacement = preview if isinstance(value, str) else {'preview': preview, 'total_items': len(value), 'context_excerpted': True}
-        if len(dump(replacement)) + len(dump(detail)) >= len(dump(value)):
+        if estimate(replacement) + estimate(detail) >= estimate(value):
             continue
         owner[key] = replacement
         owner[key + '_context_archive'] = detail

@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from research_loop.domain.tasks import Observation, SubtaskSpec, ResearchBrief, FinishTaskInput
 from research_loop.tools.base import ToolContext, ToolSpec
+from research_loop.services.coverage import CoverageEligibilityError
 from research_loop.domain.research import EvidenceMatrixInput
 from research_loop.domain.reflection import ResearchReviewInput, ResearchRevisionInput, CloseResearchIssueInput
 
@@ -16,9 +17,9 @@ class ClarificationArgs(BaseModel):
     suggested_values: list[str] = Field(default_factory=lambda: ["5"])
 
 
-# 分派输入结构；当前执行器每批只接受最多两个子任务。
+# 分派清单独立于执行器资源槽位，全部合法子任务先持久化再排队。
 class DelegateResearchArgs(BaseModel):
-    subtasks: list[SubtaskSpec] = Field(min_length=1, max_length=2)
+    subtasks: list[SubtaskSpec] = Field(min_length=1)
 
 
 # 审校目标必须是当前任务已经创建的草稿和准确 hash。
@@ -49,9 +50,7 @@ def _clarify(args: ClarificationArgs, ctx: ToolContext) -> Observation:
 
 
 def _delegate(args: DelegateResearchArgs, ctx: ToolContext) -> Observation:
-    """每批最多两个 Researcher，执行边界与参数schema保持同一约束。"""
-    if len(args.subtasks) > 2:
-        return Observation(ok=False, kind="validation_error", message="at most two researchers run in one batch", retryable=False)
+    """校验整批范围后交给队列，物理并发由执行器资源配置控制。"""
     if "coverage" in ctx.services:
         ctx.services["coverage"].validate_delegation(ctx.task_id, [s.model_dump() for s in args.subtasks])
     result = ctx.services["delegation"](ctx.task_id, [item.model_dump(mode="json") for item in args.subtasks])
@@ -104,7 +103,17 @@ def _plan(args: ResearchBrief, ctx: ToolContext) -> Observation:
 
 def _finish_task(args: FinishTaskInput, ctx: ToolContext) -> Observation:
     """核对目标覆盖后结束根任务，不触发额外Reviewer或文件写入。"""
-    result = ctx.services["coverage"].finish(ctx.task_id, args)
+    try:
+        identity = ctx.services.get('finish_action_identity')
+        if identity is None:
+            result = ctx.services["coverage"].finish(ctx.task_id, args)
+        else:
+            result = ctx.services["coverage"].finish(ctx.task_id, args, action_identity=identity)
+    except CoverageEligibilityError as exc:
+        data = {'coverage_blocker': exc.diagnostic}
+        if exc.candidate is not None:
+            data['finish_candidate'] = exc.candidate
+        return Observation(ok=False, kind='execution_error', retryable=False, data=data, message=str(exc))
     return Observation(ok=True, kind="success", data={"delivery": result}, message="task delivery recorded")
 
 
@@ -123,10 +132,10 @@ def specs() -> list[ToolSpec]:
         ToolSpec('revise_research', 'Patch only unresolved selected items using current target_id/content_hash/review_id and exact old_text/new_text. Preserve all other text and source records; re-review current version independently. Not a whole-answer rewrite.', ResearchRevisionInput, _revise_research, ('supervisor',)),
         ToolSpec('close_research_issue', 'End an unresolved review with a concrete reason: exclude unsuitable candidates, disclose a limitation, or end after no useful path. Does not approve content or authorize save. Use current target_id/content_hash/review_id.', CloseResearchIssueInput, _close_research, ('supervisor',)),
         ToolSpec('record_evidence_matrix', 'Optional structured comparison artifact, after reading sources. Each document row has question/method/dataset/metric/limitation. Quote exact page text (whitespace may differ); never infer missing numbers or universal experimental fairness. missing has empty value/references and a scope-limited reason. Metric needs explicit conditions; uncertain when conditions are unknown. Use current base_matrix_hash for changes, null initially; use returned matrix_hash in finish_task. No file save or automatic Reviewer.', EvidenceMatrixInput, _matrix, ('supervisor',)),
-        ToolSpec("set_research_plan", "Record user requirements before delegating. After a user clarification, update the provisional plan to the answer and preserve unrelated requirements. Without a new user answer, may add goals but not weaken constraints. deep_reading_requested is true only for a requested deep-reading note.", ResearchBrief, _plan, ("supervisor",)),
-        ToolSpec("finish_task", "Deliver retained work with goals satisfied or explicitly unresolved; unresolved reviews may be disclosed. With reflection_target_id/hash omit answer_markdown: the server loads the exact current body. Put handling notes in processing_summary, not appended to the body. End without extra model calls.", FinishTaskInput, _finish_task, ("supervisor",)),
-        ToolSpec("report_task_gap", "Record an unavailable requirement without blocking achievable work. Disclose it in the final answer.", ReportGapArgs, _gap, ("supervisor",)),
+        ToolSpec("set_research_plan", "Put actual user hard sources/date constraints on the corresponding origin=user goals with verbatim source_quote; top-level sources/date are changeable retrieval preferences in newly created plans. Keep root input_refs/count/save constraints. Unmarked historical plans preserve their prior hard scope until actual user clarification. Separate user deliverables (origin=user with verbatim source_quote) from optional self-devised research steps (origin=strategy); legacy only preserves old unclassified goals. Preserve user constraints without a real resumed answer. Adjust strategy goals with change_reason, or retain them as status=withdrawn; never delete their IDs. User clarification may redirect requirements. deep_reading_requested only for a requested deep-reading note.", ResearchBrief, _plan, ("supervisor",)),
+        ToolSpec("finish_task", "Deliver retained work and report every active goal as satisfied or unresolved. Withdrawn strategy goals need no delivery entry; unresolved strategy steps are recorded separately from unmet user requirements. With reflection_target_id/hash omit answer_markdown: the server loads the exact current body. Put handling notes in processing_summary. End without extra model calls.", FinishTaskInput, _finish_task, ("supervisor",)),
+        ToolSpec("report_task_gap", "Record an unavailable user requirement without blocking achievable work, then disclose it. Optional internal strategy steps use plan status/change_reason instead.", ReportGapArgs, _gap, ("supervisor",)),
         ToolSpec("request_clarification", "Persist one blocking question and release the worker.", ClarificationArgs, _clarify, ("supervisor",)),
-        ToolSpec("delegate_research", "Persist and run up to two independent researcher subtasks.", DelegateResearchArgs, _delegate, ("supervisor",)),
+        ToolSpec("delegate_research", "Persist all independent researcher subtasks and run them through the configured concurrency queue.", DelegateResearchArgs, _delegate, ("supervisor",)),
         ToolSpec("review_note", "Independent review when needed by the task or a specific doubt. Record reason. After directed new evidence or revise_note, re-review independently; obey reflection stop_reason. Not a universal publication gate.", ReviewNoteArgs, _review, ("supervisor",)),
     ]
