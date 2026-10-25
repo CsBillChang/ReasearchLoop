@@ -385,6 +385,13 @@ class ContextService:
                 # 完整来源保留在画像中；模型只需计数与主题，不按每轮重复注入历史引句。
                 preference['source'] = {key: value for key, value in preference['source'].items() if key != 'evidence'}
         context={'conversation_id':link['conversation_id'],'preferences':preferences,'messages':history,'recent_research':identities,'related_history':related}
+        from research_loop.services.continuation_memory import ContinuationMemoryService
+        continuation = ContinuationMemoryService(self.db)
+        if continuation.enabled(task_id):
+            seeds = [row['task_id'] for row in identities]
+            seeds.extend(row['source_id'] for row in related)
+            context['continuation_memory'] = continuation.context(
+                task_id, seeds, max_tokens=max(512, self.settings.memory_history_tokens // 3))
         cap=self.settings.memory_history_tokens
         for row in history[:-recent]:
             if estimate(context)<=cap:
@@ -467,6 +474,9 @@ class ContextService:
             context['current_task']['current_review_answer'] = review_answer
         context['available_tools'] = sorted(accessible)
         rules = RULES
+        if (context.get('continuation_memory') or {}).get('enabled'):
+            from research_loop.services.continuation_memory import INSTRUCTION
+            rules += INSTRUCTION
         if 'finish_task' in accessible:
             from research_loop.services.interests import InterestService
             context['interest_inference'] = InterestService(self.db).context(state['task_id'])

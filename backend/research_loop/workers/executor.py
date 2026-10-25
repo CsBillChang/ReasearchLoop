@@ -89,7 +89,8 @@ class TaskExecutor:
     def __init__(self, settings: Settings, db: Database | None = None,
                  provider_factory: Callable[[Settings], Any] | None = None,
                  pdf_factory: Callable[[Settings, FileStore], Any] | None = None,
-                 *, supervisor_tools: set[str] | None = None):
+                 *, supervisor_tools: set[str] | None = None,
+                 continuation_memory: bool = False):
         """注入依赖；隔离验收可收缩根角色工具，日常入口缺省不变。
 
         Args:
@@ -99,6 +100,7 @@ class TaskExecutor:
             pdf_factory: 原文适配器工厂。
             supervisor_tools: 根角色可见且可执行的工具名集合；不增加权限，
                 使用者负责在验收清单中冻结。None不收缩日常工具。
+            continuation_memory: 仅为尚未执行的新会话根启用接续记忆实验。
         """
         self.settings = settings
         self.db = db or Database(settings.database_url)
@@ -106,6 +108,7 @@ class TaskExecutor:
         self.provider_factory = provider_factory or self._default_provider
         self.pdf_factory = pdf_factory
         self.supervisor_tools = frozenset(supervisor_tools) if supervisor_tools is not None else None
+        self.continuation_memory = continuation_memory
         from research_loop.services.retrieval import RetrievalRuntime
         self.retrieval = RetrievalRuntime(self.db, settings)
 
@@ -553,6 +556,16 @@ class TaskExecutor:
         except Exception:
             import logging
             logging.exception('兴趣投影暂未完成；研究结果保留，后续Worker仅重试数据库投影')
+        from research_loop.services.continuation_memory import ContinuationMemoryService
+        continuation = ContinuationMemoryService(self.db)
+        try:
+            if task_id is not None:
+                continuation.apply(task_id)
+            else:
+                continuation.recover_pending()
+        except Exception:
+            import logging
+            logging.exception('接续摘要投影暂未完成；研究结果保留，恢复只补数据库投影')
 
     def execute(self, task_id: str, worker_id: str = "direct") -> TaskResult:
         """领取或恢复指定任务，运行角色图并提交持久结果。
@@ -571,6 +584,11 @@ class TaskExecutor:
         task = self.db.get_task(task_id)
         if not task:
             raise KeyError("task not found")
+        from research_loop.services.continuation_memory import ContinuationMemoryService
+        continuation = ContinuationMemoryService(self.db)
+        if self.continuation_memory:
+            continuation.enable_new_task(task_id)
+        continuation_enabled = continuation.enabled(task_id)
         service = TaskService(self.db)
         # 网页取消queued任务可能已原子结算；Worker收到旧领取请求只读回，不再运行。
         if task["status"] == "cancelled" and task.get("result_json"):
@@ -620,11 +638,11 @@ class TaskExecutor:
         supervisor_papers = paper_specs(web_search_enabled=settings.web_search_enabled,
                                        web_fetch_enabled=settings.web_fetch_enabled)
         notes = NoteService(self.db, files)
-        registry = ToolRegistry(supervisor_papers + note_specs() + delegation_specs(), allowed_names=self.supervisor_tools)
+        registry = ToolRegistry(supervisor_papers + note_specs() + delegation_specs(continuation_memory=continuation_enabled), allowed_names=self.supervisor_tools)
         conversation = self.db.fetchone('SELECT conversation_id FROM conversation_links WHERE task_id=?',(task_id,))
         if conversation:
             from research_loop.tools.memory import specs as memory_specs
-            registry = ToolRegistry(supervisor_papers + note_specs() + delegation_specs() + memory_specs(), allowed_names=self.supervisor_tools)
+            registry = ToolRegistry(supervisor_papers + note_specs() + delegation_specs(continuation_memory=continuation_enabled) + memory_specs(), allowed_names=self.supervisor_tools)
         provider = None
         try:
             provider = self.provider_factory(settings)
@@ -1012,6 +1030,10 @@ class TaskExecutor:
         task = self.db.claim_task(worker_id)
         if not task:
             return None
+        if self.continuation_memory:
+            from research_loop.services.continuation_memory import ContinuationMemoryService
+            ContinuationMemoryService(self.db).enable_new_task(
+                task['task_id'], owner=(worker_id, task['lease_token']))
         self.execute(task["task_id"], worker_id)
         return task["task_id"]
 
