@@ -17,8 +17,12 @@ python -m scripts.prepare_reranker_thread_comparison \
   --source-freeze /absolute/input/freeze.json \
   --source-results /absolute/input/execution \
   --source-manifest /absolute/input/output-manifest.json \
+  --expected-source-freeze-sha256 <previously-frozen-sha256> \
+  --expected-source-manifest-sha256 <previously-frozen-sha256> \
   --output /absolute/new-empty-output
 ```
+
+两个expected SHA必须来自事前独立保存的原件记录，不能现场对待验证文件自算后回填；准备器在解析冻结与建立读取白名单之前验证锚点。历史raw会整体解析，但只使用身份字段，旧分数/排名不参与输入准备。
 
 输出目录必须预先创建、为空且是绝对真实路径；不可覆盖或复用。准备器使用进程内守卫拒绝网络、SQL、子进程和输出外写入；这不是OS级沙箱。不得读取.env、启动业务服务、写默认依赖环境或自动下载模型。
 
