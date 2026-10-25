@@ -156,6 +156,9 @@ class ChallengeFallbackTests(unittest.TestCase):
                                              WebFetchProvider("fixture", client=self.client))
         self.candidate = PaperCandidate(paper_id="synthetic", title=TITLE, authors=["Synthetic Author"],
                                         source="openreview", paper_url=ORIGINAL)
+        # 对齐检索返回候选的持久化合同，只授予本例的确切论文。
+        self.db.save_paper(self.candidate.paper_id, self.candidate.model_dump(mode="json"))
+        self.db.grant_paper(self.task, self.candidate.paper_id, self.task)
 
     def respond(self, request):
         """只模拟付费组件接口，不发送任何网络请求。"""

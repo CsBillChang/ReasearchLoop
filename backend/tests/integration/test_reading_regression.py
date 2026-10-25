@@ -60,6 +60,8 @@ class ReadingRegressionTests(unittest.TestCase):
         pdf = self.provider(handler)
         tid = TaskService(self.db, self.settings).create(TaskCreate(prompt='阅读全文')).task_id
         papers = PaperService(self.db, None, pdf)
+        # Jina与缓存仍需当前附件授权，HTTP替身不代替任务权限。
+        self.db.grant_input(tid, 'attached', tid)
         args = dict(task_id=tid, target_ref='attached', attachments={'attached':{'url':'https://paper.example/main.pdf'}})
         first = papers.read(**args)
         second = papers.read(**args)

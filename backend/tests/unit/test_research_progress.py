@@ -120,17 +120,24 @@ class ResearchProgressTests(unittest.TestCase):
 
     def test_local_pdf_read_cache_checks_bytes_and_current_authorization(self):
         """同版本本地文件可复用；改文件或撤授权后必须重新走读取服务。"""
-        import hashlib
-        content=('%PDF-local-test-'+uuid4().hex).encode()
+        import pymupdf
+        from research_loop.providers.pdf import PDFProvider
+        from research_loop.storage.files import FileStore
+
+        # 文档hash、页正文和读取绑定均由正式解析路径生成，不能手工改写权威hash。
+        with pymupdf.open() as document:
+            document.new_page().insert_text((40, 40), 'Synthetic local cache evidence: language features.\n' * 40)
+            content=document.tobytes()
         pdf=self.root/'local.pdf';pdf.write_bytes(content)
-        page=self.db.get_page(self.eid)
-        self.db.execute('UPDATE documents SET content_sha256=? WHERE document_id=?', (hashlib.sha256(pdf.read_bytes()).hexdigest(),page['document_id']))
         self.db.grant_input(self.tid,'input',self.tid)
+        attachments={'input':{'local_path':str(pdf)}}
+        provider=PDFProvider(FileStore(self.root/'data', self.root/'notes', self.root))
+        self.addCleanup(provider.close)
+        data=PaperService(self.db,None,provider).read(self.tid,'input',attachments=attachments)
         args={'target_ref':'input'}
         action=ActionRecord(task_id=self.tid,sequence=1,tool_name='read_paper',arguments=args,status='succeeded',
-            observation={'ok':True,'kind':'success','data':{'pages':[page]}})
+            observation={'ok':True,'kind':'success','data':data})
         self.db.save_action(action.model_dump(mode='json'))
-        attachments={'input':{'local_path':str(pdf)}}
         self.assertIsNotNone(self.service.cached_read(self.tid,args,attachments))
         pdf.write_bytes(b'%PDF-updated')
         self.assertIsNone(self.service.cached_read(self.tid,args,attachments))

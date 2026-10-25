@@ -191,6 +191,8 @@ class MemoryPageFallbackTests(unittest.TestCase):
         path.write_bytes(b'%PDF-synthetic')
         paper_id = 'mixed-' + uuid4().hex
         attachment = {'input_ref': 'input-mixed', 'paper_id': paper_id, 'local_path': str(path)}
+        # 混合批次只持有当前任务附件，不向其他历史或foreign任务授予权限。
+        self.db.grant_input(tid, 'input-mixed', tid)
         pages = PaperService(self.db, None, LongPDF()).read(tid, 'input-mixed', attachments={'input-mixed': attachment})
         source_hash = self.db.fetchone('SELECT content_sha256 FROM documents WHERE document_id=?',
                                       (pages['document_id'],))['content_sha256']

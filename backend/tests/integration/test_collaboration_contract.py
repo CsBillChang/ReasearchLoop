@@ -131,8 +131,9 @@ class CollaborationContractTests(unittest.TestCase):
         papers=PaperService(self.db,None,FixturePDF());papers.candidates['private']=PaperCandidate(paper_id='private',title='private',source='fixture',pdf_url='private.pdf')
         with self.assertRaises(PermissionError):papers.read('other','private')
         # 页权限来自根任务的用户原话，而不是 Supervisor 自行分配的 page_count。
-        self.db.create_task('other',None,'a'*64,'只看第1页','deny',[])
-        ctx=ToolContext(task_id='other',save_policy=SavePolicy.deny,services={'papers':papers,'scope':{'input_refs':['input-A'],'start_page':1,'page_count':1}})
+        attachment={'input_ref':'input-A','paper_id':'paper-A','local_path':str(self.root/'A.pdf')}
+        self.db.create_task('other',None,'a'*64,'只看第1页','deny',[attachment])
+        ctx=ToolContext(task_id='other',save_policy=SavePolicy.deny,attachments={'input-A':attachment},services={'papers':papers,'scope':{'input_refs':['input-A'],'start_page':1,'page_count':1}})
         r=ToolRegistry(specs()).execute('read_paper',{'target_ref':'input-A','start_page':2,'page_count':1},ctx)
         self.assertFalse(r.ok);self.assertIn('page range',r.message)
     def test_reviewer_completed_status_does_not_overwrite_runtime(self):

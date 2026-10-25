@@ -64,6 +64,12 @@ class WebSourceContractTests(unittest.TestCase):
         return PaperCandidate(paper_id='paper', title='Synthetic Paper', authors=['Synthetic Author'],
                               source='arxiv', paper_url=ARXIV, version='v1').model_copy(update=changes)
 
+    def grant_candidate(self, candidate):
+        """按检索返回合同持久化本例候选并仅授权给当前任务。"""
+        self.db.save_paper(candidate.paper_id, candidate.model_dump(mode='json'))
+        self.db.grant_paper(self.task, candidate.paper_id, self.task)
+        return candidate
+
     def test_shared_enum_aliases_and_host_mapping_match(self):
         """schema值全部有实际映射，平台OpenReview与会议来源分开。"""
         self.assertEqual({source.value for source in WebSource}, set(SOURCE_HOSTS))
@@ -209,7 +215,7 @@ class WebSourceContractTests(unittest.TestCase):
         primary = {'error_code': 'PDF_HTTP_ERROR', 'acquisition': {'http_status': 403,
                    'requested_source': 'https://publisher.invalid/main.pdf'}}
         with self.assertRaises(PaperAcquisitionError) as raised:
-            self.service.locate_pdf(self.task, self.candidate(), primary_failure=primary)
+            self.service.locate_pdf(self.task, self.grant_candidate(self.candidate()), primary_failure=primary)
         details = raised.exception.acquisition
         self.assertEqual((details['stage'], details['request_state'], details['http_status']), ('fetch', 'failed', 500))
         self.assertEqual(details['primary_failure'], primary)
@@ -221,7 +227,7 @@ class WebSourceContractTests(unittest.TestCase):
         """HTTP已成功但标题/主文身份不符时是本地核对拒绝，不虚构挑战页。"""
         self.search_results = [{'url': ARXIV, 'title': 'Synthetic Paper'}]
         self.fetch_content = 'Synthetic Author\n[PDF](https://arxiv.org/pdf/2601.99999v1)'
-        result = self.service.locate_pdf(self.task, self.candidate())
+        result = self.service.locate_pdf(self.task, self.grant_candidate(self.candidate()))
         self.assertIsNone(result['pdf_url'])
         rejection = next(item for item in result['diagnostics'] if item['status'] == 'detail_pdf_identity_mismatch')
         self.assertEqual((rejection['stage'], rejection['request_state']), ('identity_validation', 'completed'))
@@ -257,8 +263,8 @@ class WebSourceContractTests(unittest.TestCase):
     def test_known_sosp_candidate_keeps_existing_cross_platform_alternate(self):
         """SOSP发表来源不是网页filter；合法同论文arXiv载体仍按原身份合同核对。"""
         self.search_results = [{'url': ARXIV, 'title': 'Synthetic Paper'}]
-        result = self.service.locate_pdf(self.task, self.candidate(source='sosp',
-            paper_url='https://publisher.invalid/doi/10.0000/synthetic', version=None), sources=['sosp'])
+        result = self.service.locate_pdf(self.task, self.grant_candidate(self.candidate(source='sosp',
+            paper_url='https://publisher.invalid/doi/10.0000/synthetic', version=None)), sources=['sosp'])
         self.assertEqual(result['status'], 'located')
         self.assertTrue(result['alternate_version'])
         self.assertEqual(result['search']['sources'], None)
@@ -272,7 +278,7 @@ class WebSourceContractTests(unittest.TestCase):
         reference = {'paper_id': 'returned-metadata', 'canonical_locator': ARXIV}
         candidate = self.candidate(paper_url=OPENREVIEW, version=None, metadata={
             'original_locator_identity_unverified': True, 'metadata_reference': reference})
-        result = self.service.locate_pdf(self.task, candidate)
+        result = self.service.locate_pdf(self.task, self.grant_candidate(candidate))
         self.assertEqual(result['status'], 'located')
         self.assertTrue(result['alternate_version'])
         self.assertFalse(result['same_version_confirmed'])
@@ -288,7 +294,7 @@ class WebSourceContractTests(unittest.TestCase):
         self.fetch_content = 'Synthetic Author\n[PDF](https://openreview.net/pdf?id=SyntheticPaper)'
         primary = {'error_code': 'PDF_HTTP_ERROR', 'stage': 'primary_pdf',
                    'acquisition': {'http_status': 404, 'requested_source': OPENREVIEW}}
-        result = self.service.locate_pdf(self.task, candidate, primary_failure=primary)
+        result = self.service.locate_pdf(self.task, self.grant_candidate(candidate), primary_failure=primary)
         self.assertEqual(result['status'], 'unconfirmed_identity_or_pdf')
         self.assertIsNone(result['pdf_url'])
         self.assertTrue(result['original_locator_identity_unverified'])
@@ -308,7 +314,7 @@ class WebSourceContractTests(unittest.TestCase):
         self.fetch_content = 'Synthetic Author; Second Author\n[PDF](https://openreview.net/pdf?id=SyntheticPaper)'
         primary = {'error_code': 'PDF_HTTP_ERROR', 'stage': 'primary_pdf',
                    'acquisition': {'http_status': 404, 'requested_source': OPENREVIEW}}
-        result = self.service.locate_pdf(self.task, candidate, primary_failure=primary)
+        result = self.service.locate_pdf(self.task, self.grant_candidate(candidate), primary_failure=primary)
         self.assertEqual(result['status'], 'located')
         self.assertTrue(result['diagnostic']['same_locator'])
         self.assertFalse(result['same_version_confirmed'])

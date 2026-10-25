@@ -5,6 +5,7 @@ import math
 import threading
 
 from research_loop.domain.retrieval import RetrievalQuery, fingerprint
+from research_loop.domain.retrieval_strategy import RetrievalStrategy
 from research_loop.services.indexing import IndexingService
 from research_loop.services.papers import PaperService
 from research_loop.storage.indexes import rank_terms, reciprocal_rank_fusion
@@ -20,9 +21,12 @@ def error_code(exc: Exception) -> str:
 class RetrievalService:
     """复用不可变原文索引；所有通道从同一份有效页集合开始。"""
 
-    def __init__(self, db, embedding, vectors, reranker):
+    def __init__(self, db, embedding, vectors, reranker, *, strategy=None):
         """注入已配置组件，测试可替换适配器而不改业务路径。"""
         self.db, self.embedding, self.vectors, self.reranker = db, embedding, vectors, reranker
+        if strategy is not None and type(strategy) is not RetrievalStrategy:
+            raise ValueError('RETRIEVAL_STRATEGY_INVALID')
+        self.strategy = strategy
         self.indexing = IndexingService(db, embedding, vectors)
 
     def _view(self, task_id: str, document_id: str) -> dict:
@@ -73,6 +77,8 @@ class RetrievalService:
             if cancelled():
                 raise RuntimeError("RETRIEVAL_CANCELLED")
         check_cancel()
+        if self.strategy is not None and request.candidate_limit != self.strategy.candidate_limit:
+            raise ValueError('RETRIEVAL_STRATEGY_CANDIDATE_LIMIT_MISMATCH')
         views = []
         for document_id in request.document_ids:
             check_cancel()
@@ -122,13 +128,22 @@ class RetrievalService:
             vector_rows, vector_state = [], "unavailable"
             reasons.append({"component": "vector", "code": error_code(exc)})
         check_cancel()
-        fused = reciprocal_rank_fusion({"bm25": bm25, "vector": vector_rows})[:request.candidate_limit]
+        fused = reciprocal_rank_fusion({"bm25": bm25, "vector": vector_rows},
+            **({'k': self.strategy.rrf_k, 'weights': self.strategy.fusion_weights}
+               if self.strategy is not None else {}))[:request.candidate_limit]
         for n, row in enumerate(fused, 1):
             row.update(rrf_rank=n, reranker_score=None)
         rerank_state = "empty"
+        actual_reranker = None
         if fused:
             try:
+                if self.strategy is not None:
+                    actual_reranker = self.strategy.observe_reranker(self.reranker)
+                    self.strategy.inspect_reranker(self.reranker)
                 scores = self.reranker.score(request.query, [by_key[r["key"]]["text"] for r in fused])
+                if self.strategy is not None:
+                    actual_reranker = self.strategy.observe_reranker(self.reranker)
+                    self.strategy.inspect_reranker(self.reranker)
                 if len(scores) != len(fused) or not all(math.isfinite(s) for s in scores):
                     raise ValueError("RERANK_OUTPUT_INVALID")
                 for row, score in zip(fused, scores):
@@ -148,7 +163,7 @@ class RetrievalService:
             source = papers.validate_source_observation(task_id, hit, {}, kind='hit')
             hit['readback'] = source['readback']
             hit['target_ref'] = source['readback']['target_ref']
-        return {"status": "degraded" if reasons else "ready" if hits else "empty",
+        result = {"status": "degraded" if reasons else "ready" if hits else "empty",
             "query": request.query, "hits": hits,
             "evidence_ids": list(dict.fromkeys(h["evidence_id"] for h in hits)),
             "scope": [{"index_id": v["index_id"], "source": v["manifest"]["source"],
@@ -160,6 +175,13 @@ class RetrievalService:
             "rrf_k": 60, "candidate_limit": request.candidate_limit, "degradations": reasons,
             "coverage": "retrieved_chunks_only", "factual_support": "not_assessed",
             "notice": "分数仅为相关性，不是事实支持概率。命中不表示全文已读；无支持时补读原文或报告缺证，不能根据未命中推断全文不存在。"}
+        if self.strategy is not None:
+            path = 'rrf' if vector_state == 'ready' else 'bm25'
+            result.update(strategy=self.strategy.as_dict(),
+                reranker_configuration={'requested': self.strategy.reranker_kwargs,
+                    'actual': actual_reranker, 'verified': rerank_state == 'ready'},
+                effective_path=path + ('_rerank' if rerank_state == 'ready' else ''))
+        return result
 
 
 class RetrievalRuntime:

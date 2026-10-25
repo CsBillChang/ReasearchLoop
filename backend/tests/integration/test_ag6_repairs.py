@@ -27,6 +27,8 @@ class AG6RepairTests(unittest.TestCase):
     def test_review_selection_does_not_erase_acquired_scope(self):
         """全文证据已取得，只选一页审校不能改成任务只读一页。"""
         tid=self.task();papers=PaperService(self.db,None,FixturePDF())
+        # 附件字典只传递来源，读取权限须经正式存储接口登记。
+        self.db.grant_input(tid,'input-A',tid)
         value=papers.read(tid,'input-A',attachments={'input-A':{'local_path':'unused.pdf','paper_id':'paper-A'}})
         refs=[p['evidence_id'] for p in value['pages']]
         selected=papers.evidence_bundle(tid,refs[:1])[0]

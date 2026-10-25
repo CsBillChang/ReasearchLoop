@@ -240,6 +240,8 @@ class BatchTailReadbackTests(unittest.TestCase):
         """用合成长原文制造历史压力及中间公式，不使用特定论文硬编码。"""
         path = self.root/'A.pdf'; path.write_bytes(b'%PDF-fixture')
         attachments = {'input-A': {'input_ref':'input-A','paper_id':'paper-A','local_path':str(path)}}
+        # 本任务显式领取本例附件；不因工具上下文含有路径而绕过授权。
+        self.db.grant_input(self.tid, 'input-A', self.tid)
         data = PaperService(self.db, None, LongPDF()).read(self.tid, 'input-A', attachments=attachments)
         messages = [{'role':'system','content':'system'}, {'role':'user','content':'compare'}]
         for n in range(8):

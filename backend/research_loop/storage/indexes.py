@@ -4,6 +4,8 @@ import math
 import re
 from collections import Counter
 
+from research_loop.domain.retrieval_strategy import validate_fusion_weights
+
 
 def terms(text: str) -> list[str]:
     """将英文词和中文相邻双字转为词项；不声称支持语义向量召回。"""
@@ -45,13 +47,18 @@ def rank_terms(query: str, records: list[dict], bags: list[dict], limit: int = 2
     return [{**records[i], 'score': scores[i]} for i in sorted(range(len(records)), key=lambda i: (-scores[i], i)) if scores[i] > 0][:limit]
 
 
-def reciprocal_rank_fusion(channels: dict[str, list[dict]], k: int = 60) -> list[dict]:
+def reciprocal_rank_fusion(channels: dict[str, list[dict]], k: int = 60, *, weights=None) -> list[dict]:
     """参考论文的1/(k+rank)融合思想；只合并同一版本片段，不相加异量纲分数。
 
     同通道重复候选只算一次；并列以完整候选身份稳定排序，保留原通道排名/分数。
+    显式权重采用weight/(k+rank)，缺通道不补分；省略时保持原分数运算。
     """
     if k < 1:
         raise ValueError("RRF_K_INVALID")
+    if weights is not None:
+        weights = validate_fusion_weights(weights)
+        if set(channels) - set(weights):
+            raise ValueError('RETRIEVAL_FUSION_CHANNEL_UNKNOWN')
     result = {}
     for name, rows in channels.items():
         seen = set()
@@ -62,7 +69,7 @@ def reciprocal_rank_fusion(channels: dict[str, list[dict]], k: int = 60) -> list
             seen.add(key)
             rank_no = len(seen)
             target = result.setdefault(key, {"key": key, "rrf_score": 0.0, "channels": {}})
-            target["rrf_score"] += 1 / (k + rank_no)
+            target["rrf_score"] += (1 if weights is None else weights[name]) / (k + rank_no)
             target["channels"][name] = {"rank": rank_no, "score": row["score"]}
     return sorted(result.values(), key=lambda row: (-row["rrf_score"], row["key"]))
 
