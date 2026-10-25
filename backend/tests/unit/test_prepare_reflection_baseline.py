@@ -109,6 +109,15 @@ class ReflectionPreparationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'CONFLICTING_INPUT_ALIASES'):
             validate_package(self.manifest)
 
+    def test_formal_before_hash_must_bind_the_actual_draft(self):
+        """正式集的before_draft_sha256别名不能被跳过。"""
+        value = json.loads((self.root / 'label.json').read_text())
+        value['before_draft_sha256'] = '0' * 64
+        self.write('label.json', value)
+        self.refresh()
+        with self.assertRaisesRegex(ValueError, 'LABEL_DRAFT_MISMATCH'):
+            validate_package(self.manifest)
+
 
 if __name__ == '__main__':
     unittest.main()

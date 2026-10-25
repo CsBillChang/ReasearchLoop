@@ -7,11 +7,12 @@ import socket
 import tempfile
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 from integration.test_research_reflection import ResearchReflectionScenario, ScopedPDF
 from research_loop.agents.reflection import ReflectionService
 from research_loop.domain.reflection import ResearchReviewInput
-from research_loop.providers.deepseek import DeepSeekProvider
+from research_loop.providers.deepseek import DeepSeekProvider, RequestNotSent
 from scripts.reflection_baseline_runtime import (BatchBudget, BudgetRefused, baseline_result,
     business_source_hashes, deny_socket_connections, run_substitute)
 
@@ -34,6 +35,9 @@ class BaselineScenario(ResearchReflectionScenario):
         if self.baseline_mode == 'unknown':
             self.requests.append(body)
             raise TimeoutError('synthetic sent request with no response')
+        if self.baseline_mode == 'not_sent':
+            self.requests.append(body)
+            raise RequestNotSent('synthetic local validation rejected before send')
         response = super().handler(request)
         call = response.json()['choices'][0]['message']['tool_calls'][0]['function']
         args = json.loads(call['arguments'])
@@ -61,6 +65,43 @@ class BaselineScenario(ResearchReflectionScenario):
         return response
 
 
+class UnsupportedValueScenario(BaselineScenario):
+    """原稿含无依据的显存数值，模拟模型将其撤回并限定查证范围。"""
+
+    def __init__(self):
+        super().__init__()
+        self.before = '方法使用语言前缀。峰值显存为8 GB。方法使用嵌入表示。'
+        self.disclosure = '所给物理第1—2页文字未提供显存用量依据，撤回原精确数值。'
+        self.after = '方法使用语言前缀。' + self.disclosure + '方法使用嵌入表示。'
+
+    def handler(self, request):
+        body = json.loads(request.content)
+        response = super().handler(request)
+        call = response.json()['choices'][0]['message']['tool_calls'][0]['function']
+        args = json.loads(call['arguments'])
+        if call['name'] == 'review_research':
+            args['verification_questions'] = ['所给页是否支持显存说法及查证范围限定？']
+        elif call['name'] == 'finish_review':
+            target = json.loads(body['messages'][1]['content'].split('\n', 1)[1])['target']
+            item = target['items'][0]
+            corrected = self.disclosure in item['text']
+            args['findings'] = [{'item_id': item['item_id'],
+                'status': 'supported' if corrected else 'insufficient',
+                'basis': 'scope_disclosure' if corrected else 'not_found',
+                'source_quote': None,
+                'evidence_ids': args['findings'][0]['evidence_ids'],
+                'reason': '披露仅限定实际所给两页文字，未推断全篇。' if corrected else
+                          '所给两页未提供显存数值依据，不能编造替代数值。',
+                'suggested_action': 'keep' if corrected else 'revise'}]
+        elif call['name'] == 'revise_research':
+            args['patches'][0].update(old_text='峰值显存为8 GB。', new_text=self.disclosure,
+                reason='撤回未获给定证据支持的精确数值，保留其他正文。')
+        elif call['name'] == 'finish_task':
+            args['processing_summary'] = '已撤回无依据的显存数值；当前仅能披露所给页的证据范围。'
+            args['goals'][0].update(status='unresolved', reason='给定页不足以确认实际显存值，已有内容已交付。')
+        return self.response(call['name'], args)
+
+
 class ReflectionBaselineRuntimeTests(unittest.TestCase):
     """每例使用全新目录、SQLite、无网络替身和正式持久结果。"""
 
@@ -81,8 +122,8 @@ class ReflectionBaselineRuntimeTests(unittest.TestCase):
             with (directory/(self._testMethodName + '.json')).open('x') as handle:
                 json.dump(run.report(), handle, ensure_ascii=False, indent=2)
 
-    def execute(self, mode='revision'):
-        scenario = BaselineScenario(mode)
+    def execute(self, mode='revision', scenario=None):
+        scenario = scenario or BaselineScenario(mode)
         with patch('research_loop.config.Settings.from_env', side_effect=AssertionError('dotenv not allowed')):
             run = run_substitute(self.root/'runtime', prompt='核验给定当前稿，必要时局部修订，禁止保存。',
                 provider_factory=scenario.factory, pdf_factory=lambda settings, files: ScopedPDF())
@@ -171,6 +212,38 @@ class ReflectionBaselineRuntimeTests(unittest.TestCase):
         with self.assertRaises(BudgetRefused):
             run.budget.reserve(1, 1)
 
+    def test_explicit_not_sent_receipt_releases_reservation_and_stops_batch(self):
+        run, scenario = self.execute('not_sent')
+        rows = run.report()['physical_receipts']
+        self.assertEqual(len(scenario.requests), 1)
+        self.assertEqual([item['status'] for item in rows], ['not_sent'])
+        self.assertEqual([item['sent_state'] for item in rows], ['not_sent'])
+        snapshot = run.budget.snapshot()
+        self.assertEqual(snapshot['not_sent_calls'], 1)
+        self.assertEqual(snapshot['pending_reservations'], 0)
+        self.assertEqual(snapshot['requests_reserved'], 0)
+        self.assertEqual(snapshot['stop_reason'], 'provider_not_sent')
+        self.assertIn('before send', snapshot['not_sent_reasons'][0])
+        with self.assertRaises(BudgetRefused):
+            run.budget.reserve(1, 1)
+
+    def test_unsupported_value_is_withdrawn_by_model_patch_and_persisted(self):
+        run, scenario = self.execute(scenario=UnsupportedValueScenario())
+        view = run.view()
+        self.assertEqual(view['status'], 'partial', view)
+        self.assertEqual(view['result']['answer_body_markdown'], scenario.after)
+        self.assertNotIn('峰值显存为8 GB', view['result']['answer_body_markdown'])
+        self.assertTrue(view['result']['answer_body_markdown'].startswith('方法使用语言前缀。'))
+        self.assertTrue(view['result']['answer_body_markdown'].endswith('方法使用嵌入表示。'))
+        target = next(iter(ReflectionService(run.db).snapshot(run.task_id)['research_targets'].values()))
+        self.assertEqual(len(target['patches']), 1)
+        self.assertEqual([a['result']['status'] for a in target['attempts']], ['issues', 'supported'])
+        self.assertEqual(target['attempts'][0]['result']['findings'][0]['status'], 'insufficient')
+        self.assertEqual(target['attempts'][-1]['result']['findings'][0]['basis'], 'scope_disclosure')
+        patches = [a for a in run.db.list_actions(run.task_id) if a['tool_name'] == 'revise_research']
+        self.assertEqual([a['status'] for a in patches], ['succeeded'])
+        self.assertEqual(patches[0]['arguments']['patches'][0]['new_text'], scenario.disclosure)
+
     def test_wrong_hash_and_foreign_source_are_rejected_before_callback(self):
         run, _ = self.execute()
         record = next(iter(ReflectionService(run.db).snapshot(run.task_id)['research_targets'].values()))
@@ -192,6 +265,34 @@ class ReflectionBaselineRuntimeTests(unittest.TestCase):
     def test_socket_guard_denies_even_an_accidental_real_factory(self):
         with deny_socket_connections(), self.assertRaisesRegex(PermissionError, 'NETWORK_DENIED'):
             socket.create_connection(('127.0.0.1', 33316))
+
+    def test_runtime_rejects_any_checkout_marker_before_creating_directories(self):
+        for kind in ('directory', 'worktree_file'):
+            with self.subTest(kind=kind):
+                checkout = self.root/kind
+                checkout.mkdir()
+                if kind == 'directory':
+                    (checkout/'.git').mkdir()
+                else:
+                    (checkout/'.git').write_text('gitdir: ../metadata\n')
+                before = {str(path.relative_to(checkout)) for path in checkout.rglob('*')}
+                target = checkout/'missing-parent'/'runtime'
+                with self.assertRaisesRegex(ValueError, 'outside every Git checkout'):
+                    run_substitute(target, prompt='unused',
+                        provider_factory=lambda settings: self.fail('provider constructed'),
+                        pdf_factory=lambda settings, files: self.fail('PDF constructed'))
+                self.assertEqual({str(path.relative_to(checkout)) for path in checkout.rglob('*')}, before)
+
+    def test_runtime_rejects_actual_worktree_and_symlink_alias_before_writing(self):
+        name = '_reflection_forbidden_' + uuid4().hex
+        alias = self.root/'source-alias'
+        alias.symlink_to(self.repo, target_is_directory=True)
+        for target in (self.repo/name, alias/name):
+            with self.subTest(target=str(target)):
+                with self.assertRaisesRegex(ValueError, 'outside every Git checkout'):
+                    run_substitute(target, prompt='unused', provider_factory=lambda settings: None,
+                                   pdf_factory=lambda settings, files: None)
+                self.assertFalse(target.exists())
 
 
 class ReflectionBatchBudgetTests(unittest.TestCase):
@@ -250,6 +351,22 @@ class ReflectionBatchBudgetTests(unittest.TestCase):
         with self.assertRaisesRegex(BudgetRefused, 'upper_bound_breached'):
             budget.settle(identity, self.usage(2, 1))
         self.assertEqual(budget.snapshot()['known_tokens'], 3)
+
+    def test_explicit_not_sent_is_idempotent_without_zero_usage_settlement(self):
+        budget = BatchBudget()
+        identity = budget.reserve(1000, 65536)
+        reason = 'local validation refused before network send'
+        budget.settle_not_sent(identity, reason)
+        budget.settle_not_sent(identity, reason)
+        snapshot = budget.snapshot()
+        self.assertEqual(snapshot['requests_reserved'], 0)
+        self.assertEqual(snapshot['not_sent_calls'], 1)
+        self.assertEqual(snapshot['pending_reservations'], 0)
+        self.assertEqual(snapshot['not_sent_reasons'], [reason])
+        with self.assertRaisesRegex(ValueError, 'identity changed'):
+            budget.settle(identity, self.usage(0, 0))
+        with self.assertRaisesRegex(BudgetRefused, 'provider_not_sent'):
+            budget.reserve(1, 1)
 
 
 if __name__ == '__main__':

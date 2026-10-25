@@ -42,6 +42,7 @@ class BatchBudget:
     input_per_million_cny: Decimal = Decimal('2')
     output_per_million_cny: Decimal = Decimal('8')
     requests_reserved: int = field(default=0, init=False)
+    not_sent_calls: int = field(default=0, init=False)
     known_tokens: int = field(default=0, init=False)
     known_cost_upper_cny: Decimal = field(default=Decimal('0'), init=False)
     stop_reason: str | None = field(default=None, init=False)
@@ -119,10 +120,34 @@ class BatchBudget:
             if status != 'succeeded':
                 self.stop_reason = 'provider_' + status
 
+    def settle_not_sent(self, identity: str, reason: str) -> None:
+        """适配器明确未发送时释放预留，单列原因并停止本批。
+
+        未发送不是有 usage=0 的物理请求；不将其写入已知用量账本。
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError('not_sent reason must be nonempty')
+        value = {'usage': None, 'status': 'not_sent', 'reason': reason}
+        with self._lock:
+            if identity in self._settled:
+                if self._settled[identity] != value:
+                    raise ValueError('settlement identity changed')
+                return
+            if identity not in self._pending:
+                raise ValueError('unknown reservation')
+            self._pending.pop(identity)
+            self._settled[identity] = value
+            self.requests_reserved -= 1
+            self.not_sent_calls += 1
+            self.stop_reason = self.stop_reason or 'provider_not_sent'
+
     def snapshot(self) -> dict:
         """导出保守计量与未结算数量；不把未知费用转成零。"""
         with self._lock:
             return {'requests_reserved': self.requests_reserved, 'known_tokens': self.known_tokens,
+                    'not_sent_calls': self.not_sent_calls,
+                    'not_sent_reasons': [item['reason'] for item in self._settled.values()
+                                         if item['status'] == 'not_sent'],
                     'known_cost_upper_cny': str(self.known_cost_upper_cny),
                     'pending_reservations': len(self._pending), 'stop_reason': self.stop_reason,
                     'limits': {'requests': self.max_requests, 'tokens': self.max_tokens,
@@ -167,6 +192,9 @@ class _BudgetedSubstitute:
             raise RequestNotSent(str(exc)) from exc
         try:
             raw = self.provider.send(messages, tools, force_text=force_text, **kwargs)
+        except RequestNotSent as exc:
+            self.budget.settle_not_sent(reservation, str(exc))
+            raise
         except ProviderResponseError:
             self.budget.settle(reservation, None, status='rejected')
             raise
@@ -240,9 +268,11 @@ def run_substitute(root: Path, *, prompt: str, provider_factory: Callable,
     if not callable(provider_factory) or not callable(pdf_factory):
         raise ValueError('explicit substitute factories required')
     root = Path(root).resolve()
-    source_root = Path(__file__).resolve().parents[2]
-    if root == source_root or source_root in root.parents:
-        raise ValueError('runtime must be outside the source checkout')
+    # 普通仓库使用.git目录，worktree使用.git文件；两种祖先均须在mkdir前拒绝。
+    for ancestor in (root, *root.parents):
+        marker = ancestor/'.git'
+        if marker.exists() or marker.is_symlink():
+            raise ValueError('runtime must be outside every Git checkout')
     root.mkdir(parents=True, exist_ok=False)
     from research_loop.config import Settings
     from research_loop.domain.tasks import TaskCreate

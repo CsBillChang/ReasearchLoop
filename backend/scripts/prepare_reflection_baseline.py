@@ -90,8 +90,11 @@ def validate_package(manifest_path: Path) -> dict:
         draft = model_input.get('draft') or model_input.get('draft_markdown')
         if not question or not draft:
             raise ValueError('REFLECTION_EMPTY_QUESTION_OR_DRAFT')
-        if (label.get('draft_sha256') and
-                label['draft_sha256'] != hashlib.sha256(draft.encode()).hexdigest()):
+        if (label.get('draft_sha256') and label.get('before_draft_sha256') and
+                label['draft_sha256'] != label['before_draft_sha256']):
+            raise ValueError('REFLECTION_CONFLICTING_LABEL_HASHES')
+        label_hash = label.get('draft_sha256') or label.get('before_draft_sha256')
+        if label_hash and label_hash != hashlib.sha256(draft.encode()).hexdigest():
             raise ValueError('REFLECTION_LABEL_DRAFT_MISMATCH')
         for key, value in [('draft_sha256', draft), ('question_sha256', question)]:
             expected = data.get('provenance', {}).get(key)
