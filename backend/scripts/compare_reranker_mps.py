@@ -392,6 +392,34 @@ class MpsVerifiedSession:
                 "batches": deepcopy(self.batches)}
 
 
+def normalize_loading_info(info: dict) -> dict:
+    """将TF5的集合型加载报告无损规范为确定序JSON值，不改变任何合格条件。"""
+    fields = {"missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs"}
+    if not isinstance(info, dict) or set(info) != fields:
+        raise BoundaryViolation("MPS_LOADING_REPORT_SCHEMA_CHANGED")
+    normalized = {}
+    for key in sorted(fields):
+        values = info[key]
+        if not isinstance(values, (list, set)):
+            raise BoundaryViolation("MPS_LOADING_REPORT_FIELD_TYPE_CHANGED")
+        rows = []
+        for value in values:
+            if key != "mismatched_keys":
+                if not isinstance(value, str):
+                    raise BoundaryViolation("MPS_LOADING_REPORT_ENTRY_TYPE_CHANGED")
+                rows.append(value)
+                continue
+            if (not isinstance(value, (tuple, list)) or len(value) != 3
+                    or not isinstance(value[0], str)
+                    or any(not isinstance(shape, (tuple, list))
+                           or any(type(size) is not int or size < 0 for size in shape)
+                           for shape in value[1:])):
+                raise BoundaryViolation("MPS_LOADING_REPORT_MISMATCH_SCHEMA_CHANGED")
+            rows.append([value[0], list(value[1]), list(value[2])])
+        normalized[key] = sorted(rows, key=lambda value: json.dumps(value, ensure_ascii=False, sort_keys=True))
+    return normalized
+
+
 def validate_loading_info(info: dict, weights: Path) -> dict:
     """只容许旧checkpoint中可逐值证明的非参数position_ids被新版库忽略。"""
     ignored = info.get("unexpected_keys", [])
@@ -444,6 +472,7 @@ def build_engine(variant, frozen, inputs, counters, budget, started_at, torch=No
     model, loading_info = AutoModelForSequenceClassification.from_pretrained(
         floating["directory"], local_files_only=True, trust_remote_code=False,
         use_safetensors=True, attn_implementation="eager", dtype=dtype, output_loading_info=True)
+    loading_info = normalize_loading_info(loading_info)
     loading_compatibility = validate_loading_info(loading_info, Path(floating["directory"]) / "model.safetensors")
     if (type(model).__name__ != "XLMRobertaForSequenceClassification"
             or model.config.model_type != "xlm-roberta" or model.config.num_labels != 1

@@ -259,14 +259,52 @@ class MpsComparisonTests(unittest.TestCase):
             with self.assertRaisesRegex(BoundaryViolation, "PILOT_GATE_REQUIRED"):
                 comparison.execute(freeze, comparison.digest(freeze), p, "performance")
 
+    def test_tf5_empty_loading_sets_are_json_serializable(self):
+        info = {"missing_keys": set(), "unexpected_keys": set(), "mismatched_keys": set(), "error_msgs": []}
+        normalized = comparison.normalize_loading_info(info)
+        self.assertEqual(normalized, {key: [] for key in info})
+        self.assertEqual(json.loads(json.dumps(normalized)), normalized)
+        self.assertEqual(comparison.validate_loading_info(normalized, Path("not-read"))["ignored_nonparameter_buffers"], [])
+
+    def test_loading_report_normalizes_known_sets_deterministically_without_dropping_values(self):
+        info = {"missing_keys": {"z.weight", "a.weight"}, "unexpected_keys": [],
+                "mismatched_keys": {("layer.weight", (1, 2), (2, 2))}, "error_msgs": ["error"]}
+        normalized = comparison.normalize_loading_info(info)
+        self.assertEqual(normalized["missing_keys"], ["a.weight", "z.weight"])
+        self.assertEqual(normalized["mismatched_keys"], [["layer.weight", [1, 2], [2, 2]]])
+        self.assertEqual(json.loads(json.dumps(normalized)), normalized)
+        with self.assertRaisesRegex(BoundaryViolation, "LOADING_KEYS_CHANGED"):
+            comparison.validate_loading_info(normalized, Path("not-read"))
+
+    def test_normalized_loading_report_rejects_missing_parameters_and_other_unexpected_keys(self):
+        for field, value in (("missing_keys", {"classifier.out_proj.weight"}),
+                             ("unexpected_keys", {"other.weight"}),
+                             ("mismatched_keys", {("classifier.weight", (1, 384), (2, 384))}),
+                             ("error_msgs", {"load failed"})):
+            info = {"missing_keys": set(), "unexpected_keys": set(), "mismatched_keys": set(), "error_msgs": []}
+            info[field] = value
+            normalized = comparison.normalize_loading_info(info)
+            with self.assertRaisesRegex(BoundaryViolation, "LOADING_KEYS_CHANGED"):
+                comparison.validate_loading_info(normalized, Path("not-read"))
+
+    def test_loading_report_unknown_missing_fields_and_bad_types_are_rejected(self):
+        valid = {"missing_keys": set(), "unexpected_keys": set(), "mismatched_keys": set(), "error_msgs": []}
+        variants = [{key: value for key, value in valid.items() if key != "missing_keys"},
+                    {**valid, "other": []}, {**valid, "unexpected_keys": "not a collection"},
+                    {**valid, "missing_keys": [1]}, {**valid, "mismatched_keys": ["weight"]},
+                    {**valid, "mismatched_keys": [("weight", [True], [1])]}]
+        for info in variants:
+            with self.subTest(info=info), self.assertRaises(BoundaryViolation):
+                comparison.normalize_loading_info(info)
+
     def test_old_position_buffer_is_accepted_only_after_value_verification(self):
         with tempfile.TemporaryDirectory() as directory:
             p = Path(directory) / "synthetic.safetensors"
             header = json.dumps({"roberta.embeddings.position_ids": {
                 "dtype": "I64", "shape": [1, 514], "data_offsets": [0, 4112]}}).encode()
             p.write_bytes(struct.pack("<Q", len(header)) + header + struct.pack("<514q", *range(514)))
-            info = {"missing_keys": [], "unexpected_keys": ["roberta.embeddings.position_ids"],
-                    "mismatched_keys": [], "error_msgs": []}
+            info = comparison.normalize_loading_info({"missing_keys": set(), "unexpected_keys": {"roberta.embeddings.position_ids"},
+                    "mismatched_keys": set(), "error_msgs": []})
             proof = comparison.validate_loading_info(info, p)
             self.assertTrue(proof["ignored_buffer_values_verified"])
             p.write_bytes(struct.pack("<Q", len(header)) + header + struct.pack("<514q", *([1] * 514)))
