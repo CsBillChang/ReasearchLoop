@@ -1,11 +1,13 @@
 """以原生供应商适配器与内存HTTP传输检查真实发送预算边界。"""
 from concurrent.futures import ThreadPoolExecutor
+import gzip
 import importlib.util
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import zlib
 
 import httpx
 
@@ -140,6 +142,92 @@ class HarnessAbTransportTests(unittest.TestCase):
         snapshot = self.ledger.snapshot()
         self.assertEqual(snapshot['actual_known_tokens'], 120)
         self.assertIsNone(snapshot['halt_reason'])
+
+    def compression_ledger(self, label):
+        """每个压缩边界使用独立批账本，不让前一个未知结果污染后续断言。"""
+        self.ledger = BUDGET.Ledger(self.root / (label + '-ledger.db'), clock=lambda: self.now)
+        self.ledger.begin_root('root', 'H1-Q1', 'A')
+        self.sent = []
+
+    @staticmethod
+    def compressed(encoding, wire):
+        """构造实际HTTP会返回的三种完整压缩字节流。"""
+        if encoding == 'gzip':
+            return gzip.compress(wire)
+        if encoding == 'deflate':
+            return zlib.compress(wire)
+        import zstandard
+        return zstandard.ZstdCompressor(write_checksum=True).compress(wire)
+
+    def compressed_client(self, encoding, wire, *, truncated=False):
+        raw = self.compressed(encoding, wire)
+        if truncated:
+            raw = raw[:-5]
+        return self.client(lambda _: httpx.Response(200, headers={
+            'Content-Encoding': encoding, 'Content-Length': str(len(raw)),
+            'Content-Type': 'text/event-stream'},
+            stream=Chunks([raw[i:i + 3] for i in range(0, len(raw), 3)])))
+
+    def test_native_compressed_sse_is_decoded_once_and_exact_usage_is_settled(self):
+        for encoding in ('gzip', 'deflate', 'zstd'):
+            with self.subTest(encoding=encoding):
+                self.compression_ledger('complete-' + encoding)
+                client, transport = self.compressed_client(encoding, self.sse())
+                raw = self.provider(client).send_stream([{'role': 'user', 'content': 'x'}],
+                    on_public=lambda _: None, max_tokens=64)
+                self.assertEqual(raw['choices'][0]['message']['content'], '中文测试')
+                self.assertEqual(raw['usage'], USAGE)
+                snapshot = self.ledger.snapshot()
+                self.assertEqual(snapshot['actual_known_tokens'], 120)
+                self.assertEqual(snapshot['reservations'][0]['status'], 'settled')
+                self.assertIsNone(snapshot['halt_reason'])
+                archive = next(transport.directory.glob('*.response.sse')).read_bytes()
+                self.assertEqual(archive, self.sse())
+                metadata = json.loads(next(transport.directory.glob('*.response-meta.json')).read_text())
+                self.assertEqual(metadata['archive_body_encoding'], 'httpx_decoded_bytes')
+                self.assertEqual(metadata['source_content_encoding'], encoding)
+
+    def test_decoded_outer_response_removes_compression_and_compressed_length_headers(self):
+        client, _ = self.compressed_client('gzip', self.sse())
+        request = client.build_request('POST', 'https://api.deepseek.com/chat/completions',
+            json={'model': 'deepseek-flash', 'temperature': 0.1, 'stream': True, 'max_tokens': 64})
+        response = client.send(request, stream=True)
+        self.assertNotIn('content-encoding', response.headers)
+        self.assertNotIn('content-length', response.headers)
+        self.assertEqual(response.read(), self.sse())
+        response.close()
+        self.assertEqual(self.ledger.snapshot()['actual_known_tokens'], 120)
+
+    def test_compressed_stream_missing_usage_is_unknown(self):
+        for encoding in ('gzip', 'deflate', 'zstd'):
+            with self.subTest(encoding=encoding):
+                self.compression_ledger('missing-usage-' + encoding)
+                client, _ = self.compressed_client(encoding, self.sse(usage=None))
+                with self.assertRaises(BUDGET.BudgetHalt):
+                    self.provider(client).send_stream([{'role': 'user', 'content': 'x'}],
+                        on_public=lambda _: None, max_tokens=64)
+                self.assert_unknown()
+
+    def test_compressed_stream_truncation_never_settles_even_if_done_was_decoded(self):
+        for encoding in ('gzip', 'deflate', 'zstd'):
+            with self.subTest(encoding=encoding):
+                self.compression_ledger('truncated-' + encoding)
+                client, _ = self.compressed_client(encoding, self.sse(), truncated=True)
+                with self.assertRaises((httpx.DecodingError, RuntimeError)):
+                    self.provider(client).send_stream([{'role': 'user', 'content': 'x'}],
+                        on_public=lambda _: None, max_tokens=64)
+                self.assert_unknown()
+
+    def test_compressed_response_closed_before_consumption_preserves_unknown(self):
+        for encoding in ('gzip', 'deflate', 'zstd'):
+            with self.subTest(encoding=encoding):
+                self.compression_ledger('early-close-' + encoding)
+                client, _ = self.compressed_client(encoding, self.sse())
+                request = client.build_request('POST', 'https://api.deepseek.com/chat/completions',
+                    json={'model': 'deepseek-flash', 'temperature': 0.1, 'stream': True, 'max_tokens': 64})
+                response = client.send(request, stream=True)
+                response.close()
+                self.assert_unknown()
 
     def test_json_missing_usage_keeps_full_reservation_and_halts(self):
         client, _ = self.client(lambda _: httpx.Response(200, json=self.normal_response(usage=None)))

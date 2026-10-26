@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import time
+import zlib
 
 import httpx
 
@@ -93,8 +94,21 @@ class BudgetTransport(httpx.BaseTransport):
                 self._unknown(identity, 'provider_http_' + str(response.status_code))
                 return response
             if payload.get('stream'):
-                response.stream = _UsageStream(response.stream, self, identity)
-                return response
+                encoding = response.headers.get('content-encoding')
+                if encoding and encoding.lower() in {'gzip', 'deflate'}:
+                    # HTTPX会解码但不一定拒绝缺尾流；另验EOF，不能把已解出的DONE当完整压缩响应。
+                    response.stream = _CompressionCheckedStream(response.stream, encoding.lower())
+                self._write(self.directory / (identity + '.response-meta.json'), {
+                    'status_code': response.status_code,
+                    'archive_body_encoding': 'httpx_decoded_bytes',
+                    'source_content_encoding': encoding})
+                headers = httpx.Headers(response.headers)
+                headers.pop('content-encoding', None)
+                headers.pop('content-length', None)
+                # 内层以公开API完成解压；外层收到解码字节，不能再次按原编码解压。
+                return httpx.Response(response.status_code, headers=headers,
+                    stream=_UsageStream(response, self, identity),
+                    extensions=response.extensions, request=request)
             response.read()
             (self.directory / (identity + '.response.json')).write_bytes(response.content)
             raw = response.json()
@@ -110,12 +124,48 @@ class BudgetTransport(httpx.BaseTransport):
         self.inner.close()
 
 
+class _CompressionCheckedStream(httpx.SyncByteStream):
+    """增量校验gzip/deflate帧完整性，原字节继续交由HTTPX公开API解码。"""
+
+    def __init__(self, inner, encoding):
+        self.inner = inner
+        windows = [16 + zlib.MAX_WBITS] if encoding == 'gzip' else [zlib.MAX_WBITS, -zlib.MAX_WBITS]
+        self.validators = [zlib.decompressobj(window) for window in windows]
+
+    def __iter__(self):
+        for chunk in self.inner:
+            valid = []
+            for validator in self.validators:
+                try:
+                    validator.decompress(chunk)
+                except zlib.error:
+                    continue
+                valid.append(validator)
+            self.validators = valid
+            if not valid:
+                raise httpx.DecodingError('H1 compressed stream integrity failure')
+            yield chunk
+        for validator in self.validators:
+            try:
+                validator.flush()
+            except zlib.error:
+                continue
+            if validator.eof and not validator.unused_data:
+                return
+        raise httpx.DecodingError('H1 compressed stream ended before a complete frame')
+
+    def close(self):
+        self.inner.close()
+
+
 class _UsageStream(httpx.SyncByteStream):
-    """按原字节转发 SSE，并要求 DONE 和完整 usage 同时到达。"""
+    """归档并转发解码后的SSE，完整解码结束且收到DONE/usage后结算。"""
 
     def __init__(self, inner, owner, identity):
         self.inner, self.owner, self.identity = inner, owner, identity
-        self.buffer, self.usage, self.metadata = b'', None, {'stream': True}
+        self.buffer, self.usage, self.metadata = b'', None, {
+            'stream': True, 'archive_body_encoding': 'httpx_decoded_bytes',
+            'source_content_encoding': inner.headers.get('content-encoding')}
         self.done = self.finished = False
 
     def _line(self, line):
@@ -143,9 +193,10 @@ class _UsageStream(httpx.SyncByteStream):
 
     def __iter__(self):
         path = self.owner.directory / (self.identity + '.response.sse')
+        terminal_chunks = []
         try:
             with path.open('xb') as output:
-                for chunk in self.inner:
+                for chunk in self.inner.iter_bytes():
                     if self.owner.deadline is not None and time.time() >= self.owner.deadline:
                         raise TimeoutError('H1 stream wall deadline')
                     output.write(chunk)
@@ -155,17 +206,17 @@ class _UsageStream(httpx.SyncByteStream):
                         line, self.buffer = self.buffer.split(b'\n', 1)
                         self._line(line.rstrip(b'\r'))
                     if self.done:
-                        self.owner.ledger.settle(self.identity, self.usage, response_metadata=self.metadata)
-                        self.finished = True
-                    yield chunk
-                    if self.done:
-                        return
+                        # 供应商适配器见DONE即停止迭代；先等解码器EOF校验，避免漏记或接受截断压缩流。
+                        terminal_chunks.append(chunk)
+                    else:
+                        yield chunk
             if self.buffer:
                 self._line(self.buffer.rstrip(b'\r'))
             if not self.done:
                 raise RuntimeError('stream ended without DONE')
             self.owner.ledger.settle(self.identity, self.usage, response_metadata=self.metadata)
             self.finished = True
+            yield from terminal_chunks
         except BaseException as exc:
             if not self.finished:
                 self.owner._unknown(self.identity, 'stream_' + type(exc).__name__)
