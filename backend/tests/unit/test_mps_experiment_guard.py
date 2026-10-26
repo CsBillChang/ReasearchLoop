@@ -111,6 +111,78 @@ print(json.dumps({'errors': errors, 'counts': counts}))
 ''')
         self.assertEqual(result['counts']['blocked_read'], 2)
 
+    def test_darwin_missing_linux_maps_preserves_system_file_not_found(self):
+        result = self.run_child('''
+errors = []
+for action in (lambda: Path('/proc/self/maps').read_text(),
+               lambda: os.open('/proc/self/maps', os.O_RDONLY)):
+    try:
+        action()
+    except FileNotFoundError:
+        errors.append('FileNotFoundError')
+    except BoundaryViolation:
+        errors.append('BoundaryViolation')
+    else:
+        raise AssertionError('maps unexpectedly readable')
+print(json.dumps({'errors': errors, 'platform': sys.platform, 'counts': counts}))
+''')
+        if result['platform'] == 'darwin':
+            self.assertEqual(result['errors'], ['FileNotFoundError'] * 2)
+            self.assertEqual(result['counts']['absent_platform_probes'], 2)
+            self.assertEqual(result['counts']['blocked_read'], 0)
+        else:
+            self.assertEqual(result['errors'], ['BoundaryViolation'] * 2)
+
+    def test_linux_maps_probe_never_allows_existing_files_or_symlinks(self):
+        result = self.run_child('''
+from unittest.mock import patch
+original_lexists = os.path.lexists
+original_symlink_check = Path.is_symlink
+with patch('os.path.lexists', side_effect=lambda p: True if str(p) == '/proc/self/maps' else original_lexists(p)):
+    existing = rejected(lambda: Path('/proc/self/maps').read_text())
+with patch('os.path.lexists', side_effect=lambda p: False if str(p) == '/proc/self/maps' else original_lexists(p)):
+    with patch.object(Path, 'is_symlink', lambda p: True if str(p) == '/proc/self' else original_symlink_check(p)):
+        symlink = rejected(lambda: Path('/proc/self/maps').read_text())
+print(json.dumps({'errors': [existing, symlink], 'counts': counts}))
+''')
+        self.assertEqual(result['errors'], ['MPS_PLATFORM_PROBE_IS_NOT_ABSENT'] * 2)
+        self.assertEqual(result['counts']['absent_platform_probes'], 0)
+
+    def test_missing_linux_maps_exception_does_not_allow_other_proc_paths(self):
+        result = self.run_child('''
+errors = [rejected(lambda: Path('/proc/self/other').read_text()),
+          rejected(lambda: Path('/proc/other/maps').read_text()),
+          rejected(lambda: Path('/proc/self/../self/maps').read_text())]
+print(json.dumps({'errors': errors, 'counts': counts}))
+''')
+        self.assertEqual(result['counts']['blocked_read'], 3)
+        self.assertEqual(result['counts']['absent_platform_probes'], 0)
+
+    def test_maps_permission_error_is_not_treated_as_absence(self):
+        result = self.run_child('''
+from unittest.mock import patch
+original_lstat = os.lstat
+def denied_lstat(path, *args, **kwargs):
+    if str(path) == '/proc/self/maps':
+        raise PermissionError('synthetic denied path')
+    return original_lstat(path, *args, **kwargs)
+with patch('os.lstat', side_effect=denied_lstat):
+    error = rejected(lambda: Path('/proc/self/maps').read_text())
+print(json.dumps({'error': error, 'counts': counts}))
+''')
+        self.assertEqual(result['error'], 'MPS_PLATFORM_PROBE_IS_NOT_ABSENT')
+        self.assertEqual(result['counts']['absent_platform_probes'], 0)
+
+    def test_blocked_read_path_diagnostics_are_bounded_and_content_free(self):
+        result = self.run_child('''
+for i in range(12):
+    rejected(lambda i=i: (outside / f'rejected-{i}').read_text())
+print(json.dumps(counts))
+''')
+        self.assertEqual(result['blocked_read'], 12)
+        self.assertEqual(len(result['blocked_read_paths']), 8)
+        self.assertTrue(all('/outside/rejected-' in p for p in result['blocked_read_paths']))
+
     def test_cache_cannot_move_input_or_evidence(self):
         result = self.run_child('''
 write_json_new(output / 'result.json', {'ok': True})
