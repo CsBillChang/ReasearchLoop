@@ -1,0 +1,8 @@
+# Only for the isolated reranker MPS experiment; do not install into the deployed environment.
+# Python 3.14 arm64. Full resolved dependency identities are frozen in the private run manifest.
+numpy==2.5.4
+onnxruntime==1.31.0
+safetensors==0.8.0
+tokenizers==0.23.3
+torch==2.14.1
+transformers==5.20.2
