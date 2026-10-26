@@ -80,6 +80,37 @@ class ResearchProgressTests(unittest.TestCase):
         self.commit(gaps=[])
         self.assertEqual(self.service.snapshot(self.tid)['gaps'], [])
 
+    def test_existing_finding_id_updates_without_losing_sources(self):
+        """复制本任务真实ID更新发现；省略证据不会删除已取得的来源。"""
+        self.commit()
+        original = self.service.snapshot(self.tid)['findings'][0]
+        candidate = self.service.prepare(self.tid, ResearchProgressInput(
+            findings=[ProgressFinding(finding_id=original['finding_id'], text='补充语言特征的适用条件')]))
+        self.assertEqual(len(candidate['findings']), 1)
+        updated = candidate['findings'][0]
+        self.assertEqual(updated['finding_id'], original['finding_id'])
+        self.assertEqual(updated['text'], '补充语言特征的适用条件')
+        self.assertEqual(updated['sources'], original['sources'])
+        self.assertEqual(updated['revision'], original['revision'] + 1)
+        self.assertEqual(self.service.snapshot(self.tid)['findings'][0], original)
+
+    def test_invented_and_foreign_finding_ids_are_rejected(self):
+        """自拟编号和其他任务真实ID均不得被悄悄当作新增发现。"""
+        self.commit()
+        original = self.service.snapshot(self.tid)['findings'][0]
+        for invented in ('f1', 'F1', 'invented-topic'):
+            with self.subTest(finding_id=invented):
+                with self.assertRaisesRegex(ValueError, 'unknown finding_id'):
+                    self.service.prepare(self.tid, ResearchProgressInput(
+                        findings=[ProgressFinding(finding_id=invented, text='不能据此新增')]))
+        other = TaskService(self.db).create(TaskCreate(
+            prompt='独立任务，不保存', idempotency_key=uuid4().hex)).task_id
+        with self.assertRaisesRegex(ValueError, 'unknown finding_id'):
+            self.service.prepare(other, ResearchProgressInput(findings=[ProgressFinding(
+                finding_id=original['finding_id'], text='不能复用其他任务编号')]))
+        self.assertEqual(self.service.snapshot(self.tid)['findings'], [original])
+        self.assertEqual(self.service.snapshot(other)['findings'], [])
+
     def test_committed_action_cannot_be_replaced(self):
         """同一成功行动的修改请求不能静默覆盖历史。"""
         action = self.commit()

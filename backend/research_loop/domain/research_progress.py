@@ -7,7 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field
 # 只要求模型给出发现及已有证据，版本、位置、核验状态由业务层派生。
 class ProgressFinding(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
-    finding_id: str | None = None
+    finding_id: str | None = Field(default=None, description=(
+        "Omit for a new finding; the system assigns its ID. "
+        "To update, copy an existing finding_id from this task's current research progress. "
+        "Do not invent an ID or reuse one from another task."))
     text: str = Field(min_length=1)
     evidence_ids: list[str] = Field(default_factory=list)
 
