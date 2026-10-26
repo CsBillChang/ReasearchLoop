@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from contextlib import ExitStack
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -47,9 +48,6 @@ def credential_values(path: Path) -> dict:
         key, separator, value = line.strip().partition('=')
         if separator and key in wanted:
             values[key] = value.strip().strip('\"\'')
-    for key in wanted:
-        if os.environ.get(key):
-            values[key] = os.environ[key]
     if not values.get('DEEPSEEK_API_KEY'):
         raise ValueError('未配置模型凭据；没有发送请求')
     values.setdefault('DEEPSEEK_MODEL', 'deepseek-chat')
@@ -61,6 +59,110 @@ def credential_values(path: Path) -> dict:
             or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment):
         raise ValueError('只允许已配置的官方模型端点；没有发送请求')
     return values
+
+
+def public_model_ips(rows: list) -> set[str]:
+    """只接受官方DNS结果中的公网单播地址，拒绝回环与私网旁路。
+
+    Args:
+        rows: getaddrinfo 返回的地址记录。
+
+    Returns:
+        已检查的IPv4或IPv6地址；不会调用DNS或建立连接。
+
+    Raises:
+        PermissionError: 结果为空、地址无效或包含非公网地址。
+    """
+    addresses = set()
+    for row in rows:
+        try:
+            address = row[4][0]
+            if not isinstance(address, str):
+                raise ValueError('address must be text')
+            parsed = ipaddress.ip_address(address)
+        except (IndexError, TypeError, ValueError) as exc:
+            raise PermissionError('拒绝无效的模型DNS结果') from exc
+        if '%' in address or not parsed.is_global or parsed.is_multicast:
+            raise PermissionError('拒绝模型DNS中的非公网地址')
+        addresses.add(address)
+    if not addresses:
+        raise PermissionError('模型DNS没有可用公网地址')
+    return addresses
+
+
+def semantic_review_binding(output: Path, turn_id: str, task_id: str) -> dict:
+    """生成逐轮审阅应绑定的实际工件身份，不产生通过结论。"""
+    directory = output / turn_id
+    return {'turn_id': turn_id, 'task_id': task_id,
+            'artifact_sha256': {name: sha(directory / name)
+                for name in ('answer.md', 'memory.json', 'trace.json')}}
+
+
+def validate_semantic_review(output: Path, turn_id: str, task_id: str) -> dict:
+    """核对离线语义审阅身份；关系的语义正确性由审阅者明确逐项判断。
+
+    Args:
+        output: 当前批次隔离输出目录。
+        turn_id: 已执行且即将作为前置条件的轮次。
+        task_id: 该轮真实创建的根任务身份。
+
+    Returns:
+        身份、工件和逐项判据都通过的审阅记录。
+
+    Raises:
+        ValueError: 审阅缺失、错绑、工件变化或必要语义项没有明确通过。
+    """
+    directory = output / turn_id
+    try:
+        review = json.loads((directory / 'semantic-review.json').read_text())
+        binding = semantic_review_binding(output, turn_id, task_id)
+        memory = json.loads((directory / 'memory.json').read_text())
+        trace = json.loads((directory / 'trace.json').read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValueError('上一轮语义审阅或实际工件缺失，停止后续真实调用') from exc
+    if (not isinstance(review, dict) or review.get('passed') is not True
+            or any(review.get(key) != value for key, value in binding.items())):
+        raise ValueError('上一轮语义审阅未明确通过或未绑定实际任务和工件')
+    if (not isinstance(memory, dict) or memory.get('task_id') != task_id
+            or not isinstance(trace, dict) or not isinstance(trace.get('root'), dict)
+            or trace['root'].get('task_id') != task_id):
+        raise ValueError('上一轮实际工件不属于该根任务')
+    checks = review.get('checks')
+    if (not isinstance(checks, dict)
+            or any(checks.get(key) is not True for key in ('answer_semantics', 'summary_semantics'))):
+        raise ValueError('上一轮回答及摘要语义尚未逐项审阅通过')
+    note = memory.get('continuation_memory') if isinstance(memory, dict) else None
+    if not summary_has_conclusions(note):
+        raise ValueError('上一轮没有可审阅的非空接续结论')
+    if turn_id == 'T2':
+        relations = note.get('corrections')
+        assessments = review.get('correction_target_reviews')
+        if (not isinstance(relations, list) or not relations
+                or not isinstance(assessments, list) or len(assessments) != len(relations)):
+            raise ValueError('T2需要逐条审阅更新关系的具体目标')
+        fields = ('previous_task_id', 'previous_key', 'previous_content_hash', 'replacement_key', 'relation')
+        expected = [tuple(item.get(key) for key in fields) for item in relations if isinstance(item, dict)]
+        assessed = []
+        for item in assessments:
+            if (not isinstance(item, dict) or item.get('passed') is not True
+                    or not isinstance(item.get('reason'), str) or not item['reason'].strip()):
+                raise ValueError('T2关系目标的人工语义审阅未明确通过')
+            assessed.append(tuple(item.get(key) for key in fields))
+        if (any(not isinstance(value, str) or not value for row in [*expected, *assessed] for value in row)
+                or len(expected) != len(relations) or len(set(expected)) != len(expected)
+                or sorted(expected) != sorted(assessed)):
+            raise ValueError('T2语义审阅未绑定实际更新关系')
+    return review
+
+
+def summary_has_conclusions(note: dict) -> bool:
+    """只承认已保存且含非空结论的摘要，状态applied本身不等于覆盖完成。"""
+    if not isinstance(note, dict):
+        return False
+    conclusions = note.get('conclusions')
+    return (note.get('status') == 'applied' and isinstance(conclusions, list) and bool(conclusions)
+            and all(isinstance(item, dict) and isinstance(item.get('text'), str)
+                    and bool(item['text'].strip()) for item in conclusions))
 
 
 def sanitized_environment() -> None:
@@ -101,7 +203,7 @@ def prepare(output: Path, credentials: Path) -> None:
         'scenario_sha256': sha(Path(__file__).parent / 'real_scenarios.json'),
         'credential_file_sha256': sha(credentials), 'model': settings.deepseek_model,
         'base_url': settings.deepseek_base_url, 'limits': LIMITS, 'tools': sorted(TOOLS),
-        'authorization': '用户2026-10-26明确要求现在开始实际验证，并要求不污染当前部署环境。',
+        'authorization': '用户2026-10-26授权先在隔离环境修复规划引句，离线通过后继续真实Memory测试；保留失败记录和GitHub回滚点，控制调用预算，不影响部署。',
         'scope': '一个合成场景、三轮真实调用；不是自然压缩或Memory因果收益实验',
         'stop_conditions': ['任何HTTP拒绝/unknown/缺usage', '任一工具失败', '摘要或更新关系未通过',
                             '语义审阅未通过', '预算/时限/隔离不符'],
@@ -129,9 +231,10 @@ def execute_turn(output: Path, credentials: Path, turn_id: str) -> None:
         raise ValueError('该轮已经创建；禁止重跑或恢复发送')
     if position:
         previous = turns[position - 1]['id']
-        review_path = output / previous / 'semantic-review.json'
-        if not review_path.exists() or not json.loads(review_path.read_text()).get('passed'):
-            raise ValueError('上一轮语义审阅未通过，停止后续真实调用')
+        previous_task = state['turns'].get(previous, {}).get('task_id')
+        if not isinstance(previous_task, str) or not previous_task:
+            raise ValueError('上一轮根任务身份缺失，停止后续真实调用')
+        validate_semantic_review(output, previous, previous_task)
         if not state['turns'].get(previous, {}).get('mechanism_ready'):
             raise ValueError('上一轮机制未通过，停止后续真实调用')
     values = credential_values(credentials)
@@ -158,7 +261,7 @@ def execute_turn(output: Path, credentials: Path, turn_id: str) -> None:
     original_files = FileStore.__init__
     original_connect = socket.socket.connect
     original_getaddrinfo = socket.getaddrinfo
-    allowed_ips = {row[4][0] for row in original_getaddrinfo('api.deepseek.com', 443, type=socket.SOCK_STREAM)}
+    allowed_ips = public_model_ips(original_getaddrinfo('api.deepseek.com', 443, type=socket.SOCK_STREAM))
 
     def database_guard(database, url, *args, **kwargs):
         """所有业务连接只允许本轮唯一SQLite文件。"""
@@ -184,7 +287,7 @@ def execute_turn(output: Path, credentials: Path, turn_id: str) -> None:
         if host not in {'api.deepseek.com', b'api.deepseek.com'} or port != 443:
             raise PermissionError('拒绝非模型端点DNS')
         rows = original_getaddrinfo(host, port, *args, **kwargs)
-        allowed_ips.update(row[4][0] for row in rows)
+        allowed_ips.update(public_model_ips(rows))
         return rows
 
     class PilotProvider:
@@ -267,13 +370,15 @@ def execute_turn(output: Path, credentials: Path, turn_id: str) -> None:
         memory = json.loads(memory['record_json']) if memory else {}
         note = memory.get('continuation_memory') or {}
         known = [actual_usage(json.loads(call.get('usage_json') or '{}')) for call in calls]
-        ready = (task['status'] == 'completed' and note.get('status') == 'applied'
+        ready = (task['status'] == 'completed' and summary_has_conclusions(note) and bool(calls)
                  and all(call['status'] == 'succeeded' and count is not None for call, count in zip(calls, known))
                  and not any(item['status'] == 'failed' for item in actions)
                  and not gate.summary().get('stop_reason'))
         if turn_id == 'T2':
             ready = ready and bool(note.get('corrections')) and all(
-                item['relation'] == 'updates' for item in note.get('corrections', []))
+                item['relation'] == 'updates'
+                and item['previous_task_id'] == state['turns']['T1']['task_id']
+                for item in note.get('corrections', []))
         directory = output / turn_id
         write_json(directory / 'result.json', result.model_dump(mode='json'))
         write_json(directory / 'trace.json', {'root': task, 'model_calls': calls, 'actions': actions})
@@ -284,7 +389,10 @@ def execute_turn(output: Path, credentials: Path, turn_id: str) -> None:
             'known_total_tokens': sum(value for value in known if value is not None),
             'usage_missing_receipts': sum(value is None for value in known),
             'summary_status': note.get('status'), 'corrections': note.get('corrections', []),
-            'mechanism_ready': ready, 'gate': gate.summary(), 'semantic_review': 'pending'}
+            'mechanism_ready': ready, 'gate': gate.summary(), 'semantic_review': 'pending',
+            'semantic_review_binding': semantic_review_binding(output, turn_id, task_id),
+            'required_semantic_checks': ['answer_semantics', 'summary_semantics'],
+            'correction_target_review_required': turn_id == 'T2'}
         write_json(directory / 'audit.json', audit)
         state['turns'][turn_id].update(mechanism_ready=ready, status=task['status'])
         write_json(output / 'state.json', state)

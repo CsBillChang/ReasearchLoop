@@ -45,7 +45,11 @@ def main() -> int:
 
     modules = [
         'backend.tests.unit.test_continuation_memory',
+        'backend.tests.unit.test_continuation_real_gate',
+        'backend.tests.unit.test_continuation_real_runner',
         'backend.tests.integration.test_continuation_memory',
+        'backend.tests.integration.test_plan_quote_contiguity',
+        'backend.tests.integration.test_plan_ownership_screening',
         'backend.tests.unit.test_context_continuity',
         'backend.tests.unit.test_context_workspace',
         'backend.tests.unit.test_context_working_set',

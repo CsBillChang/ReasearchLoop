@@ -15,9 +15,19 @@ from research_loop.tools.delegation import specs
 class ContinuationContractTests(unittest.TestCase):
     """保护默认声明及来源身份，避免实验改变原有交付接口。"""
 
-    def test_disabled_delegation_schema_matches_release_baseline(self):
-        """与866c193实际生成的完整调度工具schema逐字规范化比较。"""
-        payload = json.dumps([item.schema() for item in specs()], sort_keys=True, ensure_ascii=False)
+    def test_disabled_delegation_matches_baseline_except_plan_quote_guidance(self):
+        """只扣除明确新增的引句说明，其余工具描述和参数保持866c193基线。"""
+        schemas = [item.schema() for item in specs()]
+        plan = next(item['function'] for item in schemas if item['function']['name'] == 'set_research_plan')
+        old = ('Put actual user hard sources/date constraints on the corresponding origin=user goals '
+               'with verbatim source_quote; top-level sources/date')
+        new = ('Put actual user hard sources/date constraints on the corresponding origin=user goals '
+               'with verbatim source_quote. Copy one short contiguous span from the actual user request '
+               'or resumed answer; do not paraphrase, add punctuation, or join separated spans with ellipses. '
+               'Split separated requirements into goals with their own exact quotes. Top-level sources/date')
+        self.assertEqual(plan['description'].count(new), 1)
+        plan['description'] = plan['description'].replace(new, old, 1)
+        payload = json.dumps(schemas, sort_keys=True, ensure_ascii=False)
         self.assertEqual(hashlib.sha256(payload.encode()).hexdigest(),
                          'fce1914bad533e5719a526b56b23d43094248f6edeeee8e4fbd92a295bcea3c4')
 

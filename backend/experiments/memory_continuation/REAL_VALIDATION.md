@@ -8,12 +8,55 @@
 
 `prepare` 仅在内存读取凭据、当前模型和官方端点，重新构造独立SQLite及runtime目录；不继承生产数据库、目录或工具配置。`execute` 只运行指定一轮；上一轮的机制和离线语义审阅均通过才允许下一轮。`semantic-review.json` 必须基于已经保存的实际回答，不能预填或由预期答案生成。
 
+凭据只来自显式指定的配置文件，环境变量不能覆盖账户、模型或端点。官方域名解析出的IPv4/IPv6地址也必须为公网单播，拒绝回环、私网和多播。
+
 ```sh
 .venv/bin/python -B backend/experiments/memory_continuation/run_real.py prepare --output artifacts/real-review/pilot-001 --credentials <credential-config>
 .venv/bin/python -B backend/experiments/memory_continuation/run_real.py execute --output artifacts/real-review/pilot-001 --credentials <credential-config> --turn T1
 ```
 
 输出须为当前worktree内的新目录。准备冻结源码、材料、模型和停止条件；重复轮次不恢复发送，变更源码或配置后须建立新批次。
+
+## 逐轮语义审阅
+
+每轮审阅本轮回答和实际保存的摘要，覆盖场景的全部 `required_semantics`；`applied` 不替代语义判断，空结论摘要不满足机制覆盖。审阅应先准备好字段结构，在真实输出产生后填写，600秒窗口不会因审阅暂停。
+
+将本轮 `audit.json` 中 `semantic_review_binding` 的三个字段原样放入本轮 `semantic-review.json`，再填写实际审阅结果。`passed` 和各项通过值必须是JSON布尔值，字符串或整数不通过。示例中的hash必须用实际工件hash，不能复制其他轮次或批次：
+
+```json
+{
+  "turn_id": "T1",
+  "task_id": "实际根任务身份",
+  "artifact_sha256": {
+    "answer.md": "实际字节sha256",
+    "memory.json": "实际字节sha256",
+    "trace.json": "实际字节sha256"
+  },
+  "passed": true,
+  "checks": {
+    "answer_semantics": true,
+    "summary_semantics": true
+  }
+}
+```
+
+T2还须增加 `correction_target_reviews`，每条实际关系对应一条明确语义判断。复制该关系的以下五个身份字段，再填写 `passed` 和说明 `reason`；审阅须确认目标是V1固定分母结论，新结论采用V2保留集分母，不能仅因为关系类型为 `updates` 就判通过。关系遗漏、无关更新、错目标、空理由或工件hash变化时停止后续轮次。
+
+```json
+{
+  "correction_target_reviews": [{
+    "previous_task_id": "实际T1根身份",
+    "previous_key": "模型实际生成的旧结论key",
+    "previous_content_hash": "实际旧结论hash",
+    "replacement_key": "模型实际生成的新结论key",
+    "relation": "updates",
+    "passed": true,
+    "reason": "基于真实新旧结论填写的目标语义审核说明"
+  }]
+}
+```
+
+上述关系身份只用于输出后的审阅，不进入模型prompt，不替模型生成摘要或更新关系。T3也保存同样绑定工件的回答与摘要语义审阅，便于最终交付核对。
 
 ## 发送门
 
