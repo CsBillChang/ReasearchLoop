@@ -15,10 +15,17 @@ from research_loop.tools.delegation import specs
 class ContinuationContractTests(unittest.TestCase):
     """保护默认声明及来源身份，避免实验改变原有交付接口。"""
 
-    def test_disabled_delegation_matches_baseline_except_plan_quote_guidance(self):
-        """只扣除明确新增的引句说明，其余工具描述和参数保持866c193基线。"""
+    def test_disabled_delegation_matches_baseline_except_explicit_guidance(self):
+        """仅归一已审查的引句/零论文说明，其余描述和参数保持866c193基线。"""
         schemas = [item.schema() for item in specs()]
         plan = next(item['function'] for item in schemas if item['function']['name'] == 'set_research_plan')
+        routing = ('For self-contained discussion, calculation or comparison using only current user-provided data '
+                   'or conversation history, with no paper material, deep-reading or file-save deliverable, '
+                   'use task_kind=memory and min_papers=0. Paper research uses search/compare/survey and needs '
+                   'a user/legacy material goal; existing papers count, so no new search does not imply memory. ')
+        self.assertTrue(plan['description'].startswith(routing))
+        self.assertEqual(plan['description'].count(routing), 1)
+        plan['description'] = plan['description'].removeprefix(routing)
         old = ('Put actual user hard sources/date constraints on the corresponding origin=user goals '
                'with verbatim source_quote; top-level sources/date')
         new = ('Put actual user hard sources/date constraints on the corresponding origin=user goals '
@@ -27,6 +34,12 @@ class ContinuationContractTests(unittest.TestCase):
                'Split separated requirements into goals with their own exact quotes. Top-level sources/date')
         self.assertEqual(plan['description'].count(new), 1)
         plan['description'] = plan['description'].replace(new, old, 1)
+        finish = next(item['function'] for item in schemas if item['function']['name'] == 'finish_task')
+        operation = (' A memory plan requires a successful memory read or operation before finishing; '
+                     'use available memory tools as needed and never claim nonexistent history.')
+        self.assertTrue(finish['description'].endswith(operation))
+        self.assertEqual(finish['description'].count(operation), 1)
+        finish['description'] = finish['description'].removesuffix(operation)
         payload = json.dumps(schemas, sort_keys=True, ensure_ascii=False)
         self.assertEqual(hashlib.sha256(payload.encode()).hexdigest(),
                          'fce1914bad533e5719a526b56b23d43094248f6edeeee8e4fbd92a295bcea3c4')

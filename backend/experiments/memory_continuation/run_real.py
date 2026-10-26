@@ -203,7 +203,7 @@ def prepare(output: Path, credentials: Path) -> None:
         'scenario_sha256': sha(Path(__file__).parent / 'real_scenarios.json'),
         'credential_file_sha256': sha(credentials), 'model': settings.deepseek_model,
         'base_url': settings.deepseek_base_url, 'limits': LIMITS, 'tools': sorted(TOOLS),
-        'authorization': '用户2026-10-26授权先在隔离环境修复规划引句，离线通过后继续真实Memory测试；保留失败记录和GitHub回滚点，控制调用预算，不影响部署。',
+        'authorization': '用户2026-10-26授权继续隔离修复零论文任务规划类型，先用已有失败记录离线回归，通过后受控真实Memory；保留GitHub回滚点和失败，控制模型预算，不影响部署。',
         'scope': '一个合成场景、三轮真实调用；不是自然压缩或Memory因果收益实验',
         'stop_conditions': ['任何HTTP拒绝/unknown/缺usage', '任一工具失败', '摘要或更新关系未通过',
                             '语义审阅未通过', '预算/时限/隔离不符'],

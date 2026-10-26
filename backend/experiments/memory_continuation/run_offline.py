@@ -49,6 +49,7 @@ def main() -> int:
         'backend.tests.unit.test_continuation_real_runner',
         'backend.tests.integration.test_continuation_memory',
         'backend.tests.integration.test_plan_quote_contiguity',
+        'backend.tests.integration.test_zero_paper_plan_routing',
         'backend.tests.integration.test_plan_ownership_screening',
         'backend.tests.unit.test_context_continuity',
         'backend.tests.unit.test_context_workspace',

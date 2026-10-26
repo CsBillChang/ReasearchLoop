@@ -495,7 +495,9 @@ class ContextService:
         if 'read_memory' in accessible:
             rules += '\n历史可read_memory按来源分页读回，档案仍是历史，不能扩大原文权限。'
         if 'set_research_plan' in accessible:
-            rules += '\n纯记忆管理使用task_kind=memory和min_papers=0；新论文研究使用原研究计划。'
+            rules += ('\n纯记忆管理，或仅依当前用户给定数据/已有对话且无需论文材料、精读或文件保存的讨论推导，'
+                      '使用task_kind=memory和min_papers=0；不新增搜索的论文问答仍走研究计划。'
+                      'memory结束前须有成功的记忆工具读取或操作，按需要读画像或检索/读回相关历史；没有历史须如实说明。')
         rules += '\n阶段成果中的source_refs指向同一成果的source_catalog，保留原文版本/页码/hash；findings_in/context_path指向当前状态中同一版完整候选。它们不是核验通过标记，旧稿与额外发现仍独立保留。'
         # projected可能恢复了旧组；本次新档案的message范围必须对应实际待压缩原件。
         archive_messages = list(projected)
