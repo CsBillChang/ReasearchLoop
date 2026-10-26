@@ -3,7 +3,7 @@ PYTHON := $(PROJECT)/.venv/bin/python
 export PYTHONPATH := $(PROJECT)/backend
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: api frontend infra migrate worker scheduler test check sync sync-index
+.PHONY: api frontend infra migrate worker scheduler test check sync sync-index sync-gpu
 .PHONY: start stop status diagnose demo backup restore
 start:
 	"$(PYTHON)" backend/scripts/manage.py start --scheduler
@@ -41,3 +41,6 @@ sync:
 	UV_PROJECT_ENVIRONMENT="$(PROJECT)/.venv" uv sync --project backend --locked
 sync-index:
 	UV_PROJECT_ENVIRONMENT="$(PROJECT)/.venv" uv sync --project backend --locked --extra local-index
+
+sync-gpu:
+	UV_PROJECT_ENVIRONMENT="$(PROJECT)/.venv" uv sync --project backend --locked --extra local-index --extra apple-gpu

@@ -2,6 +2,7 @@
 from contextlib import asynccontextmanager
 import os
 from fastapi import FastAPI, Request
+from research_loop import __version__
 from fastapi.responses import JSONResponse
 from research_loop.config import get_settings
 from research_loop.api.router import router as api_router
@@ -15,7 +16,7 @@ async def lifespan(app):
         yield
 
 
-app = FastAPI(title="ResearchLoop", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="ResearchLoop", version=__version__, lifespan=lifespan)
 
 
 @app.middleware('http')

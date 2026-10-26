@@ -81,6 +81,8 @@ class Settings(BaseModel):
     context_safety_tokens: int = Field(default=4096, ge=256)
     context_compress_ratio: float = Field(default=0.8, gt=0, lt=1)
     retrieval_enabled: bool = True
+    retrieval_route: Literal["located_fp16", "hybrid_rrf"] = "located_fp16"
+    retrieval_reranker_backend: Literal["mps_fp16", "onnx_cpu"] = "mps_fp16"
     retrieval_model_manifest: Path | None = None
     retrieval_namespace: str = "researchloop_evidence_v1"
     qdrant_url: str = "http://127.0.0.1:6339"
@@ -167,6 +169,8 @@ class Settings(BaseModel):
             web_tools_max_response_bytes=int(os.getenv("RESEARCHLOOP_WEB_TOOLS_MAX_RESPONSE_BYTES", "2097152")),
             memory_history_tokens=int(os.getenv("RESEARCHLOOP_HISTORY_TOKENS", "12000")),
             retrieval_enabled=os.getenv("RESEARCHLOOP_RETRIEVAL_ENABLED", "1") == "1",
+            retrieval_route=os.getenv("RESEARCHLOOP_RETRIEVAL_ROUTE", "located_fp16"),
+            retrieval_reranker_backend=os.getenv("RESEARCHLOOP_RERANKER_BACKEND", "mps_fp16"),
             retrieval_model_manifest=Path(os.environ["RESEARCHLOOP_RETRIEVAL_MODEL_MANIFEST"]) if os.getenv("RESEARCHLOOP_RETRIEVAL_MODEL_MANIFEST") else None,
             retrieval_namespace=os.getenv("RESEARCHLOOP_RETRIEVAL_NAMESPACE", "researchloop_evidence_v1"),
             qdrant_url=os.getenv("RESEARCHLOOP_QDRANT_URL", "http://127.0.0.1:6339"),

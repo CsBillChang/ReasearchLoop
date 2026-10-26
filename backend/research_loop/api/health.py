@@ -1,5 +1,6 @@
 """健康接口：检查服务可响应与配置是否存在，不代表数据库、PDF 或模型请求已通过实测。"""
 from fastapi import APIRouter
+from research_loop import __version__
 from research_loop.config import get_settings
 import os
 from research_loop.storage.mysql import Database
@@ -10,7 +11,9 @@ router = APIRouter()
 def health() -> dict:
     settings = get_settings()
     # agent_ready 是旧前端兼容字段，只说明配置存在，不代表模型调用成功。
-    return {"service": "ResearchLoop", "status": "ok", "stage": "AG7.5",
+    return {"service": "ResearchLoop", "version": __version__, "status": "ok", "stage": "AG7.5",
+            "retrieval_route": settings.retrieval_route,
+            "reranker_backend": settings.retrieval_reranker_backend,
             "agent_ready": bool(settings.deepseek_api_key),
             "model_key_present": bool(settings.deepseek_api_key),
             "mode": 'readonly' if os.getenv('RESEARCHLOOP_READONLY') == '1' else 'daily',

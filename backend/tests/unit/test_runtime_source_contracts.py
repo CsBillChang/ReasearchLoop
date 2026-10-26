@@ -104,7 +104,8 @@ class RuntimeSourceContracts(unittest.TestCase):
 
     def test_readiness_import_and_file_hash_checks_without_inference(self):
         """就绪只由实际导入/文件核对支持，缺依赖或权重变化单独报告。"""
-        settings = self.settings.model_copy(update={'retrieval_model_manifest': self._model_manifest()})
+        settings = self.settings.model_copy(update={'retrieval_model_manifest': self._model_manifest(),
+                                                   'retrieval_reranker_backend': 'onnx_cpu'})
         with patch('importlib.import_module', return_value=object()) as imports:
             report = runtime.local_component_readiness(settings)
         self.assertEqual({row['status'] for row in report.values()}, {'ready'})

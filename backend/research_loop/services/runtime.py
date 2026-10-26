@@ -124,7 +124,8 @@ def runtime_fingerprint(settings, *, root: Path | None = None) -> dict:
     for key in ('deepseek_api_key', 'supabase_key', 'openalex_api_key'):
         effective[key + '_present'] = bool(getattr(settings, key))
     versions = {}
-    for package in ('pydantic', 'httpx', 'langgraph', 'pymupdf', 'onnxruntime', 'numpy', 'tokenizers'):
+    for package in ('pydantic', 'httpx', 'langgraph', 'pymupdf', 'onnxruntime', 'numpy', 'tokenizers',
+                    'torch', 'transformers', 'safetensors'):
         try:
             versions[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
@@ -174,19 +175,34 @@ def local_component_readiness(settings) -> dict:
                        ('reranker', 'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')):
         files = {}
         try:
-            spec = payload[name]
+            gpu = name == 'reranker' and getattr(settings, 'retrieval_reranker_backend', 'onnx_cpu') == 'mps_fp16'
+            spec = payload['reranker_fp16' if gpu else name]
             if spec['repo'] != repo:
                 raise ValueError('unsupported model identity')
             # 与现有provider一致，清单相对路径基于当前工作目录解释。
             directory = Path(spec['directory'])
-            for filename in (spec['weights'], 'tokenizer.json', 'config.json'):
+            for filename in ((spec['weights'], 'config.json') if gpu else (spec['weights'], 'tokenizer.json', 'config.json')):
                 actual = _file_digest(directory / filename)
                 files[filename] = {**actual, 'matches': isinstance(actual.get('sha256'), str) and
                                    actual['sha256'] == spec['files'][filename]['sha256']}
+            component_imports = dict(imports)
+            if gpu:
+                original = payload['reranker']
+                for filename in ('tokenizer.json', 'config.json'):
+                    actual = _file_digest(Path(original['directory']) / filename)
+                    files['original/' + filename] = {**actual, 'matches': actual.get('sha256') ==
+                        original['files'][filename]['sha256']}
+                for package in ('torch', 'transformers', 'safetensors'):
+                    component_imports[package] = {'status': 'available' if importlib.util.find_spec(package) else 'unavailable'}
+                if (spec.get('revision') != '1427fd652930e4ba29e8149678df786c240d8825'
+                        or original.get('repo') != repo or original.get('revision') != spec.get('revision')
+                        or spec['weights'] != 'model.safetensors'):
+                    raise ValueError('unsupported FP16 model identity')
             ready = all(item['matches'] for item in files.values()) and all(
-                item['status'] == 'available' for item in imports.values())
+                item['status'] == 'available' for item in component_imports.values())
             results[name] = {'enabled': True, 'status': 'ready' if ready else 'unavailable',
-                             'imports': imports, 'files': files, 'inference_probed': False}
+                             'imports': component_imports, 'files': files, 'inference_probed': False,
+                             'backend': 'mps_fp16' if gpu else 'onnx_cpu'}
         except (KeyError, TypeError, ValueError) as exc:
             results[name] = {'enabled': True, 'status': 'unavailable', 'imports': imports,
                              'error_type': type(exc).__name__, 'inference_probed': False}

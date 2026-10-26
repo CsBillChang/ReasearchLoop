@@ -5,7 +5,8 @@
 *.pem
 *.key
 *.p12
-.venv/
+.venv
+.venv-*
 venv/
 .vscode/
 .idea/

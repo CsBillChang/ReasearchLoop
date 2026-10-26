@@ -60,12 +60,14 @@ class LocalReranker:
         Raises:
             ValueError: 输入超容量或模型输出非有限值。
         """
-        import numpy as np
-        if not passages:
-            return []
-        if len(passages) > 64:
-            raise ValueError("RERANK_CANDIDATE_LIMIT")
         with self.lock:
+            # stats仅代表本次成功评分；空输入、失败及中断均不能沿用上次成功。
+            self.last_stats = {}
+            if not passages:
+                return []
+            if len(passages) > 64:
+                raise ValueError("RERANK_CANDIDATE_LIMIT")
+            import numpy as np
             if self.session is None:
                 self._load()
             started = time.perf_counter()
@@ -77,6 +79,7 @@ class LocalReranker:
             order = sorted(range(len(rows)), key=lambda i: len(rows[i].ids)) if self.sort_by_length else list(range(len(rows)))
             scores = [0.0] * len(rows)
             padded_tokens, inference_seconds = 0, 0.0
+            batches = []
             for start in range(0, len(rows), self.batch_size):
                 indices = order[start:start+self.batch_size]
                 batch = [rows[i] for i in indices]
@@ -89,6 +92,9 @@ class LocalReranker:
                 feed = {"input_ids": ids, "attention_mask": mask}
                 if any(inp.name == "token_type_ids" for inp in self.session.get_inputs()):
                     feed["token_type_ids"] = np.zeros_like(ids)
+                batches.append({"input_indices": list(indices),
+                    "pair_lengths": [len(row.ids) for row in batch],
+                    "feed_shapes": {name: list(value.shape) for name, value in feed.items()}})
                 inference_start = time.perf_counter()
                 output = self.session.run(None, feed)[0].reshape(-1)
                 inference_seconds += time.perf_counter() - inference_start
@@ -98,5 +104,9 @@ class LocalReranker:
                     scores[original] = float(value)
             self.last_stats = {"pairs": len(rows), "input_tokens": sum(len(r.ids) for r in rows),
                 "padded_tokens": padded_tokens, "tokenize_seconds": tokenized-started,
-                "inference_seconds": inference_seconds, "total_seconds": time.perf_counter()-started}
+                "inference_seconds": inference_seconds, "total_seconds": time.perf_counter()-started,
+                "input_pair_lengths": [len(row.ids) for row in rows],
+                "execution_order": order, "batches": batches,
+                "threads": self.threads, "batch_size": self.batch_size,
+                "sort_by_length": self.sort_by_length, "status": "succeeded"}
             return scores

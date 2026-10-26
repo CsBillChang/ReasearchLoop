@@ -6,7 +6,7 @@
 <p align="center"><strong>Research Intelligence &amp; Evidence Reading</strong></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-V1.5-446c60?style=flat-square" alt="V1.5" />
+  <img src="https://img.shields.io/badge/Version-V1.5.5-446c60?style=flat-square" alt="V1.5.5" />
   <img src="https://img.shields.io/badge/Python-3.14-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.14" />
   <img src="https://img.shields.io/badge/FastAPI-009688?style=flat-square&amp;logo=fastapi&amp;logoColor=white" alt="FastAPI" />
   <img src="https://img.shields.io/badge/LangGraph-Multi--Agent-446c60?style=flat-square" alt="LangGraph Multi-Agent" />
@@ -85,11 +85,14 @@
 - **ReAct**：通过“决策—行动—观察”推进研究，由代码校验工具参数、来源版本、权限和执行边界。
 - **Reflection**：按需选择核验、补读或局部修订；结合证据与修订进展决定后续动作，区分工具执行失败和原文缺证，避免无差别重写。
 - **Memory**：分离会话上下文、研究历史与长期画像；压缩时保留目标、约束和成果身份，归档材料通过受控工具按需读回。当前要求优先于历史偏好，记忆不继承保存权限。
-- **Hybrid RAG**：原文保留版本、物理页码及内容 hash，采用 BM25＋Qdrant 双路召回、RRF 融合和 Cross-encoder 重排，范围限制在任务授权材料内。
+- **Evidence Retrieval**：原文保留版本、物理页码及内容 hash；在任务授权材料内，通过论文标题与章节定位、通用概念扩展及 BM25 选择候选，再使用 Apple GPU FP16 Cross-encoder 重排。向量索引保留供既有索引与显式旧路线使用。
 - **Persistent Execution**：API 与 Worker 分离，通过 SSE 展示进度与回答；MySQL 保存任务、事件、模型收据和项目自实现快照，结合原子领取、租约校验与幂等保存处理并发和中断。成功收据复用，未知请求不盲目重发。
 
-**Tech Stack:** Python / FastAPI / LangGraph / MySQL / Qdrant / ONNX Runtime / JavaScript / Markdown / KaTeX / SSE。
+**Tech Stack:** Python / FastAPI / LangGraph / MySQL / Qdrant / ONNX Runtime / PyTorch MPS / JavaScript / Markdown / KaTeX / SSE。
 
 <a id="quick-start"></a>
 
 ## Quick Start
+
+
+Apple Silicon 的 FP16 检索需安装 GPU 可选依赖，并准备与 [模型清单模板](config/model-manifest.example.json) 一致的本地权重。详见 [后端启动说明](backend/README.md)。模型和私有研究数据不随仓库分发。

@@ -1,1 +1,3 @@
-"""ResearchLoop。当前为重建后的 AG0 基础包。"""
+"""ResearchLoop 本地研究 Agent。"""
+
+__version__ = "1.5.5"
