@@ -41,6 +41,9 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
         credential: 真实模式由父进程内存管道注入，不写入工件。
     """
     source = Path(manifest['source_roots'][variant]).resolve()
+    allowed_cells = manifest.get('ledger_limits', {}).get('allowed_cells')
+    if allowed_cells is not None and [case_id, variant] not in allowed_cells:
+        raise PermissionError('H1 cell outside remaining authorized matrix')
     if mode == 'execute' and (manifest.get('real_execution_released') is not True
             or not manifest.get('frozen_files') or not manifest.get('github_commit')
             or not manifest.get('qualification_receipt')):
@@ -65,6 +68,9 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
     from harness_ab_resources import (load_source_bundles, rebind_bundle, prepare_parsed_cache,
         install_bundle, HarnessRetrievalRuntime)
     from harness_ab_transport import BudgetTransport
+    from harness_ab_network import OfficialNetworkPolicy
+    network_policy = OfficialNetworkPolicy(mode, manifest['vector_port'], manifest['official_ip_addresses'])
+    denied_connections = []
 
     class ExperimentBoundary(Boundary):
         """文件写入限定本次运行根，网络仅许可冻结官方 IP 与专属向量端口。"""
@@ -73,15 +79,14 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                 return
             if event == 'socket.getaddrinfo':
                 host, port = values[:2]
-                if (host, port) not in {('api.deepseek.com', 443), ('127.0.0.1', manifest['vector_port'])}:
+                if not network_policy.allow_dns(host, port):
                     self.reject('network_name_outside_experiment')
                 return
             if event == 'socket.connect':
                 address = values[1]
-                allowed = {('127.0.0.1', manifest['vector_port'])}
-                if mode == 'execute':
-                    allowed.update((address, 443) for address in manifest['official_ip_addresses'])
-                if not isinstance(address, tuple) or address[:2] not in allowed:
+                if not network_policy.allow_connect(address):
+                    denied_connections.append({'address': address, 'phase': self.phase,
+                        'at': datetime.now(timezone.utc).isoformat(), 'audit_before_connect': True})
                     self.reject('network_destination_outside_experiment')
                 return
             super().audit(event, values)
@@ -94,6 +99,22 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
         'started_at': datetime.now(timezone.utc).isoformat(), 'real_model_calls': 0}
     try:
         with ExitStack() as stack:
+            original_resolver = socket.getaddrinfo
+            dns_log_lock = threading.RLock()
+
+            def guarded_resolver(host, port, *args, **kwargs):
+                """只按当次官方DNS回答授予连接IP；HTTP端点及TLS校验仍由原传输保持。"""
+                if not network_policy.allow_dns(host, port):
+                    boundary.reject('network_name_outside_experiment')
+                try:
+                    answers = network_policy.resolve(original_resolver, host, port, *args, **kwargs)
+                except PermissionError:
+                    boundary.reject('official_dns_answer_outside_scope')
+                with dns_log_lock:
+                    write(cell / 'network-dns.json', network_policy.snapshot())
+                return answers
+
+            stack.enter_context(patch.object(socket, 'getaddrinfo', guarded_resolver))
             stack.enter_context(patch.dict(os.environ, {'PYTHONDONTWRITEBYTECODE': '1',
                 'RESEARCHLOOP_READONLY': '0', 'TMPDIR': str(temp),
                 'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
@@ -298,7 +319,8 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                 write(cell / 'actions.json', {tid: db.list_actions(tid) for tid in task_ids})
                 write(cell / 'root-row.json', db.get_task(root_id))
         report['isolation'] = {'write_root': str(runtime), 'denials': boundary.denials,
-            'sqlite_paths': sorted(boundary.sqlite_paths), 'implicit_settings_and_dotenv_denied': True}
+            'sqlite_paths': sorted(boundary.sqlite_paths), 'implicit_settings_and_dotenv_denied': True,
+            'network_policy': network_policy.snapshot(), 'denied_connections': denied_connections}
         if any(row['phase'] != 'guard_selfcheck' for row in boundary.denials):
             report['status'] = 'failed'
         report['finished_at'] = datetime.now(timezone.utc).isoformat()
