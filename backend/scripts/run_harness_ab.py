@@ -223,10 +223,11 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                 else:
                     if not credential or read(manifest['authorization_path'])['approved'] is not True:
                         raise PermissionError('H1 execution authorization or credential absent')
-                    ledger = Ledger(runtime / 'budget.sqlite3')
+                    ledger = Ledger(runtime / 'budget.sqlite3', **manifest.get('ledger_limits', {}))
                     begun = ledger.begin_root(root_id, case_id, variant)
                     snap = ledger.snapshot()
-                    deadline = min(begun['started_at'] + 900, snap['started_at'] + 5400)
+                    deadline = min(begun['started_at'] + ledger.config['root_seconds'],
+                        snap['started_at'] + ledger.config['batch_seconds'])
 
                     def factory(_settings):
                         """所有角色共用根账本；原生适配器仅替换 HTTP 传输。"""

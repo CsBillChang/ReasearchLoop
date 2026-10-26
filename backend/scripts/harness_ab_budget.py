@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 import json
 from pathlib import Path
 import sqlite3
@@ -25,9 +26,18 @@ class Ledger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.clock = clock or time.time
         allowed_cells = allowed_cells or [(f'H1-Q{i}', variant) for i in range(1, 5) for variant in ('A', 'B')]
+        try:
+            amount = Decimal(str(batch_yuan))
+        except InvalidOperation as exc:
+            raise ValueError('money budget must be a finite positive decimal') from exc
+        if not amount.is_finite() or amount <= 0:
+            raise ValueError('money budget must be a finite positive decimal')
+        nano_yuan = amount * Decimal(1_000_000_000)
+        if nano_yuan != nano_yuan.to_integral_value():
+            raise ValueError('money budget must be exactly representable in nano yuan')
         self.config = {'allowed_cells': sorted([list(cell) for cell in allowed_cells]),
             'batch_tokens': batch_tokens, 'batch_requests': batch_requests,
-            'batch_nano_yuan': int(batch_yuan * 1_000_000_000), 'batch_seconds': batch_seconds,
+            'batch_nano_yuan': int(nano_yuan), 'batch_seconds': batch_seconds,
             'root_tokens': root_tokens, 'root_requests': root_requests,
             'root_seconds': root_seconds, 'max_output_tokens': max_output_tokens,
             'input_nano_per_token': 2000, 'cached_input_nano_per_token': 40,

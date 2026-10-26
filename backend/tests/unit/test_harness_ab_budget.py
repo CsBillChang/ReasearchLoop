@@ -1,5 +1,6 @@
 """真实调用前检查持久预算原子性与未知结果的保守处理。"""
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -187,6 +188,77 @@ class HarnessAbBudgetTests(unittest.TestCase):
             Ledger(ledger.path, batch_tokens=13_000_000, clock=lambda: self.now)
         with self.assertRaisesRegex(BudgetHalt, 'output allowance'):
             ledger.reserve('root', input_upper_bound=100, max_output_tokens=65_537)
+
+    def test_carried_money_is_exact_and_reopen_uses_the_same_remaining_limits(self):
+        """历史扣费后的金额以十进制进入纳元，不受float截断或默认额度回填影响。"""
+        limits = {'batch_tokens': 11_986_871, 'batch_requests': 191,
+            'batch_yuan': '95.97369896', 'batch_seconds': 5390}
+        ledger = self.started(**limits)
+        identity = self.sent(ledger)
+        ledger.settle(identity, {'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2})
+        same = Ledger(ledger.path, clock=lambda: self.now,
+            **{**limits, 'batch_yuan': Decimal('95.97369896')})
+        snapshot = same.snapshot()
+        self.assertEqual(snapshot['limits']['batch_nano_yuan'], 95_973_698_960)
+        self.assertEqual(snapshot['actual_known_tokens'], 2)
+        self.assertIsNone(snapshot['halt_reason'])
+        with self.assertRaisesRegex(ValueError, 'cannot change'):
+            Ledger(ledger.path, clock=lambda: self.now)
+        self.assertEqual(same.snapshot()['limits'], snapshot['limits'])
+
+    def test_invalid_or_fractional_nano_money_is_rejected_without_rounding_up(self):
+        for value in ('NaN', 'Infinity', '-Infinity', '0', '-1', '0.0000000001', True, 'not-money'):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'money budget'):
+                    self.ledger(batch_yuan=value)
+
+    def test_carried_token_boundary_preserves_original_total_authorization(self):
+        """合成聚合用量填满剩余额度，下一预留不能吃回已经花掉的历史Token。"""
+        historical = 13_129
+        remaining = 12_000_000 - historical
+        ledger = self.started(batch_tokens=remaining, root_tokens=remaining,
+            batch_requests=191, batch_yuan='95.97369896', batch_seconds=5390)
+        # 单例模拟累计边界；正式transport始终使用供应商容量上界而非此聚合测试值。
+        request = ledger.reserve('root', input_upper_bound=remaining - 1, max_output_tokens=1)
+        ledger.mark_sent(request['reservation_id'])
+        ledger.settle(request['reservation_id'], {'prompt_tokens': remaining - 1,
+            'completion_tokens': 1, 'total_tokens': remaining})
+        snapshot = ledger.snapshot()
+        self.assertEqual(historical + snapshot['actual_known_tokens'], 12_000_000)
+        with self.assertRaisesRegex(BudgetHalt, 'token'):
+            ledger.reserve('root', input_upper_bound=1, max_output_tokens=1)
+
+    def test_carried_requests_are_shared_across_roots_and_never_reset_to_192(self):
+        """用多个根填满新191次，历史1次只在总账相加一次。"""
+        ledger = self.ledger(batch_tokens=11_986_871, batch_requests=191,
+            batch_yuan='95.97369896', batch_seconds=5390)
+        sent = 0
+        for index in range(6):
+            root_id = 'family-' + str(index)
+            ledger.begin_root(root_id, f'H1-Q{index // 2 + 1}', 'A' if index % 2 == 0 else 'B')
+            for _ in range(32 if index < 5 else 31):
+                reservation = ledger.reserve(root_id, input_upper_bound=1, max_output_tokens=1)
+                ledger.mark_sent(reservation['reservation_id'])
+                ledger.settle(reservation['reservation_id'],
+                    {'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2})
+                sent += 1
+        self.assertEqual(sent, 191)
+        self.assertEqual(1 + ledger.snapshot()['physical_sent_requests'], 192)
+        with self.assertRaisesRegex(BudgetHalt, 'request'):
+            ledger.reserve('family-5', input_upper_bound=1, max_output_tokens=1)
+
+    def test_carried_time_and_money_caps_leave_no_historical_overrun(self):
+        """执行时间向下取整，实际历史费用与新金额上限精确相加。"""
+        old_seconds = Decimal('9.206024169921875')
+        old_nano = 26_301_040
+        ledger = self.started(batch_tokens=11_986_871, batch_requests=191,
+            batch_yuan='95.97369896', batch_seconds=5390)
+        config = ledger.snapshot()['limits']
+        self.assertEqual(old_nano + config['batch_nano_yuan'], 96_000_000_000)
+        self.assertLessEqual(old_seconds + config['batch_seconds'], Decimal('5400'))
+        self.now += 5390
+        with self.assertRaisesRegex(BudgetHalt, 'batch time'):
+            ledger.reserve('root', input_upper_bound=1, max_output_tokens=1)
 
 
 if __name__ == '__main__':
