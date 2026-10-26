@@ -125,6 +125,21 @@ def _prompt(case: dict, attachments: list[dict]) -> str:
         '禁止保存文件或联网扩展。最终交付当前正文及必要的处理说明。')
 
 
+def programmatic_review_message(identity: str, arguments: dict) -> dict:
+    """构造程序核验消息；空推理槽只用于明确非模型生成的首轮动作。
+
+    带工具的思考模式要求历史 assistant 保留 reasoning_content。程序动作没有
+    模型推理，因此显式填空串；不能用此函数为真实模型历史补造或覆盖推理。
+    """
+    if not identity.startswith('programmatic-review-') or identity == 'programmatic-review-':
+        raise ValueError('REFLECTION_PILOT_PROGRAMMATIC_REVIEW_ID_REQUIRED')
+    return {'role': 'assistant',
+        'content': '评测程序按已批准固定稿入口发起首轮核验；此动作不是模型生成。',
+        'reasoning_content': '',
+        'tool_calls': [{'id': identity, 'type': 'function', 'function': {
+            'name': 'review_research', 'arguments': json.dumps(arguments, ensure_ascii=False)}}]}
+
+
 def _seed_review(db, task_id: str, case: dict, prompt: str, attachments: list[dict],
                  evidence_ids: list[str], settings) -> dict:
     """仅种入程序首轮核验动作；不伪造模型响应或模型收据。"""
@@ -144,10 +159,7 @@ def _seed_review(db, task_id: str, case: dict, prompt: str, attachments: list[di
     state.update(coverage_required=True, evidence_ids=evidence_ids,
         pending_tool_scope=['review_research'],
         pending_tool_calls=[{'call_id': identity, 'name': 'review_research', 'arguments': args}])
-    state['messages'].append({'role': 'assistant',
-        'content': '评测程序按已批准固定稿入口发起首轮核验；此动作不是模型生成。',
-        'tool_calls': [{'id': identity, 'type': 'function', 'function': {
-            'name': 'review_research', 'arguments': json.dumps(args, ensure_ascii=False)}}]})
+    state['messages'].append(programmatic_review_message(identity, args))
     origin = {'origin': 'evaluation_program_explicit_fixed_draft_review', 'model_generated': False,
               'model_receipt_created': False, 'tool_call_id': identity,
               'draft_sha256': hashlib.sha256(draft.encode()).hexdigest()}

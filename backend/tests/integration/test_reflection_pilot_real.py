@@ -13,14 +13,38 @@ from integration.test_research_reflection import ScopedPDF
 from research_loop.config import Settings
 from research_loop.providers.deepseek import DeepSeekProvider, RequestNotSent
 from research_loop.services.papers import PaperService
+from research_loop.storage.mysql import Database
 from scripts.reflection_baseline_runtime import deny_socket_connections, business_source_hashes
 from scripts.reflection_pilot_real import execute_case, run_pilot
+from unit.test_reflection_pilot_protocol import validate_thinking_history
 
 
 class PilotScenario(BaselineScenario):
-    """只调整合成读取动作的页范围；意见和补丁仍由模拟模型工具响应给出。"""
+    """模拟带推理字段的响应，并在HTTP替身边界严格核对下一轮回传。"""
+
+    def __init__(self, mode='revision'):
+        self.response_reasoning = {}
+        self.programmatic_ids = set()
+        super().__init__(mode)
+
+    def response(self, name, arguments):
+        response = super().response(name, arguments)
+        raw = response.json()
+        message = raw['choices'][0]['message']
+        identity = message['tool_calls'][0]['id']
+        # 明确的合成响应哨兵，验证真实解析/持久化路径，不使用私有模型推理。
+        message['reasoning_content'] = '合成响应推理哨兵：' + identity + '\n逐字保留。'
+        self.response_reasoning[identity] = message['reasoning_content']
+        return httpx.Response(200, json=raw)
 
     def handler(self, request):
+        body = json.loads(request.content)
+        validate_thinking_history(body, programmatic_ids=self.programmatic_ids,
+            expected_reasoning=self.response_reasoning)
+        for message in body['messages']:
+            for call in message.get('tool_calls', []):
+                if call['id'] not in self.programmatic_ids:
+                    assert call['id'] in self.response_reasoning, 'model response fixture provenance missing'
         response = super().handler(request)
         function = response.json()['choices'][0]['message']['tool_calls'][0]['function']
         if function['name'] == 'read_paper':
@@ -30,6 +54,13 @@ class PilotScenario(BaselineScenario):
         return response
 
     def factory(self, settings):
+        # 空字段许可来自本案原生事件，不能只凭模型消息中的ID前缀获得。
+        rows = Database(settings.database_url).fetchall(
+            'SELECT payload_json FROM task_events WHERE event_type=?',
+            ('reflection_pilot_programmatic_review',))
+        origins = [json.loads(row['payload_json']) for row in rows]
+        self.programmatic_ids.update(origin['tool_call_id'] for origin in origins
+            if origin['model_generated'] is False and origin['model_receipt_created'] is False)
         return DeepSeekProvider('fixture', settings.deepseek_model, settings.deepseek_base_url,
             settings.request_timeout_seconds, client=httpx.Client(transport=httpx.MockTransport(self.handler)))
 
@@ -158,6 +189,67 @@ class ReflectionPilotRealEntryTests(unittest.TestCase):
         patches = [a for a in result['actions'] if a['tool_name'] == 'revise_research']
         self.assertEqual(len(patches), 1)
         self.assertEqual(patches[0]['status'], 'succeeded')
+
+    def test_thinking_fields_reach_http_unchanged_and_match_native_receipts(self):
+        result, scenario = self.run_case()
+        self.assertIsNone(result['error'], result['error'])
+        self.assertEqual(result['view']['status'], 'completed')
+        observed = [json.loads(row['request_json'])['messages'] for row in result['physical_receipts']]
+        wire = [body['messages'] for body in scenario.requests]
+        canonical = lambda messages: json.dumps(messages, sort_keys=True, ensure_ascii=False)
+        self.assertCountEqual([canonical(m) for m in observed], [canonical(m) for m in wire])
+        echoes = []
+        for body in scenario.requests:
+            self.assertNotIn('thinking', body)
+            self.assertEqual(body['model'], 'deepseek-flash')
+            self.assertEqual(body['max_tokens'], 65536)
+            for message in body['messages']:
+                for call in message.get('tool_calls', []):
+                    if call['id'].startswith('programmatic-review-'):
+                        self.assertEqual(message['reasoning_content'], '')
+                    else:
+                        self.assertEqual(message['reasoning_content'], scenario.response_reasoning[call['id']])
+                        echoes.append(call['id'])
+        self.assertTrue(echoes, 'must exercise at least one subsequent model-history round trip')
+        checkpoint = Database(self.settings(self.root/'run').database_url).get_checkpoint(result['task_id'])
+        checkpoint_echoes = []
+        for message in checkpoint['messages']:
+            for call in message.get('tool_calls', []):
+                if call['id'] in scenario.response_reasoning:
+                    self.assertEqual(message['reasoning_content'], scenario.response_reasoning[call['id']])
+                    checkpoint_echoes.append(call['id'])
+        self.assertTrue(checkpoint_echoes, 'must check persisted model reasoning after graph execution')
+        self.assertFalse(result['programmatic_review_origin']['model_generated'])
+        self.assertFalse(result['programmatic_review_origin']['model_receipt_created'])
+
+    def test_explicit_http400_stops_batch_without_retry_or_zero_filled_usage(self):
+        class SupervisorRejected(PilotScenario):
+            def handler(self, request):
+                response = super().handler(request)
+                body = json.loads(request.content)
+                if not any(t['function']['name'] == 'finish_review' for t in body['tools']):
+                    return httpx.Response(400, json={'error': {'message': 'synthetic protocol rejection'}})
+                return response
+
+        scenario = SupervisorRejected()
+        first, first_digest = self.material('R01')
+        second, second_digest = self.material('R02')
+        target = self.root/'rejected-batch'
+        with deny_socket_connections():
+            report = run_pilot([
+                {'case_path': first, 'expected_input_sha256': first_digest},
+                {'case_path': second, 'expected_input_sha256': second_digest}], target,
+                settings_factory=self.settings, provider_factory=scenario.factory,
+                resource_factory=ToyResources, approval=self.approval, execution_kind='substitute')
+        self.assertEqual(report['created'], 1)
+        self.assertEqual(report['uncreated'], 1)
+        self.assertEqual(report['global_stop'], 'provider_response_error')
+        self.assertEqual(len(scenario.requests), 2)
+        self.assertFalse((target/'cases'/'R02').exists())
+        rows = report['results'][0]['physical_receipts']
+        self.assertEqual([row['status'] for row in rows], ['succeeded', 'rejected'])
+        self.assertEqual(json.loads(rows[-1].get('usage_json') or '{}'), {})
+        self.assertNotEqual(json.loads(rows[-1].get('usage_json') or '{}').get('total_tokens'), 0)
 
     def test_correct_case_remains_unchanged_after_programmatic_review(self):
         result, scenario = self.run_case('correct')
