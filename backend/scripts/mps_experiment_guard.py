@@ -269,4 +269,16 @@ def install_guards(output_root: Path, read_roots: Sequence[Path],
         setattr(socket, name, denied('blocked_network', 'MPS_NETWORK_FORBIDDEN'))
     sqlite3.connect = denied('blocked_database', 'MPS_DATABASE_FORBIDDEN')
     subprocess.Popen = denied('blocked_subprocess', 'MPS_SUBPROCESS_FORBIDDEN')
+    counts['low_level_spawn_entrypoints_blocked'] = []
+    # multiprocessing.spawnv_passfds直接调用C扩展，不经过Popen/os.fork审计入口。
+    try:
+        import _posixsubprocess
+    except ImportError:
+        pass
+    else:
+        _posixsubprocess.fork_exec = denied('blocked_subprocess', 'MPS_SUBPROCESS_FORBIDDEN')
+        counts['low_level_spawn_entrypoints_blocked'].append('_posixsubprocess.fork_exec')
+        if hasattr(subprocess, '_fork_exec'):
+            subprocess._fork_exec = denied('blocked_subprocess', 'MPS_SUBPROCESS_FORBIDDEN')
+            counts['low_level_spawn_entrypoints_blocked'].append('subprocess._fork_exec')
     return counts

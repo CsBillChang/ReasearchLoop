@@ -9,7 +9,7 @@ from pathlib import Path
 import tempfile
 import struct
 import time
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -258,6 +258,29 @@ class MpsComparisonTests(unittest.TestCase):
             freeze.write_text(json.dumps(frozen))
             with self.assertRaisesRegex(BoundaryViolation, "PILOT_GATE_REQUIRED"):
                 comparison.execute(freeze, comparison.digest(freeze), p, "performance")
+
+    def test_official_progress_disable_precedes_model_loading(self):
+        events = []
+        transformers = ModuleType("transformers")
+        transformers.__path__ = []
+        utils = ModuleType("transformers.utils")
+        utils.logging = SimpleNamespace(disable_progress_bar=lambda: events.append("progress_disabled"))
+        transformers.utils = utils
+        class StopBeforeModel(RuntimeError):
+            pass
+        def fake_loader(*args, **kwargs):
+            events.append("from_pretrained")
+            self.assertEqual(events, ["progress_disabled", "from_pretrained"])
+            self.assertTrue(kwargs["local_files_only"] and kwargs["use_safetensors"])
+            self.assertFalse(kwargs["trust_remote_code"])
+            raise StopBeforeModel("synthetic stop; no model constructed")
+        transformers.AutoModelForSequenceClassification = SimpleNamespace(from_pretrained=fake_loader)
+        with patch.dict(comparison.sys.modules, {"transformers": transformers, "transformers.utils": utils}):
+            with self.assertRaises(StopBeforeModel):
+                comparison.build_engine("mps_fp16", {"inputs": {"model_manifest": {"path": "not-read"}}},
+                    {"model_manifest": {"reranker": {}}, "float_manifest": {"directory": "not-read"}},
+                    self.counters, self.budget, self.started, self.torch)
+        self.assertEqual(events, ["progress_disabled", "from_pretrained"])
 
     def test_tf5_empty_loading_sets_are_json_serializable(self):
         info = {"missing_keys": set(), "unexpected_keys": set(), "mismatched_keys": set(), "error_msgs": []}

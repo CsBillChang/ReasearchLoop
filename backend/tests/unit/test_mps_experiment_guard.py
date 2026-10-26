@@ -206,6 +206,25 @@ print(json.dumps({'errors': errors, 'counts': counts}))
         self.assertEqual(result['counts']['blocked_database'], 1)
         self.assertEqual(result['counts']['blocked_subprocess'], 1)
 
+    def test_low_level_multiprocessing_spawn_is_denied_before_native_exec(self):
+        result = self.run_child('''
+try:
+    import _posixsubprocess
+except ImportError:
+    print(json.dumps({'supported': False, 'counts': counts}))
+else:
+    from multiprocessing.util import spawnv_passfds
+    errors = [rejected(lambda: spawnv_passfds('/usr/bin/true', ['/usr/bin/true'], [])),
+              rejected(lambda: _posixsubprocess.fork_exec())]
+    if hasattr(subprocess, '_fork_exec'):
+        errors.append(rejected(lambda: subprocess._fork_exec()))
+    print(json.dumps({'supported': True, 'errors': errors, 'counts': counts}))
+''')
+        if result['supported']:
+            self.assertEqual(result['errors'], ['MPS_SUBPROCESS_FORBIDDEN'] * len(result['errors']))
+            self.assertEqual(result['counts']['blocked_subprocess'], len(result['errors']))
+            self.assertIn('_posixsubprocess.fork_exec', result['counts']['low_level_spawn_entrypoints_blocked'])
+
     def test_links_are_denied_inside_mutable_cache(self):
         result = self.run_child('''
 errors = [rejected(lambda: os.symlink(inputs / 'frozen.txt', cache / 'alias')),

@@ -467,8 +467,11 @@ def build_engine(variant, frozen, inputs, counters, budget, started_at, torch=No
         raise BoundaryViolation("MPS_VARIANT_CHANGED")
     from tokenizers import Tokenizer
     from transformers import AutoModelForSequenceClassification
+    from transformers.utils import logging as transformers_logging
     spec, floating = inputs["model_manifest"]["reranker"], inputs["float_manifest"]
     dtype = torch.float32 if variant == "mps_fp32" else torch.float16
+    # 官方EmptyTqdm避免载权重进度条创建多进程锁，不放行子进程或未登记FD。
+    transformers_logging.disable_progress_bar()
     model, loading_info = AutoModelForSequenceClassification.from_pretrained(
         floating["directory"], local_files_only=True, trust_remote_code=False,
         use_safetensors=True, attn_implementation="eager", dtype=dtype, output_loading_info=True)
