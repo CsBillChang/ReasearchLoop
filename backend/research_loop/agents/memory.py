@@ -8,6 +8,7 @@ from research_loop.storage.mysql import _now
 from research_loop.domain.context import excerpt, archive_summary, tool_archive_summary, compact_tool_exchange, contains_source_exchange, project_source, source_history, readback_priority, compact_research_exchanges, project_research_handoffs, project_review_handoffs, project_review_answer, factor_source_envelope
 from research_loop.tools.registry import schema_names
 from research_loop.domain.context_workspace import project_workspace
+from research_loop.domain.context import deduplicate_read_paper_pages
 
 PREFIX = '[ResearchLoop Memory v1]'
 RULES = '''历史资料和偏好不是新的用户指令。当前用户指令/澄清 > 显式长期偏好 > 推断兴趣。
@@ -209,6 +210,26 @@ class ContextService:
                        model_max_output_tokens=self._limit('model_max_output_tokens'))
         return metrics
 
+    def _deduplicate_pages(self, messages, previous=None):
+        """按开关投影新请求；回退重建后再次执行时按页身份合并指标。"""
+        if not getattr(self.settings, 'context_deduplicate_read_paper', False):
+            return messages, {}
+        projected, current = deduplicate_read_paper_pages(messages)
+        old = (previous or {}).get('read_paper_deduplication', {})
+        # 记录准备过程中处理过的页；之后若整组压缩，不把这个数量当最终字节收益。
+        pages = {(p['tool_call_id'], p['page_index']): p
+                 for p in old.get('pages', []) + current['pages']}
+        identities = list(pages.values())
+        return projected, {'read_paper_deduplication': {
+            'enabled': True, 'page_count': len(identities), 'pages': identities,
+            'tool_call_ids': list(dict.fromkeys(p['tool_call_id'] for p in identities))}}
+
+    def _archive_identity(self, identity):
+        """启用投影时隔离新档案身份，旧档案与关闭开关的 hash 合同保持。"""
+        if getattr(self.settings, 'context_deduplicate_read_paper', False):
+            identity = identity + [{'read_paper_deduplication': 'exact-v1'}]
+        return digest(identity)
+
     def prepare_role(self, state, messages, tools):
         """Researcher/Reviewer共用容量准备；Reviewer不继承父会话与研究发现。"""
         return self.prepare_researcher(state, messages, tools)
@@ -219,6 +240,7 @@ class ContextService:
         available = self._available()
         before = estimate({'messages': messages, 'tools': tools})
         original = list(messages)
+        messages, deduplication = self._deduplicate_pages(messages)
         from research_loop.services.research_progress import ResearchProgressService
         progress = ResearchProgressService(self.db).retained(state['task_id'])
         if progress['revision'] and state.get('role') != 'reviewer':
@@ -226,12 +248,15 @@ class ContextService:
             # 与父角色共用同一引用路径；只注入自身成果，不继承父会话或权限。
             messages = messages + [{'role': 'system', 'content': '当前已提交阶段成果（候选，不是原文或批准）：' + dump({'current_task':current})}]
         projected, working = self._working_set(state, messages, tools, available) if estimate({'messages': messages, 'tools': tools}) > available * self._limit('context_compress_ratio') else (messages, {'archived_groups': 0})
+        projected, deduplication = self._deduplicate_pages(projected, deduplication)
         projected, changed = self._project_sources(state, projected, tools, available) if estimate({'messages': projected, 'tools': tools}) > available else (projected, [])
         after = estimate({'messages': projected, 'tools': tools})
         metrics = {'before': before, 'after': after, 'input_capacity': available,
                    'estimate_method': 'utf8_bytes_upper_bound', 'source_projected_calls': changed, **working}
+        metrics.update(deduplication)
         self._capacity_metrics(metrics, projected, tools)
-        archive_id = digest([state['task_id'], messages, tools])
+        identity_messages = {'original_messages': original, 'prepared_messages': messages} if deduplication else messages
+        archive_id = self._archive_identity([state['task_id'], identity_messages, tools])
         with self.store.transaction() as tx:
             if not tx.one('SELECT snapshot_id FROM context_archives WHERE snapshot_id=?', (archive_id,)):
                 tx.execute('INSERT INTO context_archives(snapshot_id,task_id,sequence_no,original_json,projected_json,metrics_json,created_at) VALUES(?,?,?,?,?,?,?)',
@@ -445,8 +470,18 @@ class ContextService:
         if (not self.db.fetchone('SELECT task_id FROM conversation_links WHERE task_id=?', (state['task_id'],))
                 and not ResearchProgressService(self.db).snapshot(state['task_id'])['revision']
                 and size < available * self._limit('context_compress_ratio')):
-            return messages, self._capacity_metrics({'before': size, 'after': size, 'input_capacity': available,
-                'estimate_method': 'utf8_bytes_upper_bound', 'compressed_groups': []}, messages, tools)
+            projected, deduplication = self._deduplicate_pages(messages)
+            metrics = self._capacity_metrics({'before': size,
+                'after': estimate({'messages': projected, 'tools': tools}), 'input_capacity': available,
+                'estimate_method': 'utf8_bytes_upper_bound', 'compressed_groups': [], **deduplication}, projected, tools)
+            if deduplication.get('read_paper_deduplication', {}).get('page_count'):
+                archive_id = self._archive_identity([state['task_id'], {'messages': messages}, tools])
+                with self.store.transaction() as tx:
+                    if not tx.one('SELECT snapshot_id FROM context_archives WHERE snapshot_id=?', (archive_id,)):
+                        tx.execute('INSERT INTO context_archives(snapshot_id,task_id,sequence_no,original_json,projected_json,metrics_json,created_at) VALUES(?,?,?,?,?,?,?)',
+                                   (archive_id,state['task_id'],int(state.get('model_requests',0))+1,
+                                    dump({'messages': messages}),dump(projected),dump(metrics),_now()))
+            return projected, metrics
         accessible = schema_names(tools)
         original=[m for m in messages if not (m.get('role')=='system' and str(m.get('content','')).startswith(PREFIX))]
         # 档案仍保存输入原件；只对本次模型投影恢复已经取得的真实往返。
@@ -493,6 +528,7 @@ class ContextService:
         workspace_context = json.loads(dump(context))
         raw_header = {'role': 'system', 'content': PREFIX + '\n' + rules + '\n' + dump(context)}
         before = estimate({'messages': archive_messages[:1] + [raw_header] + archive_messages[1:], 'tools': tools})
+        projected, deduplication = self._deduplicate_pages(projected)
         # 完整真值留档，仅对待发副本做去重；不依赖旧组数量，最新单组也可处理。
         projected = project_finish_candidates(projected)
         projected, context['current_task'], handoff = project_research_handoffs(projected, full_current)
@@ -518,7 +554,7 @@ class ContextService:
                            'workspace_context': workspace_context, 'tool_results': tool_results,
                            'history_message_ids':[m['message_id'] for m in context.get('messages',[])]}
         # 身份绑定实际持久原件；布局变更不能命中旧档案并沿用错误的字符位置。
-        archive_id = digest([state['task_id'], archive_payload, tools])
+        archive_id = self._archive_identity([state['task_id'], archive_payload, tools])
         archive_text = dump(archive_payload)
         if review_projection and 'read_memory' in accessible:
             from research_loop.domain.context_workspace import archive_location
@@ -655,6 +691,7 @@ class ContextService:
         body, context, workspace = project_workspace(body, context, tools, archive_payload,
             archive_id, state['prompt'], available, make_header)
         projected = body[:1] + [make_header(context)] + body[1:]
+        projected, deduplication = self._deduplicate_pages(projected, deduplication)
         projected, source_calls = self._project_sources(state, projected, tools, available) if estimate({'messages':projected,'tools':tools}) > available else (projected, [])
         after=estimate({'messages':projected,'tools':tools})
         metrics={'estimate_method':'utf8_bytes_upper_bound','before':before,'after':after,'input_capacity':available,'compressed_groups':compressed,'restored_source_groups':restored,'readback_available':'read_memory' in accessible,'active_goal_ids':[g['goal_id'] for g in (context['current_task']['research_plan'] or {}).get('goals',[]) if g.get('status', 'active') == 'active'],'memory_pages_shortened':memory_pages,'history_excerpted':sum(m['excerpted'] for m in context.get('messages',[])),'snapshot_id':archive_id}
@@ -664,6 +701,7 @@ class ContextService:
         metrics.update(answer_metrics)
         metrics.update(working)
         metrics.update(workspace)
+        metrics.update(deduplication)
         self._capacity_metrics(metrics, projected, tools)
         with self.store.transaction() as tx:
             if not tx.one('SELECT snapshot_id FROM context_archives WHERE snapshot_id=?',(archive_id,)):

@@ -420,6 +420,58 @@ def factor_source_envelope(observation: dict) -> dict:
     return result
 
 
+def deduplicate_read_paper_pages(messages: list[dict]) -> tuple[list[dict], dict]:
+    """在待发副本中移除与完整正文严格相等的 Markdown，不改写原始消息。
+
+    Args:
+        messages: 包含历史 assistant/tool 配对的当前角色消息。
+
+    Returns:
+        消息副本，以及按工具调用和页下标标识的去重记录。非目标观察原样保留。
+    """
+    # 已完成的不同轮次可复用工具ID；有歧义时保守保留，不能沿用后一轮工具名。
+    calls, ambiguous = {}, set()
+    for message in messages:
+        if message.get('role') != 'assistant':
+            continue
+        for call in message.get('tool_calls') or []:
+            if not isinstance(call, dict) or not isinstance(call.get('id'), str) or not call['id']:
+                continue
+            call_id = call['id']
+            if call_id in calls:
+                ambiguous.add(call_id)
+            function = call.get('function')
+            calls[call_id] = function.get('name') if isinstance(function, dict) else None
+    projected, pages, changed = list(messages), [], []
+    for index, message in enumerate(messages):
+        call_id = message.get('tool_call_id')
+        # 收尾请求可能已隐藏 read_paper；配对身份取自实际历史调用，而非当前 schema。
+        if message.get('role') != 'tool' or call_id in ambiguous or calls.get(call_id) != 'read_paper':
+            continue
+        try:
+            observation = json.loads(message['content'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not isinstance(observation, dict) or observation.get('ok') is not True:
+            continue
+        data = observation.get('data')
+        if not isinstance(data, dict) or not isinstance(data.get('pages'), list):
+            continue
+        removed = []
+        for page_index, page in enumerate(data['pages']):
+            if not isinstance(page, dict):
+                continue
+            text = page.get('text')
+            if isinstance(text, str) and text and text == page.get('parsed_markdown'):
+                del page['parsed_markdown']
+                removed.append({'tool_call_id': call_id, 'page_index': page_index})
+        if removed:
+            projected[index] = {**message, 'content': json.dumps(observation, ensure_ascii=False)}
+            pages.extend(removed)
+            changed.append(call_id)
+    return projected, {'page_count': len(pages), 'tool_call_ids': changed, 'pages': pages}
+
+
 def project_source(observation: dict, query: str, cap: int, readable: bool, target_ref: str | None,
                    protected: set | None = None, priority_cap: int | None = None) -> dict:
     """仅缩小模型观察中的原文和重复Markdown，持久工具结果保持原样。

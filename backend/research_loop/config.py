@@ -80,6 +80,8 @@ class Settings(BaseModel):
     context_output_reserve: int | None = Field(default=None, ge=256)
     context_safety_tokens: int = Field(default=4096, ge=256)
     context_compress_ratio: float = Field(default=0.8, gt=0, lt=1)
+    # 实验开关仅影响新模型请求的副本；默认沿用既有正文呈现。
+    context_deduplicate_read_paper: bool = False
     retrieval_enabled: bool = True
     retrieval_route: Literal["located_fp16", "hybrid_rrf"] = "located_fp16"
     retrieval_reranker_backend: Literal["mps_fp16", "onnx_cpu"] = "mps_fp16"
@@ -155,6 +157,7 @@ class Settings(BaseModel):
             context_window_tokens=int(os.getenv("RESEARCHLOOP_CONTEXT_WINDOW", "0")),
             context_output_reserve=int(os.environ["RESEARCHLOOP_CONTEXT_OUTPUT_RESERVE"]) if "RESEARCHLOOP_CONTEXT_OUTPUT_RESERVE" in os.environ else None,
             context_safety_tokens=int(os.getenv("RESEARCHLOOP_CONTEXT_SAFETY_TOKENS", "4096")),
+            context_deduplicate_read_paper=os.getenv("RESEARCHLOOP_CONTEXT_DEDUPLICATE_READ_PAPER", "0") == "1",
             token_counting_tokenizer_path=Path(os.environ["RESEARCHLOOP_TOKENIZER_PATH"]).expanduser() if os.getenv("RESEARCHLOOP_TOKENIZER_PATH") else None,
             token_counting_tokenizer_model=os.getenv("RESEARCHLOOP_TOKENIZER_MODEL") or None,
             token_counting_tokenizer_sha256=os.getenv("RESEARCHLOOP_TOKENIZER_SHA256") or None,
