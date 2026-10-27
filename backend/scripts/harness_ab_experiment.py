@@ -9,12 +9,17 @@ import re
 
 
 SCOPE_KIND = 'supervisor_scope_v1'
+GOAL_KIND = 'supervisor_goal_v1'
+SUPERVISOR_KINDS = frozenset({SCOPE_KIND, GOAL_KIND})
 SUPERVISOR = 'backend/research_loop/agents/supervisor.py'
 CONTRACT_VERSION = 'scope-rules-4-7-v1'
+GOAL_CONTRACT_VERSION = 'goal-rule-1-v1'
 OLD_RULE_4 = '问答/比较/综述用investigate围绕问题读取原文。'
 NEW_RULE_4 = '问答/比较/综述用investigate，把原问的子问题与解释结论所必需的条件写入objective；未知机制用中性问题表述，具体模块、损失和阈值的核查以用户问题或已读证据为依据。实验数值或额外比较仅在用户要求或解释结论必需时纳入委派。保留用户明确要求的广度、深度和材料范围。'
 OLD_RULE_7 = '比较分别说明输入、训练、推理、输出，同一方法可以跨阶段，不能为制造差异删除共同点。'
 NEW_RULE_7 = OLD_RULE_7 + '综合答案围绕原问组织结论和必要依据；附加数值、比较或排他性结论须同时与问题直接相关且有对应证据。保留影响结论的条件、例外、原文矛盾和不确定性；详细解读或实验比较按用户要求展开。'
+OLD_GOAL_RULE = '引句存在不证明理解正确，应按原意区分用户目标与策略。'
+NEW_GOAL_RULE = '用户目标及派生objective须保留原问含义、广度与深度；source_quote逐字匹配不代表扩写的要求得到原问支持。只将用户要求的交付列为origin=user。为准确完成交付所必需的补充取证列为origin=strategy，并在description中说明服务于哪个用户目标、弥补什么影响交付的缺口。未知机制或因果关系用中性问题表达；只在用户要求或已读证据支持其相关性时，展开具体机制的逐项核查。不影响用户交付的背景扩展不列为必做目标。'
 PAIR_REVIEW_POLICY = {'required': True, 'reviewer_kinds': ['human', 'agent_assisted'], 'poll_seconds': 0.5}
 
 
@@ -49,6 +54,16 @@ def scope_candidate(text):
     return text.replace(OLD_RULE_4, NEW_RULE_4).replace(OLD_RULE_7, NEW_RULE_7)
 
 
+def goal_candidate(text):
+    """只替换第1条目标解释，并确认基线已包含批准的第4、7条。"""
+    prompt, _ = supervisor_parts(text)
+    rules = {int(m.group(1)): m.group(0) for m in re.finditer(r'(?m)^(\d+)\. .*$', prompt)}
+    if (text.count(OLD_GOAL_RULE) != 1 or OLD_GOAL_RULE not in rules.get(1, '')
+            or NEW_RULE_4 not in rules.get(4, '') or NEW_RULE_7 not in rules.get(7, '')):
+        raise ValueError('approved rule 1 baseline and retained rules 4 and 7 required')
+    return text.replace(OLD_GOAL_RULE, NEW_GOAL_RULE, 1)
+
+
 def source_inventory(root):
     """绑定运行代码、共用脚本、迁移与配置；运行产物不得放入源码根。"""
     root = Path(root).resolve(strict=True)
@@ -73,8 +88,10 @@ def source_inventory(root):
     return files
 
 
-def build_supervisor_contract(source_roots):
-    """产生摘要，同时检查两版除了精确两句提示词外没有代码差异。"""
+def build_supervisor_contract(source_roots, *, experiment_kind=SCOPE_KIND):
+    """按枚举实验绑定摘要，拒绝批准提示词以外的第二业务变量。"""
+    if experiment_kind not in SUPERVISOR_KINDS:
+        raise ValueError('unknown Supervisor experiment kind')
     if not isinstance(source_roots, dict) or set(source_roots) != {'A', 'B'}:
         raise ValueError('two source roots required')
     roots = {v: Path(source_roots[v]).resolve(strict=True) for v in ('A', 'B')}
@@ -89,9 +106,11 @@ def build_supervisor_contract(source_roots):
         raise ValueError('only Supervisor source may differ')
     texts = {v: (roots[v] / SUPERVISOR).read_text() for v in roots}
     prompts = {v: supervisor_parts(texts[v]) for v in roots}
-    if texts['B'] != scope_candidate(texts['A']) or prompts['A'][1] != prompts['B'][1]:
-        raise ValueError('Supervisor diff is not exactly the approved rules 4 and 7')
-    return {'version': CONTRACT_VERSION, 'variants': {v: {
+    transform = goal_candidate if experiment_kind == GOAL_KIND else scope_candidate
+    version = GOAL_CONTRACT_VERSION if experiment_kind == GOAL_KIND else CONTRACT_VERSION
+    if texts['B'] != transform(texts['A']) or prompts['A'][1] != prompts['B'][1]:
+        raise ValueError('Supervisor diff is not exactly the approved prompt treatment')
+    return {'version': version, 'variants': {v: {
         'supervisor_file_sha256': inventories[v][SUPERVISOR],
         'system_prompt_sha256': sha256(prompts[v][0]),
         'source_tree_sha256': sha256(canonical(inventories[v])),
@@ -101,7 +120,8 @@ def build_supervisor_contract(source_roots):
 def validate_supervisor_sources(manifest):
     """格启动与每次模型发送前重新验证源码身份。"""
     try:
-        expected = build_supervisor_contract(manifest['source_roots'])
+        expected = build_supervisor_contract(manifest['source_roots'],
+            experiment_kind=manifest.get('experiment_kind', SCOPE_KIND))
         if manifest.get('supervisor_prompt_contract') != expected:
             raise ValueError('source or prompt digest differs')
     except (OSError, ValueError, TypeError, KeyError, SyntaxError) as exc:
@@ -127,6 +147,8 @@ def validate_pair_order(order):
 
 def validate_scope_manifest(manifest):
     """配对门位于格写权限之外，避免被测工具自行批准下一对。"""
+    if manifest.get('experiment_kind') not in SUPERVISOR_KINDS:
+        raise PermissionError('SUPERVISOR_EXPERIMENT_KIND_REQUIRED')
     if manifest.get('variant_settings') != {
             'A': {'context_deduplicate_read_paper': True},
             'B': {'context_deduplicate_read_paper': True}}:
