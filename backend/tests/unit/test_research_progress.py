@@ -80,6 +80,37 @@ class ResearchProgressTests(unittest.TestCase):
         self.commit(gaps=[])
         self.assertEqual(self.service.snapshot(self.tid)['gaps'], [])
 
+    def test_existing_finding_id_updates_without_losing_sources(self):
+        """复制本任务真实ID更新发现；省略证据不会删除已取得的来源。"""
+        self.commit()
+        original = self.service.snapshot(self.tid)['findings'][0]
+        candidate = self.service.prepare(self.tid, ResearchProgressInput(
+            findings=[ProgressFinding(finding_id=original['finding_id'], text='补充语言特征的适用条件')]))
+        self.assertEqual(len(candidate['findings']), 1)
+        updated = candidate['findings'][0]
+        self.assertEqual(updated['finding_id'], original['finding_id'])
+        self.assertEqual(updated['text'], '补充语言特征的适用条件')
+        self.assertEqual(updated['sources'], original['sources'])
+        self.assertEqual(updated['revision'], original['revision'] + 1)
+        self.assertEqual(self.service.snapshot(self.tid)['findings'][0], original)
+
+    def test_invented_and_foreign_finding_ids_are_rejected(self):
+        """自拟编号和其他任务真实ID均不得被悄悄当作新增发现。"""
+        self.commit()
+        original = self.service.snapshot(self.tid)['findings'][0]
+        for invented in ('f1', 'F1', 'invented-topic'):
+            with self.subTest(finding_id=invented):
+                with self.assertRaisesRegex(ValueError, 'unknown finding_id'):
+                    self.service.prepare(self.tid, ResearchProgressInput(
+                        findings=[ProgressFinding(finding_id=invented, text='不能据此新增')]))
+        other = TaskService(self.db).create(TaskCreate(
+            prompt='独立任务，不保存', idempotency_key=uuid4().hex)).task_id
+        with self.assertRaisesRegex(ValueError, 'unknown finding_id'):
+            self.service.prepare(other, ResearchProgressInput(findings=[ProgressFinding(
+                finding_id=original['finding_id'], text='不能复用其他任务编号')]))
+        self.assertEqual(self.service.snapshot(self.tid)['findings'], [original])
+        self.assertEqual(self.service.snapshot(other)['findings'], [])
+
     def test_committed_action_cannot_be_replaced(self):
         """同一成功行动的修改请求不能静默覆盖历史。"""
         action = self.commit()
@@ -120,23 +151,37 @@ class ResearchProgressTests(unittest.TestCase):
 
     def test_local_pdf_read_cache_checks_bytes_and_current_authorization(self):
         """同版本本地文件可复用；改文件或撤授权后必须重新走读取服务。"""
-        import hashlib
-        content=('%PDF-local-test-'+uuid4().hex).encode()
-        pdf=self.root/'local.pdf';pdf.write_bytes(content)
-        page=self.db.get_page(self.eid)
-        self.db.execute('UPDATE documents SET content_sha256=? WHERE document_id=?', (hashlib.sha256(pdf.read_bytes()).hexdigest(),page['document_id']))
-        self.db.grant_input(self.tid,'input',self.tid)
-        args={'target_ref':'input'}
-        action=ActionRecord(task_id=self.tid,sequence=1,tool_name='read_paper',arguments=args,status='succeeded',
-            observation={'ok':True,'kind':'success','data':{'pages':[page]}})
-        self.db.save_action(action.model_dump(mode='json'))
-        attachments={'input':{'local_path':str(pdf)}}
-        self.assertIsNotNone(self.service.cached_read(self.tid,args,attachments))
-        pdf.write_bytes(b'%PDF-updated')
-        self.assertIsNone(self.service.cached_read(self.tid,args,attachments))
+        import pymupdf
+        from research_loop.providers.pdf import PDFProvider
+        from research_loop.storage.files import FileStore
+
+        with pymupdf.open() as document:
+            document.new_page().insert_text(
+                (40, 40), 'Synthetic local cache evidence: language features.\n' * 40)
+            content = document.tobytes()
+        pdf = self.root / 'local.pdf'
         pdf.write_bytes(content)
-        self.db.execute('DELETE FROM task_evidence WHERE task_id=?',(self.tid,))
-        self.assertIsNone(self.service.cached_read(self.tid,args,attachments))
+        self.db.grant_input(self.tid, 'input', self.tid)
+        attachments = {'input': {'local_path': str(pdf)}}
+        provider = PDFProvider(FileStore(self.root / 'data', self.root / 'notes', self.root))
+        self.addCleanup(provider.close)
+        # 正式读取同时建立内容版本和材料授权映射，避免拼接互不相符的旧页。
+        data = PaperService(self.db, None, provider).read(
+            self.tid, 'input', attachments=attachments)
+        args = {'target_ref': 'input'}
+        action = ActionRecord(
+            task_id=self.tid, sequence=1, tool_name='read_paper', arguments=args,
+            status='succeeded', observation={'ok': True, 'kind': 'success', 'data': data})
+        self.db.save_action(action.model_dump(mode='json'))
+        self.assertIsNotNone(self.service.cached_read(
+            self.tid, args, attachments, provider=provider))
+        pdf.write_bytes(b'%PDF-updated')
+        self.assertIsNone(self.service.cached_read(
+            self.tid, args, attachments, provider=provider))
+        pdf.write_bytes(content)
+        self.db.execute('DELETE FROM task_evidence WHERE task_id=?', (self.tid,))
+        self.assertIsNone(self.service.cached_read(
+            self.tid, args, attachments, provider=provider))
 
     def test_unknown_page_number_is_not_reported_as_physical_zero(self):
         """Jina类来源没有物理页码时保留未知，不生成第0页定位。"""
