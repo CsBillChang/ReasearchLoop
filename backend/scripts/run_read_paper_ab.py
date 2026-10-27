@@ -1,4 +1,4 @@
-"""严格等值正文去重的单格真实入口：同一业务源码，仅切换冻结开关。"""
+"""枚举合同下的单格入口：去重开关对照或Supervisor提示词对照。"""
 from __future__ import annotations
 
 import argparse
@@ -35,10 +35,50 @@ def write(path, value):
 
 def qualification_configuration(manifest):
     """资格收据绑定本批源码、材料入口、资源、参数与允许矩阵。"""
-    return {key: manifest.get(key) for key in ('experiment_kind', 'runtime_root', 'source_roots',
+    result = {key: manifest.get(key) for key in ('experiment_kind', 'runtime_root', 'source_roots',
         'cases_path', 'material_project_root', 'vector_manifest_path', 'vector_endpoint', 'vector_port',
         'model_manifest_path', 'settings', 'official_ip_addresses', 'variant_settings', 'github_commit',
         'ledger_limits', 'carried_budget_source', 'request_contracts', 'qualification_cells')}
+    if manifest.get('experiment_kind') == 'supervisor_scope_v1':
+        result.update({key: manifest.get(key) for key in (
+            'supervisor_prompt_contract', 'semantic_gate_root', 'pair_review_policy', 'execution_order')})
+    return result
+
+def select_variant_source(manifest, variant):
+    """先选择目标包再导入传输，防止控制器的research_loop污染另一版。"""
+    source = Path(manifest['source_roots'][variant]).resolve(strict=True)
+    backend = source / 'backend'
+    for name, module in list(sys.modules.items()):
+        if name == 'research_loop' or name.startswith('research_loop.'):
+            filename = getattr(module, '__file__', None)
+            if filename and not Path(filename).resolve().is_relative_to(backend):
+                raise PermissionError('EXPERIMENT_BUSINESS_PACKAGE_ALREADY_LOADED_FROM_OTHER_SOURCE')
+    sys.path[:0] = [str(backend), str(backend / 'tests')]
+    return source
+
+
+def verify_loaded_supervisor(manifest, variant):
+    """对照磁盘摘要检查实际已加载的角色常量，而非只检查sys.path。"""
+    from harness_ab_experiment import SCOPE_KIND, sha256
+    if manifest.get('experiment_kind') != SCOPE_KIND:
+        return None
+    from research_loop.agents import supervisor
+    root = Path(manifest['source_roots'][variant]).resolve()
+    expected = manifest['supervisor_prompt_contract']['variants'][variant]
+    actual_file = Path(supervisor.__file__).resolve()
+    if (actual_file != root / 'backend/research_loop/agents/supervisor.py'
+            or sha256(supervisor.SYSTEM_PROMPT) != expected['system_prompt_sha256']):
+        raise PermissionError('SUPERVISOR_LOADED_SOURCE_OR_PROMPT_MISMATCH')
+    return {'file': str(actual_file), 'system_prompt_sha256': expected['system_prompt_sha256']}
+
+
+def validate_active_variant(manifest, variant):
+    """每次预留/发送前检查磁盘与内存角色身份，漂移在远端调用前拒绝。"""
+    from harness_ab_experiment import SCOPE_KIND, validate_supervisor_sources
+    if manifest.get('experiment_kind') == SCOPE_KIND:
+        validate_supervisor_sources(manifest)
+        return verify_loaded_supervisor(manifest, variant)
+    return None
 
 
 def validate_carried_budget_source(manifest):
@@ -102,15 +142,20 @@ def validate_manifest(manifest, case_id, variant, mode):
         raise PermissionError('DEDUP_VISUAL_CONTRACT_REQUIRED')
     if mode == 'execute' or manifest.get('carried_budget_source') is not None:
         validate_carried_budget_source(manifest)
-    if manifest.get('experiment_kind') != 'read_paper_exact_duplicate':
+    from harness_ab_experiment import SCOPE_KIND, validate_scope_manifest
+    kind = manifest.get('experiment_kind')
+    if kind not in {'read_paper_exact_duplicate', SCOPE_KIND}:
         raise PermissionError('DEDUP_EXPERIMENT_KIND_REQUIRED')
     if variant not in {'A', 'B'} or [case_id, variant] not in manifest['ledger_limits']['allowed_cells']:
         raise PermissionError('DEDUP_CELL_OUTSIDE_MATRIX')
-    if Path(manifest['source_roots']['A']).resolve() != Path(manifest['source_roots']['B']).resolve():
-        raise PermissionError('DEDUP_SHARED_SOURCE_REQUIRED')
-    if manifest.get('variant_settings') != {'A': {'context_deduplicate_read_paper': False},
-            'B': {'context_deduplicate_read_paper': True}}:
-        raise PermissionError('DEDUP_ONLY_SWITCH_MAY_DIFFER')
+    if kind == SCOPE_KIND:
+        validate_scope_manifest(manifest)
+    else:
+        if Path(manifest['source_roots']['A']).resolve() != Path(manifest['source_roots']['B']).resolve():
+            raise PermissionError('DEDUP_SHARED_SOURCE_REQUIRED')
+        if manifest.get('variant_settings') != {'A': {'context_deduplicate_read_paper': False},
+                'B': {'context_deduplicate_read_paper': True}}:
+            raise PermissionError('DEDUP_ONLY_SWITCH_MAY_DIFFER')
     settings = manifest['settings']
     if contracts is not None and (settings.get('deepseek_model') != 'deepseek-flash'
             or settings.get('deepseek_base_url') != 'https://api.deepseek.com'
@@ -143,8 +188,11 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
         mode: qualify 不调用生成模型；execute 只执行一次本格。
         credential: 真实模式由父进程内存管道注入，不写入工件。
     """
+    source = select_variant_source(manifest, variant)
     validate_manifest(manifest, case_id, variant, mode)
-    source = Path(manifest['source_roots'][variant]).resolve()
+    if mode == 'execute' and manifest.get('experiment_kind') == 'supervisor_scope_v1':
+        from harness_ab_pair_gate import validate_prior_pair_gates
+        validate_prior_pair_gates(manifest, case_id, variant)
     allowed_cells = manifest.get('ledger_limits', {}).get('allowed_cells')
     if allowed_cells is not None and [case_id, variant] not in allowed_cells:
         raise PermissionError('H1 cell outside remaining authorized matrix')
@@ -201,6 +249,7 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
     ledger = db = root_id = None
     report = {'case_id': case_id, 'variant': variant, 'mode': mode, 'status': 'starting',
         'started_at': datetime.now(timezone.utc).isoformat(), 'real_model_calls': 0}
+    report['loaded_supervisor'] = verify_loaded_supervisor(manifest, variant)
     try:
         with ExitStack() as stack:
             original_resolver = socket.getaddrinfo
@@ -365,13 +414,20 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                     deadline = min(begun['started_at'] + ledger.config['root_seconds'],
                         snap['batch_absolute_deadline'], manifest['cell_absolute_deadline'])
 
+                    class SourceBoundTransport(BudgetTransport):
+                        """共享传输保留原预算合同，增加新提示词实验的发送前身份门。"""
+
+                        def handle_request(self, request):
+                            validate_active_variant(manifest, variant)
+                            return super().handle_request(request)
+
                     def factory(_settings):
                         """所有角色共用根账本；原生适配器仅替换 HTTP 传输。"""
                         if (_settings.deepseek_model != settings.deepseek_model
                                 or _settings.deepseek_base_url != settings.deepseek_base_url):
                             from research_loop.providers.deepseek import RequestNotSent
                             raise RequestNotSent('H1 model or visual provider outside frozen scope')
-                        transport = BudgetTransport(ledger, root_id, cell / 'requests', deadline=deadline,
+                        transport = SourceBoundTransport(ledger, root_id, cell / 'requests', deadline=deadline,
                             visual_contract=manifest['request_contracts']['visual'])
                         native_client = httpx.Client(transport=transport, timeout=settings.request_timeout_seconds,
                             trust_env=False, follow_redirects=False)
