@@ -1,0 +1,401 @@
+"""严格等值正文去重的单格真实入口：同一业务源码，仅切换冻结开关。"""
+from __future__ import annotations
+
+import argparse
+from contextlib import ExitStack
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import socket
+import sys
+import tempfile
+import threading
+import time
+import traceback
+from unittest.mock import patch
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+
+def read(path):
+    """读取已明确指定的私有冻结文件。"""
+    return json.loads(Path(path).read_text())
+
+
+def write(path, value):
+    """仅写本格目录，不把配置凭据输出。"""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2, default=str) + '\n')
+
+
+def qualification_configuration(manifest):
+    """资格收据绑定本批源码、材料入口、资源、参数与允许矩阵。"""
+    return {key: manifest.get(key) for key in ('experiment_kind', 'runtime_root', 'source_roots',
+        'cases_path', 'vector_manifest_path', 'vector_endpoint', 'model_manifest_path', 'settings',
+        'variant_settings', 'github_commit', 'ledger_limits', 'qualification_cells')}
+
+
+def validate_manifest(manifest, case_id, variant, mode):
+    """在创建目录或任务前检查冻结范围，拒绝借配置更换第二个实验变量。"""
+    if manifest.get('experiment_kind') != 'read_paper_exact_duplicate':
+        raise PermissionError('DEDUP_EXPERIMENT_KIND_REQUIRED')
+    if variant not in {'A', 'B'} or [case_id, variant] not in manifest['ledger_limits']['allowed_cells']:
+        raise PermissionError('DEDUP_CELL_OUTSIDE_MATRIX')
+    if Path(manifest['source_roots']['A']).resolve() != Path(manifest['source_roots']['B']).resolve():
+        raise PermissionError('DEDUP_SHARED_SOURCE_REQUIRED')
+    if manifest.get('variant_settings') != {'A': {'context_deduplicate_read_paper': False},
+            'B': {'context_deduplicate_read_paper': True}}:
+        raise PermissionError('DEDUP_ONLY_SWITCH_MAY_DIFFER')
+    settings = manifest['settings']
+    if settings.get('retrieval_route') != 'located_fp16' or settings.get('retrieval_reranker_backend') != 'mps_fp16':
+        raise PermissionError('DEDUP_CURRENT_RAG_REQUIRED')
+    if mode == 'execute' and (manifest.get('real_execution_released') is not True
+            or not manifest.get('frozen_files') or not manifest.get('github_commit')
+            or not manifest.get('qualification_receipt') or not manifest.get('cell_absolute_deadline')):
+        raise PermissionError('DEDUP_EXECUTION_QUALIFICATION_REQUIRED')
+    if mode == 'execute':
+        receipt = read(manifest['qualification_receipt'])
+        expected = {tuple(cell) for cell in manifest['qualification_cells']}
+        actual = {(row['case_id'], row['variant']) for row in receipt.get('rows', [])
+                  if row.get('status') == 'passed' and row.get('real_model_calls') == 0}
+        if (receipt.get('status') != 'passed' or receipt.get('real_model_calls') != 0
+                or receipt.get('configuration') != qualification_configuration(manifest)
+                or not expected or actual != expected):
+            raise PermissionError('DEDUP_QUALIFICATION_RECEIPT_MISMATCH')
+
+
+def run_cell(manifest, case_id, variant, mode, credential=None):
+    """资格通过后才允许在官方传输边界构造真实请求。
+
+    Args:
+        manifest: 已核对的实验配置与来源清单。
+        case_id: 四个冻结问题之一。
+        variant: A 或 B，选择冻结业务源码。
+        mode: qualify 不调用生成模型；execute 只执行一次本格。
+        credential: 真实模式由父进程内存管道注入，不写入工件。
+    """
+    validate_manifest(manifest, case_id, variant, mode)
+    source = Path(manifest['source_roots'][variant]).resolve()
+    allowed_cells = manifest.get('ledger_limits', {}).get('allowed_cells')
+    if allowed_cells is not None and [case_id, variant] not in allowed_cells:
+        raise PermissionError('H1 cell outside remaining authorized matrix')
+    if mode == 'execute' and (manifest.get('real_execution_released') is not True
+            or not manifest.get('frozen_files') or not manifest.get('github_commit')
+            or not manifest.get('qualification_receipt')):
+        raise PermissionError('H1 real execution freeze and qualification absent')
+    runtime = Path(manifest['runtime_root']).resolve()
+    case = next(c for c in read(manifest['cases_path'])['cases'] if c['case_id'] == case_id)
+    stage = manifest.get('qualification_run', 'qualification') if mode == 'qualify' else 'cells'
+    cell = runtime / stage / (case_id + '-' + variant)
+    cell.mkdir(parents=True, exist_ok=False)
+    temp = cell / 'tmp'
+    temp.mkdir()
+    tempfile.tempdir = str(temp)
+    os.chdir(cell)
+    sys.path[:0] = [str(source / 'backend'), str(source / 'backend/tests')]
+    # 在被测试版本导入前确认只存在明确的实验路径。
+    for entry in manifest['frozen_files']:
+        if hashlib.sha256(Path(entry['path']).read_bytes()).hexdigest() != entry['sha256']:
+            raise ValueError('H1 frozen source or material changed: ' + entry['path'])
+    import httpx
+    from harness_ab_boundary import Boundary, IsolationError
+    from harness_ab_budget import Ledger
+    from harness_ab_resources import (load_source_bundles, rebind_bundle, prepare_parsed_cache,
+        install_bundle, HarnessRetrievalRuntime)
+    from harness_ab_transport import BudgetTransport
+    from harness_ab_network import OfficialNetworkPolicy
+    network_policy = OfficialNetworkPolicy(mode, manifest['vector_port'], manifest['official_ip_addresses'])
+    denied_connections = []
+
+    class ExperimentBoundary(Boundary):
+        """文件写入限定本次运行根，网络仅许可冻结官方 IP 与专属向量端口。"""
+        def audit(self, event, values):
+            if not self.enabled:
+                return
+            if event == 'socket.getaddrinfo':
+                host, port = values[:2]
+                if not network_policy.allow_dns(host, port):
+                    self.reject('network_name_outside_experiment')
+                return
+            if event == 'socket.connect':
+                address = values[1]
+                if not network_policy.allow_connect(address):
+                    denied_connections.append({'address': address, 'phase': self.phase,
+                        'at': datetime.now(timezone.utc).isoformat(), 'audit_before_connect': True})
+                    self.reject('network_destination_outside_experiment')
+                return
+            super().audit(event, values)
+
+    boundary = ExperimentBoundary(runtime)
+    sys.addaudithook(boundary.audit)
+    clients = []
+    ledger = db = root_id = None
+    report = {'case_id': case_id, 'variant': variant, 'mode': mode, 'status': 'starting',
+        'started_at': datetime.now(timezone.utc).isoformat(), 'real_model_calls': 0}
+    try:
+        with ExitStack() as stack:
+            original_resolver = socket.getaddrinfo
+            dns_log_lock = threading.RLock()
+
+            def guarded_resolver(host, port, *args, **kwargs):
+                """只按当次官方DNS回答授予连接IP；HTTP端点及TLS校验仍由原传输保持。"""
+                if not network_policy.allow_dns(host, port):
+                    boundary.reject('network_name_outside_experiment')
+                try:
+                    answers = network_policy.resolve(original_resolver, host, port, *args, **kwargs)
+                except PermissionError:
+                    boundary.reject('official_dns_answer_outside_scope')
+                with dns_log_lock:
+                    write(cell / 'network-dns.json', network_policy.snapshot())
+                return answers
+
+            stack.enter_context(patch.object(socket, 'getaddrinfo', guarded_resolver))
+            stack.enter_context(patch.dict(os.environ, {'PYTHONDONTWRITEBYTECODE': '1',
+                'RESEARCHLOOP_READONLY': '0', 'TMPDIR': str(temp),
+                'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
+                'HF_HOME': str(temp / 'huggingface'), 'XDG_CACHE_HOME': str(temp / 'cache'),
+                'TOKENIZERS_PARALLELISM': 'false', 'PYTORCH_ENABLE_MPS_FALLBACK': '0'}, clear=True))
+            stack.enter_context(patch.object(socket, 'has_ipv6', False))
+            from research_loop.config import Settings
+            from research_loop import config
+            values = dict(manifest['settings'])
+            variant_values = manifest['variant_settings'][variant]
+            values.update(variant_values)
+            values.update(project_root=cell, data_dir=cell / 'data', output_dir=cell / 'output',
+                database_url='sqlite:///' + str(cell / 'task.sqlite3'), deepseek_api_key=credential,
+                qdrant_url=manifest['vector_endpoint'],
+                retrieval_namespace='researchloop_h1_' + stage.replace('-', '_') + '_' + case_id.lower().replace('-', '_') + '_' + variant.lower(),
+                retrieval_model_manifest=Path(manifest['model_manifest_path']))
+            settings = Settings(**values)
+            original_init = Settings.__init__
+
+            def guarded_init(self, **kwargs):
+                """隐式配置也必须落在本格，不接受部署数据库或向量服务。"""
+                original_init(self, **kwargs)
+                if any(not getattr(self, key).resolve().is_relative_to(cell) for key in ('project_root', 'data_dir', 'output_dir')):
+                    raise IsolationError('H1 implicit settings path outside cell')
+                if self.database_url != settings.database_url or self.qdrant_url != settings.qdrant_url:
+                    raise IsolationError('H1 implicit database or vector endpoint differs')
+
+            stack.enter_context(patch.object(Settings, '__init__', guarded_init))
+            stack.enter_context(patch.object(Settings, 'from_env', side_effect=IsolationError('H1 default settings denied')))
+            stack.enter_context(patch.object(config, '_load_dotenv', side_effect=IsolationError('H1 dotenv denied')))
+            stack.enter_context(patch.object(config, 'get_settings', return_value=settings))
+            boundary.phase = 'guard_selfcheck'
+            checks = []
+            probes = [('dotenv', lambda: (source / '.env').read_text()),
+                ('outside_write', lambda: (source / 'h1-forbidden.tmp').write_text('blocked')),
+                ('default_settings', lambda: Settings.from_env()),
+                ('deployment_network', lambda: socket.create_connection(('127.0.0.1', 6339)))]
+            for name, probe in probes:
+                try:
+                    probe()
+                except IsolationError:
+                    checks.append({'name': name, 'blocked_before_operation': True})
+                else:
+                    raise AssertionError('H1 isolation selfcheck failed: ' + name)
+            report['guard_selfchecks'] = checks
+            boundary.phase = 'qualification' if mode == 'qualify' else 'execution'
+            from research_loop import main
+            from research_loop.api import dependencies, health
+            for module in (main, dependencies, health):
+                stack.enter_context(patch.object(module, 'get_settings', return_value=settings))
+            from research_loop.providers.discovery import DiscoveryProvider
+            stack.enter_context(patch.object(DiscoveryProvider, 'search', side_effect=PermissionError('H1 new corpus search outside frozen task')))
+            from research_loop.storage.mysql import Database
+            from research_loop.storage.files import FileStore
+            from research_loop.providers.pdf import PDFProvider
+            from research_loop.services.papers import PaperService
+            from research_loop.services.tasks import TaskService
+            from research_loop.workers.executor import TaskExecutor
+            from research_loop.providers.deepseek import DeepSeekProvider
+            from fastapi.testclient import TestClient
+
+            db = Database(settings.database_url)
+            db.ensure_schema()
+            files = FileStore(settings.data_dir, settings.output_dir, settings.project_root)
+            bundles = load_source_bundles(manifest['material_project_root'], manifest['vector_manifest_path'],
+                source_sha256s={case['material']['pdf_sha256']})
+            original = bundles[case['material']['pdf_sha256']]
+            bundle = rebind_bundle(original, settings.retrieval_namespace)
+            report['index'] = install_bundle(db, settings, bundle)
+            report['copied_cache'] = prepare_parsed_cache(files, original['document_ref'])
+            pdf = PDFProvider(files, parser_name=settings.parser_name, parser_version=settings.parser_version,
+                parser_config=settings.parser_config)
+            stack.callback(pdf.close)
+            retrieval = HarnessRetrievalRuntime(db, settings, [bundle])
+            report['settings'] = {k: v for k, v in settings.model_dump(mode='json').items() if not any(
+                token in k for token in ('api_key', 'supabase_key'))}
+            from research_loop.providers.embeddings import LocalEmbedding
+            from research_loop.providers.mps_reranker import MpsReranker
+            from research_loop.services.retrieval import RetrievalService
+            from research_loop.storage.vector_index import VectorIndex
+            embedding = LocalEmbedding(settings.retrieval_model_manifest)
+            reranker = MpsReranker(settings.retrieval_model_manifest)
+            warm_started = time.monotonic()
+            embedding.encode(['research method'], query=True)
+            reranker.score('research method', ['A scientific method is described.'])
+            vector_client = httpx.Client(base_url=settings.qdrant_url, timeout=30, trust_env=False)
+            stack.callback(vector_client.close)
+            retrieval.service = RetrievalService(db, embedding,
+                VectorIndex(settings.qdrant_url, settings.retrieval_namespace, vector_client), reranker,
+                route=settings.retrieval_route)
+            report['pre_task_warmup_seconds'] = time.monotonic() - warm_started
+            report['warmup'] = {'query_encodes': 1, 'rerank_scores': 1, 'text': 'fixed neutral fixture; not a test question'}
+            report['rag_identity'] = {'route': retrieval.service.route,
+                'embedding': embedding.identity, 'reranker': reranker.identity}
+
+            overrides = dict(main.app.dependency_overrides)
+            main.app.dependency_overrides[dependencies.get_runtime_settings] = lambda: settings
+            main.app.dependency_overrides[dependencies.get_database] = lambda: db
+            stack.callback(lambda: (main.app.dependency_overrides.clear(), main.app.dependency_overrides.update(overrides)))
+            with TestClient(main.app) as client:
+                uploaded = client.post('/api/uploads', params={'filename': 'source.pdf'},
+                    content=Path(case['material']['pdf_path']).read_bytes())
+                assert uploaded.status_code == 201, uploaded.text
+                attachment = {'input_ref': uploaded.json()['input_ref'], 'filename': 'source.pdf',
+                    'paper_id': original['document_ref']['paper_id']}
+                conversation = client.post('/api/conversations', json={'title': 'H1 independent task',
+                    'idempotency_key': case_id + '-' + variant + '-' + mode + '-conversation'})
+                assert conversation.status_code == 201, conversation.text
+                conversation_id = conversation.json()['conversation_id']
+                empty = client.get('/api/conversations/' + conversation_id).json()
+                assert not empty.get('messages'), empty
+                created = client.post('/api/tasks', json={'prompt': case['prompt'], 'save_policy': 'deny',
+                    'attachments': [attachment], 'conversation_id': conversation_id,
+                    'idempotency_key': case_id + '-' + variant + '-' + mode})
+                assert created.status_code == 202, created.text
+                root_id = created.json()['task_id']
+                report.update(root_id=root_id, conversation_id=conversation_id,
+                    initial_messages=0, http_upload=201, http_create=202)
+                if mode == 'qualify':
+                    attachments = {a['input_ref']: a for a in json.loads(db.get_task(root_id)['attachments_json'])}
+                    data = PaperService(db, None, pdf).read(root_id, attachment['input_ref'], attachments=attachments)
+                    assert len(data['pages']) == case['material']['physical_pages']
+                    resources = retrieval.ensure_task_resources(root_id, [bundle['manifest']['source']['document_id']])
+                    from research_loop.domain.retrieval import RetrievalQuery
+                    found = retrieval.search(root_id, RetrievalQuery(query='research method',
+                        document_ids=[bundle['manifest']['source']['document_id']]))
+                    assert found['status'] == 'ready', found
+                    assert found['hits'], found
+                    if (found.get('strategy', {}).get('name') != 'located_fp16' or found.get('degradations')
+                            or found.get('effective_path') != 'located_bm25_rerank'
+                            or found.get('reranker', {}).get('variant') != 'mps_fp16'):
+                        raise ValueError('DEDUP_NATIVE_FP16_QUALIFICATION_FAILED')
+                    report['qualification_retrieval'] = {key: found.get(key) for key in
+                        ('strategy', 'effective_path', 'reranker', 'embedding', 'selection_trace', 'degradations')}
+                    report.update(status='passed', real_model_calls=0,
+                        qualification={'pages': len(data['pages']), 'authorized_resources': resources,
+                            'retrieval_status': found['status'], 'hits': len(found['hits'])})
+                else:
+                    if not credential or read(manifest['authorization_path'])['approved'] is not True:
+                        raise PermissionError('H1 execution authorization or credential absent')
+                    ledger = Ledger(runtime / 'budget.sqlite3', **manifest.get('ledger_limits', {}))
+                    begun = ledger.begin_root(root_id, case_id, variant)
+                    snap = ledger.snapshot()
+                    deadline = min(begun['started_at'] + ledger.config['root_seconds'],
+                        snap['started_at'] + ledger.config['batch_seconds'], manifest['cell_absolute_deadline'])
+
+                    def factory(_settings):
+                        """所有角色共用根账本；原生适配器仅替换 HTTP 传输。"""
+                        if (_settings.deepseek_model != settings.deepseek_model
+                                or _settings.deepseek_base_url != settings.deepseek_base_url):
+                            from research_loop.providers.deepseek import RequestNotSent
+                            raise RequestNotSent('H1 model or visual provider outside frozen scope')
+                        transport = BudgetTransport(ledger, root_id, cell / 'requests', deadline=deadline)
+                        native_client = httpx.Client(transport=transport, timeout=settings.request_timeout_seconds,
+                            trust_env=False, follow_redirects=False)
+                        clients.append(native_client)
+                        return DeepSeekProvider(credential, settings.deepseek_model, settings.deepseek_base_url,
+                            timeout=settings.request_timeout_seconds, client=native_client)
+
+                    executor = TaskExecutor(settings, db, provider_factory=factory, pdf_factory=lambda *_: pdf)
+                    executor.retrieval = retrieval
+                    stop_watchdog = threading.Event()
+
+                    def deadline_watchdog():
+                        """到期只取消本格任务；不启动额外收尾模型请求。"""
+                        if not stop_watchdog.wait(max(0, deadline - time.time())):
+                            TaskService(db, settings).cancel(root_id)
+
+                    watchdog = threading.Thread(target=deadline_watchdog, daemon=True)
+                    watchdog.start()
+                    try:
+                        executor.execute(root_id, 'harness-h1-' + case_id + '-' + variant)
+                    finally:
+                        stop_watchdog.set()
+                        watchdog.join(timeout=1)
+                    view = client.get('/api/tasks/' + root_id)
+                    events = client.get('/api/tasks/' + root_id + '/events')
+                    subtasks = client.get('/api/tasks/' + root_id + '/subtasks')
+                    assert view.status_code == events.status_code == subtasks.status_code == 200
+                    write(cell / 'task-view.json', view.json())
+                    write(cell / 'events.json', events.json())
+                    write(cell / 'subtasks.json', subtasks.json())
+                    task_ids = [root_id] + [r['task_id'] for r in db.fetchall('SELECT task_id FROM tasks WHERE root_task_id=? AND task_id<>?', (root_id, root_id))]
+                    write(cell / 'actions.json', {tid: db.list_actions(tid) for tid in task_ids})
+                    receipts = db.fetchall('SELECT * FROM model_calls')
+                    write(cell / 'model-calls.json', receipts)
+                    write(cell / 'ledger-snapshot.json', ledger.snapshot())
+                    report.update(status='executed', task_status=view.json()['status'],
+                        task_ids=task_ids,
+                        ledger_halt=ledger.snapshot()['halt_reason'])
+    except BaseException as exc:
+        report.update(status='failed', exception_type=type(exc).__name__)
+        (cell / 'failure.log').write_text(traceback.format_exc())
+    finally:
+        close_errors = []
+        for client in clients:
+            try:
+                client.close()
+            except BaseException as exc:
+                close_errors.append(type(exc).__name__)
+        if close_errors:
+            report['client_close_errors'] = close_errors
+        if ledger is not None:
+            snapshot = ledger.snapshot()
+            write(cell / 'ledger-snapshot.json', snapshot)
+            report['real_model_calls'] = sum(r['root_id'] == root_id and r['status'] in ('sent', 'settled', 'unknown')
+                for r in snapshot['reservations'])
+            report['ledger_halt'] = snapshot['halt_reason']
+        if db is not None:
+            write(cell / 'model-calls.json', db.fetchall('SELECT * FROM model_calls'))
+            if root_id is not None:
+                task_ids = [r['task_id'] for r in db.fetchall('SELECT task_id FROM tasks WHERE root_task_id=?', (root_id,))]
+                write(cell / 'actions.json', {tid: db.list_actions(tid) for tid in task_ids})
+                write(cell / 'root-row.json', db.get_task(root_id))
+        report['isolation'] = {'write_root': str(runtime), 'denials': boundary.denials,
+            'sqlite_paths': sorted(boundary.sqlite_paths), 'implicit_settings_and_dotenv_denied': True,
+            'network_policy': network_policy.snapshot(), 'denied_connections': denied_connections}
+        if any(row['phase'] != 'guard_selfcheck' for row in boundary.denials):
+            report['status'] = 'failed'
+        report['finished_at'] = datetime.now(timezone.utc).isoformat()
+        write(cell / 'result.json', report)
+        boundary.enabled = False
+    return report
+
+
+def main():
+    """一次只运行已冻结的一个格；正式授权从内存标准输入读取。"""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--manifest', type=Path, required=True)
+    parser.add_argument('--case', required=True)
+    parser.add_argument('--variant', required=True, choices=['A', 'B'])
+    parser.add_argument('--mode', required=True, choices=['qualify', 'execute'])
+    parser.add_argument('--deadline', type=float)
+    args = parser.parse_args()
+    manifest = read(args.manifest)
+    if args.deadline is not None:
+        manifest['cell_absolute_deadline'] = args.deadline
+    credential = json.loads(sys.stdin.read())['api_key'] if args.mode == 'execute' else None
+    report = run_cell(manifest, args.case, args.variant, args.mode, credential)
+    print(json.dumps({key: report.get(key) for key in ('case_id', 'variant', 'mode', 'status',
+        'task_status', 'root_id', 'exception_type')}, ensure_ascii=False), flush=True)
+    raise SystemExit(0 if report['status'] in {'passed', 'executed'} else 1)
+
+
+if __name__ == '__main__':
+    main()
