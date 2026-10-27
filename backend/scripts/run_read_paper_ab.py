@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from contextlib import ExitStack
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_CEILING
 import hashlib
 import json
 import os
@@ -34,12 +35,72 @@ def write(path, value):
 def qualification_configuration(manifest):
     """资格收据绑定本批源码、材料入口、资源、参数与允许矩阵。"""
     return {key: manifest.get(key) for key in ('experiment_kind', 'runtime_root', 'source_roots',
-        'cases_path', 'vector_manifest_path', 'vector_endpoint', 'model_manifest_path', 'settings',
-        'variant_settings', 'github_commit', 'ledger_limits', 'qualification_cells')}
+        'cases_path', 'material_project_root', 'vector_manifest_path', 'vector_endpoint', 'vector_port',
+        'model_manifest_path', 'settings', 'official_ip_addresses', 'variant_settings', 'github_commit',
+        'ledger_limits', 'carried_budget_source', 'request_contracts', 'qualification_cells')}
+
+
+def validate_carried_budget_source(manifest):
+    """从不可变的旧批次收据计算carry，防止初始冻结时漏填或归零。"""
+    source = manifest.get('carried_budget_source')
+    if not isinstance(source, dict) or set(source) != {
+            'batch_results_path', 'batch_results_sha256', 'ledger_final_path', 'ledger_final_sha256'}:
+        raise PermissionError('DEDUP_CARRIED_BUDGET_SOURCE_REQUIRED')
+    try:
+        values = {}
+        for name in ('batch_results', 'ledger_final'):
+            path = Path(source[name + '_path'])
+            if hashlib.sha256(path.read_bytes()).hexdigest() != source[name + '_sha256']:
+                raise ValueError('old receipt hash changed')
+            values[name] = read(path)
+        batch, ledger = values['batch_results'], values['ledger_final']
+        if any(row['status'] not in {'settled', 'not_sent'} for row in ledger['reservations']):
+            raise ValueError('old batch has unresolved requests')
+        settled = [row for row in ledger['reservations'] if row['status'] == 'settled']
+        if any(type(row[key]) is not int or row[key] < 0 for row in settled
+                for key in ('actual_tokens', 'actual_nano')):
+            raise ValueError('invalid historical settled amounts')
+        if (len(settled) != ledger['physical_sent_requests']
+                or sum(row['actual_tokens'] for row in settled) != ledger['actual_known_tokens']
+                or sum(row['actual_nano'] for row in settled) != ledger['actual_known_estimated_nano_yuan']):
+            raise ValueError('historical details disagree with totals')
+        for key in ('actual_known_tokens', 'physical_requests', 'actual_known_estimated_nano_yuan'):
+            other = 'physical_sent_requests' if key == 'physical_requests' else key
+            if batch[key] != ledger[other]:
+                raise ValueError('old batch and ledger disagree')
+        totals = ledger['charged_or_reserved']
+        prior = ledger.get('carried_usage') or {}
+        if any(type(value) is not int or value < 0 for value in prior.values()):
+            raise ValueError('invalid earlier carry')
+        cumulative = {'tokens': ledger['actual_known_tokens'] + prior.get('tokens', 0),
+            'requests': ledger['physical_sent_requests'] + prior.get('requests', 0),
+            'nano': ledger['actual_known_estimated_nano_yuan'] + prior.get('nano_yuan', 0)}
+        if totals != cumulative:
+            raise ValueError('historical cumulative usage disagrees')
+        seconds = Decimal(str(batch['execution_seconds']))
+        if not seconds.is_finite() or seconds < 0:
+            raise ValueError('invalid old elapsed seconds')
+        expected = {'tokens': totals['tokens'], 'requests': totals['requests'],
+            'nano_yuan': totals['nano'],
+            'seconds': int(seconds.to_integral_value(rounding=ROUND_CEILING)) + prior.get('seconds', 0)}
+        actual = manifest['ledger_limits'].get('carried_usage')
+        if (not isinstance(actual, dict) or any(type(v) is not int or v < 0 for v in actual.values())
+                or actual != expected):
+            raise ValueError('carry missing or differs from historical receipts')
+    except (OSError, KeyError, TypeError, ValueError, ArithmeticError) as exc:
+        raise PermissionError('DEDUP_CARRIED_BUDGET_SOURCE_INVALID') from exc
+    return expected
 
 
 def validate_manifest(manifest, case_id, variant, mode):
     """在创建目录或任务前检查冻结范围，拒绝借配置更换第二个实验变量。"""
+    from harness_ab_transport import visual_request_contract
+    contracts = manifest.get('request_contracts')
+    if ((contracts is not None or mode == 'execute')
+            and contracts != {'visual': visual_request_contract()}):
+        raise PermissionError('DEDUP_VISUAL_CONTRACT_REQUIRED')
+    if mode == 'execute' or manifest.get('carried_budget_source') is not None:
+        validate_carried_budget_source(manifest)
     if manifest.get('experiment_kind') != 'read_paper_exact_duplicate':
         raise PermissionError('DEDUP_EXPERIMENT_KIND_REQUIRED')
     if variant not in {'A', 'B'} or [case_id, variant] not in manifest['ledger_limits']['allowed_cells']:
@@ -50,6 +111,10 @@ def validate_manifest(manifest, case_id, variant, mode):
             'B': {'context_deduplicate_read_paper': True}}:
         raise PermissionError('DEDUP_ONLY_SWITCH_MAY_DIFFER')
     settings = manifest['settings']
+    if contracts is not None and (settings.get('deepseek_model') != 'deepseek-flash'
+            or settings.get('deepseek_base_url') != 'https://api.deepseek.com'
+            or settings.get('request_timeout_seconds') != 120):
+        raise PermissionError('DEDUP_VISUAL_PROVIDER_SETTINGS_REQUIRED')
     if settings.get('retrieval_route') != 'located_fp16' or settings.get('retrieval_reranker_backend') != 'mps_fp16':
         raise PermissionError('DEDUP_CURRENT_RAG_REQUIRED')
     if mode == 'execute' and (manifest.get('real_execution_released') is not True
@@ -297,7 +362,7 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                     begun = ledger.begin_root(root_id, case_id, variant)
                     snap = ledger.snapshot()
                     deadline = min(begun['started_at'] + ledger.config['root_seconds'],
-                        snap['started_at'] + ledger.config['batch_seconds'], manifest['cell_absolute_deadline'])
+                        snap['batch_absolute_deadline'], manifest['cell_absolute_deadline'])
 
                     def factory(_settings):
                         """所有角色共用根账本；原生适配器仅替换 HTTP 传输。"""
@@ -305,7 +370,8 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                                 or _settings.deepseek_base_url != settings.deepseek_base_url):
                             from research_loop.providers.deepseek import RequestNotSent
                             raise RequestNotSent('H1 model or visual provider outside frozen scope')
-                        transport = BudgetTransport(ledger, root_id, cell / 'requests', deadline=deadline)
+                        transport = BudgetTransport(ledger, root_id, cell / 'requests', deadline=deadline,
+                            visual_contract=manifest['request_contracts']['visual'])
                         native_client = httpx.Client(transport=transport, timeout=settings.request_timeout_seconds,
                             trust_env=False, follow_redirects=False)
                         clients.append(native_client)

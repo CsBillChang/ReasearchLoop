@@ -260,6 +260,131 @@ class HarnessAbBudgetTests(unittest.TestCase):
         with self.assertRaisesRegex(BudgetHalt, 'batch time'):
             ledger.reserve('root', input_upper_bound=1, max_output_tokens=1)
 
+    @staticmethod
+    def historical_usage(**changes):
+        return {'tokens': 540_984, 'requests': 9, 'nano_yuan': 765_684_960,
+            'seconds': 158, **changes}
+
+    def test_explicit_history_is_frozen_and_current_actual_usage_is_separate(self):
+        carry = self.historical_usage()
+        limits = {'batch_tokens': 16_000_000, 'batch_requests': 256,
+            'batch_yuan': '64', 'batch_seconds': 5400, 'carried_usage': carry}
+        ledger = self.started(**limits)
+        initial = ledger.snapshot()
+        self.assertEqual(initial['charged_or_reserved'], {
+            'tokens': 540_984, 'requests': 9, 'nano': 765_684_960})
+        self.assertEqual(initial['current_charged_or_reserved'], {
+            'tokens': 0, 'requests': 0, 'nano': 0})
+        self.assertEqual(initial['actual_known_tokens'], 0)
+        self.assertEqual(initial['physical_sent_requests'], 0)
+        self.assertEqual(initial['batch_absolute_deadline'], 100 + 5242)
+        identity = self.sent(ledger)
+        ledger.settle(identity, {'prompt_tokens': 1, 'completion_tokens': 1,
+            'total_tokens': 2})
+        reopened = Ledger(ledger.path, clock=lambda: self.now, **limits)
+        snapshot = reopened.snapshot()
+        self.assertEqual(snapshot['actual_known_tokens'], 2)
+        self.assertEqual(snapshot['physical_sent_requests'], 1)
+        self.assertEqual(snapshot['actual_known_estimated_nano_yuan'], 10_000)
+        self.assertEqual(snapshot['charged_or_reserved'], {
+            'tokens': 540_986, 'requests': 10, 'nano': 765_694_960})
+        self.assertEqual(snapshot['carried_usage'], carry)
+        for omitted_or_changed in (None, self.historical_usage(tokens=540_983)):
+            with self.subTest(carry=omitted_or_changed):
+                with self.assertRaisesRegex(ValueError, 'cannot change'):
+                    Ledger(ledger.path, clock=lambda: self.now,
+                        **{**limits, 'carried_usage': omitted_or_changed})
+        self.assertEqual(reopened.snapshot()['charged_or_reserved'],
+            snapshot['charged_or_reserved'])
+
+    def test_history_never_reduces_fresh_root_allowance(self):
+        carry = self.historical_usage()
+        ledger = self.started(batch_tokens=carry['tokens'] + 110,
+            batch_requests=carry['requests'] + 1, batch_yuan='64',
+            root_tokens=110, root_requests=1, carried_usage=carry)
+        ledger.reserve('root', input_upper_bound=100, max_output_tokens=10)
+        self.assertEqual(ledger.snapshot()['current_charged_or_reserved'], {
+            'tokens': 110, 'requests': 1, 'nano': 280_000})
+        self.assertEqual(ledger.snapshot()['charged_or_reserved']['tokens'],
+            carry['tokens'] + 110)
+
+    def test_explicit_history_applies_to_each_batch_pre_send_limit(self):
+        zero = {'tokens': 0, 'requests': 0, 'nano_yuan': 0, 'seconds': 0}
+        cases = [({'batch_tokens': 111}, {**zero, 'tokens': 1}, 'token'),
+            ({'batch_requests': 2}, {**zero, 'requests': 1}, 'request'),
+            ({'batch_yuan': '0.000280001'}, {**zero, 'nano_yuan': 1}, 'money')]
+        for limits, carry, reason in cases:
+            with self.subTest(reason=reason):
+                ledger = self.started(carried_usage=carry, **limits)
+                ledger.reserve('root', input_upper_bound=100, max_output_tokens=10)
+                with self.assertRaisesRegex(BudgetHalt, reason):
+                    ledger.reserve('root', input_upper_bound=1, max_output_tokens=1)
+
+    def test_history_and_startup_time_reduce_same_absolute_batch_deadline(self):
+        ledger = self.started(carried_usage=self.historical_usage(),
+            batch_seconds=200, start_time=90)
+        # 已有158秒，加本进程初始化10秒，只余32秒，不是重新获得200秒。
+        self.assertEqual(ledger.snapshot()['batch_absolute_deadline'], 132)
+        request = ledger.reserve('root', input_upper_bound=100, max_output_tokens=10)
+        self.now = 132
+        with self.assertRaisesRegex(BudgetHalt, 'batch time'):
+            ledger.mark_sent(request['reservation_id'])
+        ledger.not_sent(request['reservation_id'], 'deadline before entering HTTP')
+        self.assertEqual(ledger.snapshot()['charged_or_reserved']['tokens'], 540_984)
+
+    def test_history_request_carry_is_atomic_across_competing_roots(self):
+        carry = self.historical_usage()
+        ledger = self.started(batch_requests=10, carried_usage=carry)
+        ledger.begin_root('other', 'H1-Q2', 'B')
+        def reserve(index):
+            try:
+                return ledger.reserve('root' if index % 2 else 'other',
+                    input_upper_bound=1, max_output_tokens=1)
+            except BudgetHalt:
+                return None
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(reserve, range(20)))
+        self.assertEqual(sum(row is not None for row in results), 1)
+        self.assertEqual(ledger.snapshot()['charged_or_reserved']['requests'], 10)
+        self.assertEqual(ledger.snapshot()['current_charged_or_reserved']['requests'], 1)
+
+    def test_unknown_retains_history_and_full_new_reservation_on_reopen(self):
+        carry = self.historical_usage()
+        ledger = self.started(carried_usage=carry)
+        identity = self.sent(ledger)
+        ledger.unknown(identity, 'synthetic missing visual receipt')
+        reopened = Ledger(ledger.path, clock=lambda: self.now, carried_usage=carry)
+        self.assertEqual(reopened.snapshot()['charged_or_reserved'], {
+            'tokens': 540_984 + 110, 'requests': 10,
+            'nano': 765_684_960 + 280_000})
+        with self.assertRaisesRegex(BudgetHalt, 'halted'):
+            reopened.begin_root('other', 'H1-Q2', 'B')
+
+    def test_invalid_and_over_original_cap_history_cannot_be_created(self):
+        zero = {'tokens': 0, 'requests': 0, 'nano_yuan': 0, 'seconds': 0}
+        for key in zero:
+            for value in (-1, True, 0.5, '1', None):
+                with self.subTest(key=key, value=value):
+                    with self.assertRaisesRegex(ValueError, 'carried usage'):
+                        self.ledger(carried_usage={**zero, key: value})
+        for carry in ({}, {**zero, 'extra': 1}, [], 1):
+            with self.subTest(carry=carry):
+                with self.assertRaisesRegex(ValueError, 'carried usage'):
+                    self.ledger(carried_usage=carry)
+        for key, too_much in (('tokens', 12_000_001), ('requests', 193),
+                ('nano_yuan', 96_000_000_001), ('seconds', 5401)):
+            with self.subTest(over_cap=key):
+                with self.assertRaisesRegex(ValueError, 'original batch allowance'):
+                    self.ledger(carried_usage={**zero, key: too_much})
+
+    def test_explicit_zero_history_keeps_legacy_ledger_configuration(self):
+        ledger = self.started()
+        zero = {'tokens': 0, 'requests': 0, 'nano_yuan': 0, 'seconds': 0}
+        same = Ledger(ledger.path, clock=lambda: self.now, carried_usage=zero)
+        self.assertNotIn('carried_usage', same.config)
+        self.assertEqual(same.snapshot()['charged_or_reserved'], {
+            'requests': 0, 'tokens': 0, 'nano': 0})
+
 
 if __name__ == '__main__':
     unittest.main()

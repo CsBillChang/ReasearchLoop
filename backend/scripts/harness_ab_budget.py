@@ -20,7 +20,7 @@ class Ledger:
     def __init__(self, path, *, allowed_cells=None, clock=None, start_time=None,
                  batch_tokens=12_000_000, batch_requests=192, batch_yuan=96,
                  batch_seconds=5400, root_tokens=4_000_000, root_requests=32,
-                 root_seconds=900, max_output_tokens=65_536):
+                 root_seconds=900, max_output_tokens=65_536, carried_usage=None):
         """创建专用账本；已有不完整发送记录的账本重新打开时保持冻结。"""
         self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -45,6 +45,14 @@ class Ledger:
         if any(self.config[key] <= 0 for key in ('batch_tokens', 'batch_requests', 'batch_nano_yuan',
                 'batch_seconds', 'root_tokens', 'root_requests', 'root_seconds', 'max_output_tokens')):
             raise ValueError('budget limits must be positive')
+        self.carried_usage = self._validate_carried_usage(carried_usage)
+        for usage_key, limit_key in (('tokens', 'batch_tokens'), ('requests', 'batch_requests'),
+                ('nano_yuan', 'batch_nano_yuan'), ('seconds', 'batch_seconds')):
+            if self.carried_usage[usage_key] > self.config[limit_key]:
+                raise ValueError('carried usage exceeds original batch allowance: ' + usage_key)
+        if any(self.carried_usage.values()):
+            # 零扣减保持旧配置兼容；非零扣减属于新账本不可变合同，遗漏时不能重开。
+            self.config['carried_usage'] = self.carried_usage.copy()
         with self._transaction() as db:
             schema = '''CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS roots (root_id TEXT PRIMARY KEY, case_id TEXT NOT NULL,
@@ -70,6 +78,19 @@ class Ledger:
                 raise ValueError('cannot change limits or cells of an existing ledger')
             elif db.execute("SELECT 1 FROM reservations WHERE status IN ('reserved','sent') LIMIT 1").fetchone():
                 self._put(db, 'halt_reason', 'ledger reopened with unresolved reservation; no resend')
+
+    @staticmethod
+    def _validate_carried_usage(carried_usage):
+        """历史只以冻结的整Token、请求、纳元和向上取整秒扣减，不重开旧账本。"""
+        keys = {'tokens', 'requests', 'nano_yuan', 'seconds'}
+        if carried_usage is None:
+            return dict.fromkeys(sorted(keys), 0)
+        if not isinstance(carried_usage, dict) or set(carried_usage) != keys:
+            raise ValueError('carried usage must include tokens, requests, nano_yuan and seconds')
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in carried_usage.values()):
+            raise ValueError('carried usage must contain non-negative integers')
+        return {key: carried_usage[key] for key in sorted(keys)}
 
     @contextmanager
     def _transaction(self):
@@ -102,7 +123,8 @@ class Ledger:
         if now < self._meta(db, 'last_clock'):
             raise BudgetHalt('clock moved backwards')
         self._put(db, 'last_clock', now)
-        if now - self._meta(db, 'started_at') >= self.config['batch_seconds']:
+        if (self.carried_usage['seconds'] + now - self._meta(db, 'started_at')
+                >= self.config['batch_seconds']):
             raise BudgetHalt('batch time exhausted')
         if root is not None and now - root['started_at'] >= self.config['root_seconds']:
             raise BudgetHalt('root time exhausted')
@@ -133,6 +155,13 @@ class Ledger:
             'FROM reservations WHERE ' + where, args).fetchone()
         return dict(row)
 
+    def _batch_totals(self, db):
+        """历史消耗仅叠加到批授权，不能侵占新根任务各自的额度。"""
+        totals = self._totals(db)
+        return {key: totals[key] + self.carried_usage[carry_key]
+            for key, carry_key in (('requests', 'requests'), ('tokens', 'tokens'),
+                                  ('nano', 'nano_yuan'))}
+
     def begin_root(self, root_id, case_id, variant):
         """一个已批准格只允许创建一个根任务身份，不授权重新运行。"""
         with self._transaction() as db:
@@ -162,7 +191,7 @@ class Ledger:
             if root is None:
                 raise ValueError('root has not been registered')
             now = self._time_check(db, root)
-            total, family = self._totals(db), self._totals(db, root_id)
+            total, family = self._batch_totals(db), self._totals(db, root_id)
             if total['requests'] + 1 > self.config['batch_requests'] or family['requests'] + 1 > self.config['root_requests']:
                 raise BudgetHalt('request budget exhausted')
             if total['tokens'] + tokens > self.config['batch_tokens'] or family['tokens'] + tokens > self.config['root_tokens']:
@@ -277,10 +306,14 @@ class Ledger:
         """返回用量和仍占用的额度；estimated_cost 不是供应商账单。"""
         with self._transaction() as db:
             reservations = [dict(row) for row in db.execute('SELECT * FROM reservations ORDER BY created_at,reservation_id')]
-            totals = self._totals(db)
+            totals = self._batch_totals(db)
             known = [r for r in reservations if r['status'] == 'settled']
             return {'limits': self.config, 'started_at': self._meta(db, 'started_at'),
                 'halt_reason': self._meta(db, 'halt_reason'), 'charged_or_reserved': totals,
+                'carried_usage': self.carried_usage.copy(),
+                'current_charged_or_reserved': self._totals(db),
+                'batch_absolute_deadline': (self._meta(db, 'started_at')
+                    + self.config['batch_seconds'] - self.carried_usage['seconds']),
                 'actual_known_tokens': sum(r['actual_tokens'] for r in known),
                 'actual_known_input': sum(r['actual_input'] for r in known),
                 'actual_known_output': sum(r['actual_output'] for r in known),

@@ -11,6 +11,16 @@ import sys
 import time
 
 
+def execution_deadline(manifest, started):
+    """整个进程组的截止也扣除历史时间，不能只在模型预算检查时扣减。"""
+    limits = manifest['ledger_limits']
+    carried = limits.get('carried_usage', {}).get('seconds', 0)
+    if (isinstance(carried, bool) or not isinstance(carried, int)
+            or not 0 <= carried < limits['batch_seconds']):
+        raise PermissionError('invalid carried execution seconds')
+    return started + limits['batch_seconds'] - carried
+
+
 def run_guarded(command, payload, deadline, log):
     """到期终止本次独立组；格进程继承组，不波及部署或其他实验。"""
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT,
@@ -34,7 +44,7 @@ def main():
     started = payload['started_at']
     if not isinstance(started, (int, float)) or not 0 < started <= time.time():
         raise PermissionError('invalid outer start')
-    deadline = started + manifest['ledger_limits']['batch_seconds']
+    deadline = execution_deadline(manifest, started)
     runtime = Path(manifest['runtime_root'])
     with (runtime / 'driver.log').open('x') as log:
         result = run_guarded([sys.executable, '-I', '-B',

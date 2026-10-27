@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 from pathlib import Path
+import struct
 import time
 import zlib
 
@@ -12,11 +14,77 @@ import httpx
 from research_loop.providers.deepseek import RequestNotSent
 
 
+def visual_request_contract():
+    """返回当前业务视觉节点的窄合同；不默认为实验开启图片能力。"""
+    return {'version': 1, 'model': 'deepseek-flash', 'max_tokens': 8192,
+        'temperature': 0.1, 'thinking': {'type': 'disabled'}, 'stream': False,
+        'max_images': 2, 'mime': 'image/png', 'detail': 'original',
+        'max_image_bytes': 32 * 1024 * 1024, 'max_image_side': 8192,
+        'max_request_bytes': 48 * 1024 * 1024, 'input_upper_bound': 1_048_576}
+
+
+def validate_visual_contract(contract):
+    """仅接受显式冻结的同一合同，禁止通过配置扩大模型或图片范围。"""
+    if contract is not None and contract != visual_request_contract():
+        raise ValueError('visual contract differs from current business component')
+    return visual_request_contract() if contract is not None else None
+
+
+def validate_visual_payload(payload, body_size, contract):
+    """校验原生节点的图片形状，保持原始请求字节与来源授权路径不变。"""
+    if contract is None:
+        raise RequestNotSent('visual input has no frozen experiment allowance')
+    allowed = {'model', 'messages', 'temperature', 'max_tokens', 'thinking', 'stream'}
+    if (set(payload) - allowed or body_size > contract['max_request_bytes']
+            or any(payload.get(k) != contract[k] for k in
+                ('model', 'temperature', 'max_tokens', 'thinking'))
+            or payload.get('stream', False) is not False):
+        raise RequestNotSent('visual parameters differ from frozen component contract')
+    messages = payload.get('messages')
+    if (not isinstance(messages, list) or len(messages) != 2
+            or any(not isinstance(message, dict) for message in messages)
+            or messages[0].get('role') != 'system' or not isinstance(messages[0].get('content'), str)
+            or messages[1].get('role') != 'user'):
+        raise RequestNotSent('visual messages differ from frozen component contract')
+    blocks = messages[1].get('content')
+    if (not isinstance(blocks, list) or not 2 <= len(blocks) <= 1 + contract['max_images']
+            or any(not isinstance(block, dict) for block in blocks)
+            or blocks[0].get('type') != 'text' or not isinstance(blocks[0].get('text'), str)
+            or not blocks[0]['text']):
+        raise RequestNotSent('visual text or image count outside frozen scope')
+    import fitz
+    for block in blocks[1:]:
+        value = block.get('image_url') if block.get('type') == 'image_url' else None
+        if (not isinstance(value, dict) or set(value) != {'url', 'detail'}
+                or value['detail'] != contract['detail'] or not isinstance(value['url'], str)
+                or not value['url'].startswith('data:image/png;base64,')):
+            raise RequestNotSent('only current user inline PNG original images are allowed')
+        encoded = value['url'].partition(',')[2]
+        if len(encoded) > 4 * ((contract['max_image_bytes'] + 2) // 3):
+            raise RequestNotSent('visual image exceeds frozen byte limit')
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+            if (len(raw) < 33 or len(raw) > contract['max_image_bytes']
+                    or raw[:16] != b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR'):
+                raise ValueError('image bytes or PNG header')
+            width, height = struct.unpack('>II', raw[16:24])
+            if min(width, height) <= 0 or max(width, height) > contract['max_image_side']:
+                raise ValueError('image dimensions')
+            # 先校验IHDR上界再解码；复用现有渲染依赖，不安装或改变部署依赖。
+            picture = fitz.Pixmap(raw)
+            if (picture.width, picture.height) != (width, height):
+                raise ValueError('decoded image dimensions differ')
+        except Exception as exc:
+            # PyMuPDF各版本的解码异常类型不同；这里只包住发送前的本地图片检查。
+            raise RequestNotSent('invalid or out-of-scope visual PNG') from exc
+    return len(blocks) - 1
+
+
 class BudgetTransport(httpx.BaseTransport):
     """约束一个根任务族的所有原生生成请求，不改变消息或工具内容。"""
 
     def __init__(self, ledger, root_id, directory: Path, *, inner=None,
-                 expected_model='deepseek-flash', deadline=None):
+                 expected_model='deepseek-flash', deadline=None, visual_contract=None):
         """绑定共同账本、根身份和私有请求记录目录。
 
         Args:
@@ -26,12 +94,14 @@ class BudgetTransport(httpx.BaseTransport):
             inner: 测试可注入内存传输，真实模式默认零重试传输。
             expected_model: 冻结的模型别名。
             deadline: 可选绝对墙钟截止时间。
+            visual_contract: 显式冻结的视觉合同；未提供时保持禁止图片。
         """
         self.ledger, self.root_id = ledger, root_id
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.inner = inner or httpx.HTTPTransport(retries=0, trust_env=False)
         self.expected_model, self.deadline = expected_model, deadline
+        self.visual_contract = validate_visual_contract(visual_contract)
 
     def _unknown(self, identity, reason):
         """保留完整预留并冻结后续真实请求。"""
@@ -49,14 +119,26 @@ class BudgetTransport(httpx.BaseTransport):
                 or request.url.path != '/chat/completions'
                 or request.url.query):
             raise RequestNotSent('H1 endpoint outside frozen generation scope')
-        payload = json.loads(request.read())
+        body = request.read()
+        payload = json.loads(body)
+        if (not isinstance(payload, dict) or not isinstance(payload.get('messages', []), list)
+                or any(not isinstance(message, dict) for message in payload.get('messages', []))):
+            raise RequestNotSent('invalid experiment message envelope')
+        image_blocks = []
         for message in payload.get('messages', []):
             content = message.get('content')
-            if isinstance(content, list) and any(isinstance(item, dict) and item.get('type') in
-                    {'image_url', 'input_image', 'image'} for item in content):
-                raise RequestNotSent('H1 visual input has no approved allowance')
-        if (payload.get('model') != self.expected_model
-                or payload.get('temperature') != 0.1 or payload.get('thinking') is not None):
+            if isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict) or item.get('type') not in {'text', 'image_url'}:
+                        raise RequestNotSent('multimodal block outside frozen inline PNG scope')
+                    if item['type'] == 'image_url':
+                        image_blocks.append(item)
+        image_count = 0
+        if image_blocks:
+            image_count = validate_visual_payload(payload, len(body), self.visual_contract)
+        elif (payload.get('temperature') != 0.1 or payload.get('thinking') is not None):
+            raise RequestNotSent('H1 model parameters differ from freeze')
+        if payload.get('model') != self.expected_model:
             raise RequestNotSent('H1 model parameters differ from freeze')
         maximum = payload.get('max_tokens')
         if not isinstance(maximum, int) or isinstance(maximum, bool) or not 1 <= maximum <= 65536:
@@ -72,7 +154,8 @@ class BudgetTransport(httpx.BaseTransport):
             reservation = self.ledger.reserve(self.root_id, max_output_tokens=maximum,
                 input_upper_bound=1048576,
                 request_metadata={'model': payload['model'], 'stream': bool(payload.get('stream')),
-                    'body_sha256': hashlib.sha256(request.content).hexdigest()})
+                    'body_sha256': hashlib.sha256(body).hexdigest(),
+                    'request_kind': 'visual' if image_count else 'text', 'image_count': image_count})
         except Exception as exc:
             raise RequestNotSent('H1 budget denied before transport: ' + type(exc).__name__) from exc
         identity = reservation['reservation_id']

@@ -27,47 +27,131 @@ def write(path, value):
 
 
 def reconcile_cell(cell, snapshot):
-    """同时核对原生与HTTP收据，不把外层已结算误当作原生协议完整。
+    """返回停止原因；确定未发送也不得被静默过滤为成功。"""
+    return reconcile_cell_report(cell, snapshot)['issues']
+
+
+def reconcile_cell_report(cell, snapshot):
+    """分别核对远端成功、确定未发送及不完整收据，保留原始缺失值。
 
     Args:
         cell: 已结束的本格目录。
         snapshot: 共同账本的事后快照；不得以构造新Ledger来轮询在途请求。
 
     Returns:
-        停止原因列表。完整合法的工具参数拒绝不在此冒充远端传输失败。
+        逐类核对报告。原生 not_sent 不要求远端 usage，也不补零；只有所有
+        实际物理收据均与成功原生记录匹配，才确认它没有隐藏的远端请求。
     """
     result = read(cell / 'result.json')
     root = result.get('root_id')
     native = read(cell / 'model-calls.json')
     physical = [r for r in snapshot['reservations'] if r['root_id'] == root]
     issues = []
-    if result.get('status') != 'executed':
+    if result.get('status') != 'executed' or not root:
         issues.append('cell_execution_not_complete')
-    if any(r['status'] != 'settled' for r in physical):
+    if any(r['status'] in {'reserved', 'sent', 'unknown'} for r in physical):
         issues.append('unresolved_physical_receipt')
-    if any(r['status'] != 'succeeded' for r in native):
-        issues.append('native_response_not_successful')
-    if len(native) != len(physical):
-        issues.append('native_physical_count_mismatch')
+    if any(r['status'] == 'not_sent' for r in physical):
+        issues.append('unexpected_physical_not_sent')
+    if any(r['status'] not in {'settled', 'reserved', 'sent', 'unknown', 'not_sent'} for r in physical):
+        issues.append('invalid_physical_receipt_status')
     by_id = {}
+    native_not_sent = []
+    native_status_counts = {}
+    physical_status_counts = {}
     for receipt in native:
+        status = receipt['status']
+        native_status_counts[status] = native_status_counts.get(status, 0) + 1
+        if status == 'not_sent':
+            try:
+                response = json.loads(receipt['response_json'])
+                usage = json.loads(receipt['usage_json'])
+                shape_valid = (receipt.get('sent_state') == 'not_sent'
+                    and receipt.get('request_id') is None and not response.get('id')
+                    and usage == {})
+            except (ValueError, TypeError, AttributeError):
+                response, usage, shape_valid = None, None, False
+            native_not_sent.append({'call_id': receipt.get('call_id'),
+                'status': status, 'sent_state': receipt.get('sent_state'),
+                'request_id': receipt.get('request_id'), 'response': response,
+                'usage': usage, 'local_record_consistent': shape_valid})
+            # 即使能证明未发送，当前冻结批次也不允许跳过失败分支后继续。
+            issues.append('unexpected_native_not_sent')
+            continue
+        if status != 'succeeded':
+            issues.append('native_response_' + status)
+            continue
         try:
             response = json.loads(receipt['response_json'])
+            identity = response['id']
+            if not isinstance(identity, str) or not identity:
+                raise ValueError('invalid response identity')
+        except (ValueError, TypeError, KeyError):
+            issues.append('native_response_identity_missing_or_invalid')
+            continue
+        if identity in by_id:
+            issues.append('duplicate_native_response_identity')
+        try:
             usage = json.loads(receipt['usage_json'])
             values = [usage[k] for k in ('prompt_tokens', 'completion_tokens', 'total_tokens')]
             if (any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in values)
-                    or values[0] + values[1] != values[2] or response['id'] in by_id):
-                raise ValueError('invalid usage or repeated identity')
-            by_id[response['id']] = values
+                    or values[0] + values[1] != values[2]):
+                raise ValueError('invalid usage')
         except (ValueError, TypeError, KeyError):
             issues.append('native_usage_missing_or_invalid')
+            values = None
+        if receipt.get('request_id') not in {None, identity}:
+            issues.append('native_request_response_identity_mismatch')
+        if receipt.get('sent_state', 'sent') != 'sent':
+            issues.append('native_success_sent_state_invalid')
+        by_id[identity] = values
+    physical_by_id = {}
     for receipt in physical:
+        status = receipt['status']
+        physical_status_counts[status] = physical_status_counts.get(status, 0) + 1
+        if status != 'settled':
+            continue
         try:
             meta = json.loads(receipt['response_json'])
-            if by_id[meta['response_id']] != [receipt['actual_input'], receipt['actual_output'], receipt['actual_tokens']]:
-                issues.append('native_physical_usage_mismatch')
+            identity = meta['response_id']
+            if not isinstance(identity, str) or not identity:
+                raise ValueError('invalid physical response identity')
         except (KeyError, TypeError, ValueError):
-            issues.append('physical_response_identity_missing')
+            issues.append('physical_response_identity_missing_or_invalid')
+            continue
+        if identity in physical_by_id:
+            issues.append('duplicate_physical_response_identity')
+        values = [receipt.get('actual_input'), receipt.get('actual_output'), receipt.get('actual_tokens')]
+        if (any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in values)
+                or values[0] + values[1] != values[2]):
+            issues.append('physical_usage_missing_or_invalid')
+            values = None
+        physical_by_id[identity] = values
+    native_ids, physical_ids = set(by_id), set(physical_by_id)
+    unmatched_native = sorted(native_ids - physical_ids)
+    unmatched_physical = sorted(physical_ids - native_ids)
+    if unmatched_native:
+        issues.append('native_success_without_physical_receipt')
+    if unmatched_physical:
+        issues.append('physical_receipt_without_native_success')
+    matched = []
+    for identity in sorted(native_ids & physical_ids):
+        if by_id[identity] is None or physical_by_id[identity] is None:
+            continue
+        if by_id[identity] != physical_by_id[identity]:
+            issues.append('native_physical_usage_mismatch')
+        else:
+            matched.append({'response_id': identity, 'usage': by_id[identity]})
+    complete_remote_match = (len(matched) == len(physical)
+        and len(matched) == native_status_counts.get('succeeded', 0)
+        and set(native_status_counts) <= {'succeeded', 'not_sent'}
+        and not any(issue.startswith(('duplicate_', 'native_request_response_',
+            'native_success_sent_state_')) for issue in issues))
+    for receipt in native_not_sent:
+        receipt['classification'] = ('confirmed_not_sent' if receipt['local_record_consistent']
+            and complete_remote_match else 'not_sent_confirmation_ambiguous')
+        if receipt['classification'] != 'confirmed_not_sent':
+            issues.append('native_not_sent_not_confirmed')
     for actions in read(cell / 'actions.json').values():
         for action in actions:
             data = (action.get('observation') or {}).get('data') or {}
@@ -76,7 +160,13 @@ def reconcile_cell(cell, snapshot):
                         or data.get('strategy', {}).get('name') != 'located_fp16'
                         or data.get('effective_path') != 'located_bm25_rerank'):
                     issues.append('actual_retrieval_route_or_readiness_changed')
-    return sorted(set(issues))
+    return {'issues': sorted(set(issues)), 'native_records': len(native),
+        'native_status_counts': native_status_counts,
+        'physical_reservations': len(physical), 'physical_status_counts': physical_status_counts,
+        'matched_successful_remote_receipts': matched,
+        'native_not_sent': native_not_sent,
+        'unmatched_native_response_ids': unmatched_native,
+        'unmatched_physical_response_ids': unmatched_physical}
 
 
 def main():
@@ -114,7 +204,7 @@ def main():
         json.dump({'started_at': started, 'pid': os.getpid(),
             'manifest_sha256': hashlib.sha256(args.manifest.read_bytes()).hexdigest()}, handle)
     ledger = Ledger(runtime / 'budget.sqlite3', start_time=started, **limits)
-    deadline = started + limits['batch_seconds']
+    deadline = ledger.snapshot()['batch_absolute_deadline']
     # 留出终止、收据读取及父驱动落盘时间，不把最后一请求送到总截止之后。
     finish_reserve = 5.0
     rows = []
@@ -146,12 +236,17 @@ def main():
             if run.returncode or not (cell / 'result.json').exists():
                 stop = 'cell_process_failed'
             snapshot = ledger.snapshot()
-            issues = reconcile_cell(cell, snapshot) if (cell / 'result.json').exists() else ['cell_result_missing']
+            reconciliation = (reconcile_cell_report(cell, snapshot) if (cell / 'result.json').exists()
+                else {'issues': ['cell_result_missing']})
+            issues = reconciliation['issues']
+            write(runtime / (case + '-' + variant + '-reconciliation.json'), reconciliation)
             if issues:
                 stop = 'cell_receipt_or_isolation_gate'
             result = read(cell / 'result.json') if (cell / 'result.json').exists() else {}
             row = {'case_id': case, 'variant': variant, 'status': result.get('task_status', 'failed'),
-                'root_id': result.get('root_id'), 'issues': issues, 'returncode': run.returncode}
+                'root_id': result.get('root_id'), 'issues': issues, 'returncode': run.returncode,
+                'native_status_counts': reconciliation.get('native_status_counts'),
+                'physical_status_counts': reconciliation.get('physical_status_counts')}
             rows.append(row)
             print(json.dumps({'event': 'cell_end', **row, 'known_tokens': snapshot['actual_known_tokens'],
                 'requests': snapshot['physical_sent_requests'], 'estimated_yuan': snapshot['actual_known_estimated_nano_yuan'] / 1e9}, ensure_ascii=False), flush=True)
