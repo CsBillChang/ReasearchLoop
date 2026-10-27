@@ -1,0 +1,9 @@
+# Supervisor goal-interpretation prompt experiment
+
+This experiment starts from the approved Supervisor scope candidate. The only new business difference is the exact replacement of the goal-interpretation clause in rule 1. Rules 4 and 7 stay unchanged in both variants. The treatment preserves requested breadth and depth, distinguishes user deliverables from necessary supporting research, and avoids inventing mandatory mechanism checklists.
+
+The shared entry accepts `supervisor_goal_v1` with contract `goal-rule-1-v1`. It retains `supervisor_scope_v1` for the previous rules-4-and-7 experiment and the existing exact-body deduplication experiment. Each Supervisor kind has an exact transformation, independent frozen source trees, both deduplication switches on, identical shared scripts, and no other business differences. Cross-labeling kinds, additional prompt edits, function changes and source drift are rejected.
+
+The actual child must load the selected Supervisor source and prompt. Source validation runs before each model reservation/send. Both Supervisor experiments require the same external pair-review controls, one-time scheduler grants, prior-pair approval, receipt binding, cumulative budget accounting and absolute process-group deadline. A new kind must not bypass any of these gates.
+
+Offline qualification uses synthetic model responses and isolated SQLite/runtime/cache directories. It proves entry compatibility and boundary enforcement, not prompt compliance, semantic answer quality, current live RAG readiness, provider acceptance or performance. Private samples, labels, papers, traces, configuration and credentials stay outside GitHub. Real execution remains disabled until a separately reviewed resource, sample, scoring and budget freeze is approved. No experiment authorizes merging or switching a deployment.
