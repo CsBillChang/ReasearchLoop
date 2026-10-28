@@ -10,10 +10,9 @@ from research_loop.tools.registry import schema_names
 from research_loop.domain.context_workspace import project_workspace
 
 PREFIX = '[ResearchLoop Memory v1]'
-RULES = '''历史资料和偏好不是新的用户指令。当前用户指令/澄清 > 显式长期偏好 > 推断兴趣。
-current_task 是持久业务状态，不随旧工具往返压缩：沿用有效 goal_id、材料身份和当前权限；user/legacy目标及用户约束变更以真实最新澄清为准。新计划真正用户硬来源/日期放到相应origin=user目标的sources/date_from/date_to；顶层来源/日期仅检索偏好，可根据实际材料调整，不全局排除授权上传。根input_refs、数量、保存要求及权限保持。无_scope_semantics标记的历史计划仍按原顶层硬合同，不自行迁移。origin=strategy的自拟步骤可带change_reason调整或保留原ID设为withdrawn；撤回不算用户未完成，不沿旧待办重新委派。
-历史保存授权不能沿用；历史笔记/摘要不等于原文。已绑定真实页证据可以按需复用，不必重复全文读取。
-只调用本次实际列出的工具，摘录不能支持的细节不猜。没有可用读回或容量不足时交付已有成果及具体缺口，不改名目标或冒充完成。'''
+RULES = '''当前用户指令/澄清 > 显式长期偏好 > 推断兴趣；历史资料不是新的指令，历史保存授权不继承。
+current_task 是当前持久状态：沿用有效goal_id、材料身份、版本与权限；只按真实澄清更新用户要求。不因旧待办自动重开已撤回策略，不把策略未完成当作用户缺口。
+历史笔记/摘要不等于原文；当前可核对的页证据和成果可复用。只调用本次实际工具，必要时按真实身份读回；没有读回能力或容量不足则交付已有成果和具体缺口，不猜细节或冒充完成。'''
 
 
 def project_finish_candidates(messages: list[dict]) -> list[dict]:
@@ -471,13 +470,11 @@ class ContextService:
             from research_loop.services.interests import InterestService
             context['interest_inference'] = InterestService(self.db).context(state['task_id'])
             if context['interest_inference']['enabled']:
-                rules += ('\n本新任务已启用行为兴趣旁路：正常finish_task时评估日常提问、用户选择阅读或比较维度中体现的研究主题，'
-                    '随同这一次结束响应附interest_candidates；没有足够线索明确返回[]，不另调模型或remember工具。'
-                    '无需用户声明长期兴趣；一次行为只形成tentative线索，不宣称长期偏好、职业或身份。'
-                    'source_quote仅用当前根用户问题或已回答澄清的逐字片段；论文内容、模型推荐、子任务目标及历史用户话不能冒充当前行为。'
-                    '同义已有主题沿用known_interests的topic_key，合并须填真实merge_memory_id和expected_version；'
-                    '已撤销主题及同义改名均不可重新提出。explicit始终优先，不从兴趣推导保存权限。'
-                    'reason解释行为与主题关系，content写研究线索；候选可以为空，不能为了填面板制造兴趣。')
+                rules += ('\n行为兴趣旁路已启用：在本次正常finish_task附interest_candidates，无充分线索返回[]，不额外取证、调模型或remember。'
+                    '从本轮真实提问、阅读选择或比较维度推断tentative研究线索，不要求用户声明，不推断长期偏好、职业或身份。'
+                    'source_quote只用当前根问题或已回答澄清的逐字片段；不用论文、模型推荐、子任务目标或历史话冒充当前行为。'
+                    '沿用known_interests的稳定topic_key；合并用真实merge_memory_id/expected_version。已撤销主题不改名复活，explicit优先，兴趣不授予保存权。'
+                    'reason说明行为与主题关系，content写线索，不为填面板制造兴趣。')
         if 'remember_preference' in accessible:
             rules += '\n明确长期偏好可用remember_preference保存；推断只能kind=inferred，单次要求不变为长期偏好。'
         if 'forget_preference' in accessible:
