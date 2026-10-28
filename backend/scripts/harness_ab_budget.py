@@ -36,6 +36,7 @@ class Ledger:
         if nano_yuan != nano_yuan.to_integral_value():
             raise ValueError('money budget must be exactly representable in nano yuan')
         self.config = {'allowed_cells': sorted([list(cell) for cell in allowed_cells]),
+            'first_error_policy_version': 1,
             'batch_tokens': batch_tokens, 'batch_requests': batch_requests,
             'batch_nano_yuan': int(nano_yuan), 'batch_seconds': batch_seconds,
             'root_tokens': root_tokens, 'root_requests': root_requests,
@@ -74,10 +75,11 @@ class Ledger:
                 self._put(db, 'started_at', now if start_time is None else start_time)
                 self._put(db, 'last_clock', now)
                 self._put(db, 'halt_reason', None)
+                self._put(db, 'first_error', None)
             elif previous != self.config:
                 raise ValueError('cannot change limits or cells of an existing ledger')
             elif db.execute("SELECT 1 FROM reservations WHERE status IN ('reserved','sent') LIMIT 1").fetchone():
-                self._put(db, 'halt_reason', 'ledger reopened with unresolved reservation; no resend')
+                self._halt(db, 'ledger reopened with unresolved reservation; no resend', operation='reopen')
 
     @staticmethod
     def _validate_carried_usage(carried_usage):
@@ -116,6 +118,42 @@ class Ledger:
     def _put(db, key, value):
         db.execute('INSERT OR REPLACE INTO metadata(key,value) VALUES (?,?)',
                    (key, json.dumps(value, ensure_ascii=False, sort_keys=True)))
+
+    def _halt(self, db, reason, *, operation, root_id=None, reservation_id=None, details=None):
+        """在当前写事务中冻结首错；后续拒绝或在途收据不能覆盖它。"""
+        if self._meta(db, 'halt_reason') is None:
+            if root_id is None and reservation_id:
+                row = db.execute('SELECT root_id FROM reservations WHERE reservation_id=?',
+                    (reservation_id,)).fetchone()
+                root_id = row['root_id'] if row else None
+            event = {'reason': str(reason), 'operation': operation, 'detected_at': self.clock(),
+                'root_id': root_id, 'reservation_id': reservation_id, 'details': details or {},
+                'batch_occupancy': self._batch_totals(db),
+                'root_occupancy': self._totals(db, root_id) if root_id else None,
+                'limits': self.config}
+            self._put(db, 'halt_reason', str(reason))
+            self._put(db, 'first_error', event)
+        return self._meta(db, 'first_error')
+
+    def halt(self, reason, *, operation, root_id=None, reservation_id=None, details=None):
+        """供发送前合同和身份门持久冻结；只在新实验账本上调用。"""
+        with self._transaction() as db:
+            return self._halt(db, reason, operation=operation, root_id=root_id,
+                reservation_id=reservation_id, details=details)
+
+    @contextmanager
+    def _admission(self, operation, *, root_id=None, reservation_id=None, details=None):
+        """先提交停止状态，再抛拒绝；事务内直接抛出会回滚首错。"""
+        error = None
+        with self._transaction() as db:
+            try:
+                yield db
+            except BudgetHalt as exc:
+                self._halt(db, str(exc), operation=operation, root_id=root_id,
+                    reservation_id=reservation_id, details=details)
+                error = exc
+        if error is not None:
+            raise error
 
     def _time_check(self, db, root=None):
         """时间倒退直接拒绝，不用墙钟回拨扩大授权窗口。"""
@@ -164,7 +202,7 @@ class Ledger:
 
     def begin_root(self, root_id, case_id, variant):
         """一个已批准格只允许创建一个根任务身份，不授权重新运行。"""
-        with self._transaction() as db:
+        with self._admission('begin_root', root_id=root_id) as db:
             self._check_open(db)
             now = self._time_check(db)
             if [case_id, variant] not in self.config['allowed_cells']:
@@ -181,12 +219,14 @@ class Ledger:
         for value in (max_output_tokens, input_upper_bound):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError('reservation bounds must be positive integers')
-        if max_output_tokens > self.config['max_output_tokens']:
-            raise BudgetHalt('output allowance exceeds frozen request maximum')
         tokens = input_upper_bound + max_output_tokens
         nano = input_upper_bound * self.config['input_nano_per_token'] + max_output_tokens * self.config['output_nano_per_token']
-        with self._transaction() as db:
+        candidate = {'reserved_input': input_upper_bound, 'reserved_output': max_output_tokens,
+            'reserved_tokens': tokens, 'reserved_nano_yuan': nano}
+        with self._admission('reserve', root_id=root_id, details={'candidate': candidate}) as db:
             self._check_open(db)
+            if max_output_tokens > self.config['max_output_tokens']:
+                raise BudgetHalt('output allowance exceeds frozen request maximum')
             root = db.execute('SELECT * FROM roots WHERE root_id=?', (root_id,)).fetchone()
             if root is None:
                 raise ValueError('root has not been registered')
@@ -208,8 +248,8 @@ class Ledger:
                 'reserved_nano_yuan': nano, 'reserved_input': input_upper_bound, 'reserved_output': max_output_tokens}
 
     def mark_sent(self, reservation_id):
-        """紧邻底层发送前调用；后续所有不完整结果必须保留未知占用。"""
-        with self._transaction() as db:
+        """原子发放在途资格；此前已放行请求仍须保守结算。"""
+        with self._admission('mark_sent', reservation_id=reservation_id) as db:
             self._check_open(db)
             row = self._reservation(db, reservation_id)
             if row['status'] != 'reserved':
@@ -279,7 +319,8 @@ class Ledger:
         """未知结果维持完整预留；记录可见 usage，禁止自动恢复发送。"""
         db.execute("UPDATE reservations SET status='unknown',finished_at=?,reason=?,usage_json=? WHERE reservation_id=?",
             (self.clock(), str(reason), json.dumps(observed_usage, ensure_ascii=False, sort_keys=True), row['reservation_id']))
-        self._put(db, 'halt_reason', str(reason))
+        self._halt(db, str(reason), operation='receipt_unknown', root_id=row['root_id'],
+            reservation_id=row['reservation_id'])
 
     def unknown(self, reservation_id, reason):
         """用于断流、超时、错误响应或缺用量；这些都不是确定未发送。"""
@@ -301,6 +342,8 @@ class Ledger:
                 raise BudgetHalt('cannot release a sent or settled request')
             db.execute("UPDATE reservations SET status='not_sent',finished_at=?,reason=? WHERE reservation_id=?",
                        (self.clock(), str(reason), reservation_id))
+            self._halt(db, str(reason), operation='not_sent', root_id=row['root_id'],
+                reservation_id=reservation_id)
 
     def snapshot(self):
         """返回用量和仍占用的额度；estimated_cost 不是供应商账单。"""
@@ -309,7 +352,8 @@ class Ledger:
             totals = self._batch_totals(db)
             known = [r for r in reservations if r['status'] == 'settled']
             return {'limits': self.config, 'started_at': self._meta(db, 'started_at'),
-                'halt_reason': self._meta(db, 'halt_reason'), 'charged_or_reserved': totals,
+                'halt_reason': self._meta(db, 'halt_reason'), 'first_error': self._meta(db, 'first_error'),
+                'charged_or_reserved': totals,
                 'carried_usage': self.carried_usage.copy(),
                 'current_charged_or_reserved': self._totals(db),
                 'batch_absolute_deadline': (self._meta(db, 'started_at')

@@ -222,7 +222,7 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
     from harness_ab_budget import Ledger
     from harness_ab_resources import (load_source_bundles, rebind_bundle, prepare_parsed_cache,
         install_bundle, HarnessRetrievalRuntime)
-    from harness_ab_transport import BudgetTransport
+    from harness_ab_transport import BudgetTransport, require_generation_identity
     from harness_ab_network import OfficialNetworkPolicy
     network_policy = OfficialNetworkPolicy(mode, manifest['vector_port'], manifest['official_ip_addresses'])
     denied_connections = []
@@ -421,22 +421,26 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                         """共享传输保留原预算合同，增加新提示词实验的发送前身份门。"""
 
                         def handle_request(self, request):
-                            validate_active_variant(manifest, variant)
+                            require_generation_identity(ledger, root_id,
+                                lambda: validate_active_variant(manifest, variant),
+                                operation='source_identity')
                             return super().handle_request(request)
 
                     def factory(_settings):
                         """所有角色共用根账本；原生适配器仅替换 HTTP 传输。"""
-                        if (_settings.deepseek_model != settings.deepseek_model
-                                or _settings.deepseek_base_url != settings.deepseek_base_url):
-                            from research_loop.providers.deepseek import RequestNotSent
-                            raise RequestNotSent('H1 model or visual provider outside frozen scope')
-                        transport = SourceBoundTransport(ledger, root_id, cell / 'requests', deadline=deadline,
-                            visual_contract=manifest['request_contracts']['visual'])
-                        native_client = httpx.Client(transport=transport, timeout=settings.request_timeout_seconds,
-                            trust_env=False, follow_redirects=False)
-                        clients.append(native_client)
-                        return DeepSeekProvider(credential, settings.deepseek_model, settings.deepseek_base_url,
-                            timeout=settings.request_timeout_seconds, client=native_client)
+                        def build():
+                            if (_settings.deepseek_model != settings.deepseek_model
+                                    or _settings.deepseek_base_url != settings.deepseek_base_url):
+                                from research_loop.providers.deepseek import RequestNotSent
+                                raise RequestNotSent('H1 model or visual provider outside frozen scope')
+                            transport = SourceBoundTransport(ledger, root_id, cell / 'requests', deadline=deadline,
+                                visual_contract=manifest['request_contracts']['visual'])
+                            native_client = httpx.Client(transport=transport, timeout=settings.request_timeout_seconds,
+                                trust_env=False, follow_redirects=False)
+                            clients.append(native_client)
+                            return DeepSeekProvider(credential, settings.deepseek_model, settings.deepseek_base_url,
+                                timeout=settings.request_timeout_seconds, client=native_client)
+                        return require_generation_identity(ledger, root_id, build, operation='provider_identity')
 
                     executor = TaskExecutor(settings, db, provider_factory=factory, pdf_factory=lambda *_: pdf)
                     executor.retrieval = retrieval

@@ -272,6 +272,18 @@ class DedupAbRunnerTests(unittest.TestCase):
             snapshot['reservations'][0].update(actual_input=11, actual_tokens=13)
             self.assertIn('native_physical_usage_mismatch', reconcile_cell(root, snapshot))
 
+    def test_persistent_first_error_stops_even_if_last_remote_receipt_matches(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_cell(root, [successful_native()])
+            first = {'reason': 'source drift', 'operation': 'source_identity'}
+            snapshot = {'reservations': [settled_physical()],
+                'halt_reason': 'source drift', 'first_error': first}
+            report = reconcile_cell_report(root, snapshot)
+            self.assertEqual(report['issues'], ['ledger_halted'])
+            self.assertEqual(report['first_error'], first)
+            self.assertEqual(len(report['matched_successful_remote_receipts']), 1)
+
     def test_confirmed_not_sent_is_separate_and_still_stops_without_fake_missing_usage(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

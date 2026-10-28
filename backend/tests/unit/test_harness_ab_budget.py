@@ -167,11 +167,13 @@ class HarnessAbBudgetTests(unittest.TestCase):
         request = ledger.reserve('root', input_upper_bound=100, max_output_tokens=10)
         ledger.not_sent(request['reservation_id'], 'adapter rejected before transport')
         ledger.not_sent(request['reservation_id'], 'idempotent')
-        ledger.reserve('root', input_upper_bound=100, max_output_tokens=10)
+        with self.assertRaisesRegex(BudgetHalt, 'halted'):
+            ledger.reserve('root', input_upper_bound=100, max_output_tokens=10)
         snapshot = ledger.snapshot()
-        self.assertEqual(len(snapshot['reservations']), 2)
-        self.assertEqual(snapshot['charged_or_reserved']['requests'], 1)
+        self.assertEqual(len(snapshot['reservations']), 1)
+        self.assertEqual(snapshot['charged_or_reserved']['requests'], 0)
         self.assertEqual(snapshot['physical_sent_requests'], 0)
+        self.assertEqual(snapshot['first_error']['operation'], 'not_sent')
 
     def test_only_frozen_eight_cells_and_one_root_per_cell(self):
         ledger = self.started()
