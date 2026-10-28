@@ -48,7 +48,9 @@ def validate_preconditions(case: dict) -> dict:
         raise ValueError('PROMPT_BUNDLE_SAVE_POLICY_INVALID')
     if not isinstance(result['catalog'], list) or not isinstance(result['history_messages'], list):
         raise ValueError('PROMPT_BUNDLE_PRECONDITION_INVALID')
-    if len(result['catalog']) > 20 or len(result['history_messages']) > 16:
+    final_suite = case.get('suite_kind') == 'agent_final_v1'
+    catalog_limit = 54 if final_suite else 20
+    if len(result['catalog']) > catalog_limit or len(result['history_messages']) > 16:
         raise ValueError('PROMPT_BUNDLE_PRECONDITION_TOO_LARGE')
     for row in result['catalog']:
         if (not isinstance(row, dict) or set(row) - _CATALOG_KEYS
@@ -85,6 +87,7 @@ def install_catalog(stack, discovery_type, case: dict, bundles: dict) -> dict:
         bundles: 按PDF内容hash映射的已核验来源收据。
     """
     catalog = validate_preconditions(case)['catalog']
+    final_suite = case.get('suite_kind') == 'agent_final_v1'
     if not catalog:
         stack.enter_context(patch.object(discovery_type, 'search',
             side_effect=PermissionError('PROMPT_BUNDLE_NEW_CORPUS_SEARCH_DENIED')))
@@ -101,11 +104,19 @@ def install_catalog(stack, discovery_type, case: dict, bundles: dict) -> dict:
             raise ValueError('PROMPT_BUNDLE_CATALOG_SOURCE_MISSING')
         ref = bundle['document_ref']
         metadata = ref.get('metadata') or {}
+        metadata_fields = {'controlled_catalog': True, 'source_pdf_sha256': material['pdf_sha256'],
+                           'basis': 'actual_title_authors_and_abstract_excerpt', 'web_verified': False}
+        if final_suite:
+            metadata_fields['catalog_material_index'] = row['material_index']
+            material_id = material.get('material_id')
+            if material_id is not None:
+                if not isinstance(material_id, str) or not material_id.strip():
+                    raise ValueError('AGENT_FINAL_CATALOG_MATERIAL_ID_INVALID')
+                metadata_fields['material_id'] = material_id
         candidates.append(PaperCandidate(paper_id=ref['paper_id'], title=row['title'],
             authors=row.get('authors', []), abstract=row['abstract'], paper_url=row['source_url'],
             source=metadata.get('source') or 'arxiv', published=None, date_precision='unknown',
-            metadata={'controlled_catalog': True, 'source_pdf_sha256': material['pdf_sha256'],
-                      'basis': 'actual_title_authors_and_abstract_excerpt', 'web_verified': False}))
+            metadata=metadata_fields))
     if len({c.paper_id for c in candidates}) != len(candidates):
         raise ValueError('PROMPT_BUNDLE_CATALOG_DUPLICATE_ID')
 
@@ -113,29 +124,40 @@ def install_catalog(stack, discovery_type, case: dict, bundles: dict) -> dict:
         """返回冻结候选池及覆盖说明，不冒称在线召回或未知日期资格。"""
         if not isinstance(query, str) or not query.strip() or type(limit) is not int or limit < 1:
             raise ValueError('PROMPT_BUNDLE_CATALOG_QUERY_INVALID')
+        if final_suite and sources is not None and (
+                not isinstance(sources, list) or any(not isinstance(s, str) or not s.strip() for s in sources)):
+            raise ValueError('AGENT_FINAL_CATALOG_SOURCES_INVALID')
         selected = [c for c in candidates if not sources or c.source.lower() in {s.lower() for s in sources}]
         # 题录未核实日期，不允许静默忽略调用者的日期条件。
         unknown_dates = bool(date_from or date_to)
         eligible = [] if unknown_dates else selected
-        cap = min(limit, 20)
+        if final_suite:
+            from agent_final_catalog import ranked_indices
+            eligible = [eligible[i] for i in ranked_indices(
+                [(c.title, c.abstract or '') for c in eligible], query)]
+        cap = min(limit, 54 if final_suite else 20)
         returned = [c.model_copy(deep=True) for c in eligible[:cap]]
         return SearchResult(candidates=returned, date_from=date_from, date_to=date_to,
             truncated=len(eligible) > cap,
             source_results=[SourceResult(source='controlled_local_catalog',
                 status='partial_results' if unknown_dates else ('queried_success' if returned else 'queried_empty'),
                 candidate_count=len(returned), message=('publication dates unverified in frozen pool' if unknown_dates
-                    else 'fixed local metadata pool; not live search or relevance-ranking evaluation'))],
-            query_scope='frozen_local_candidate_pool_unranked_not_web_search')
+                    else ('fixed local metadata pool; deterministic lexical BM25 ranking across all eligible candidates; not live search or semantic retrieval' if final_suite
+                          else 'fixed local metadata pool; not live search or relevance-ranking evaluation')))],
+            query_scope=('frozen_local_candidate_pool_lexical_bm25_not_web_search' if final_suite
+                         else 'frozen_local_candidate_pool_unranked_not_web_search'))
     stack.enter_context(patch.object(discovery_type, 'search', new=search))
     return {'kind': 'controlled_local_catalog', 'candidate_count': len(candidates),
-            'live_search': False, 'original_evidence_grants_created': False}
+            'live_search': False, 'original_evidence_grants_created': False,
+            **({'ranking': 'lexical_bm25_all_eligible_stable_ties', 'catalog_capacity': 54}
+               if final_suite else {})}
 
 
-def seed_history(db, conversation_id: str, preconditions: dict) -> dict:
+def seed_history(db, conversation_id: str, preconditions: dict, *, suite_kind=None) -> dict:
     """在独立空会话事务中写合成消息，不创建虚假任务或模型收据。"""
     from research_loop.services.conversations import ConversationService
     from research_loop.storage.memory import MemoryStore
-    rows = validate_preconditions({'preconditions': preconditions})['history_messages']
+    rows = validate_preconditions({'suite_kind': suite_kind, 'preconditions': preconditions})['history_messages']
     if not rows:
         return {'kind': 'none', 'message_count': 0, 'message_ids': [], 'real_model_calls': 0}
     with MemoryStore(db).transaction() as tx:

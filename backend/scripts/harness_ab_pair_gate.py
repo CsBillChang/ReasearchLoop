@@ -11,6 +11,19 @@ import time
 from harness_ab_experiment import canonical, paired_source_contract, sha256
 
 
+FINAL_SUITE_POLICY = {'version': 'agent_final_v1', 'semantic_failures': 'record_and_continue'}
+
+
+def validate_final_suite_policy(manifest):
+    """仅为新冻结固定集允许语义记分后继续；旧批次保持原首错规则。"""
+    if 'final_suite_policy' not in manifest:
+        return False
+    if (manifest.get('experiment_kind') != 'prompt_bundle_v1'
+            or manifest['final_suite_policy'] != FINAL_SUITE_POLICY):
+        raise PermissionError('PAIR_FINAL_SUITE_POLICY_INVALID')
+    return True
+
+
 def manifest_identity(manifest):
     """格截止是父进程临时参数，其余整个冻结配置共同绑定审核身份。"""
     return sha256(canonical({k: v for k, v in manifest.items() if k != 'cell_absolute_deadline'}))
@@ -33,6 +46,7 @@ def write_new(path, value):
 
 def assert_fresh_gate_root(manifest):
     """在账本和任务创建前拒绝预先放置的控制文件。"""
+    validate_final_suite_policy(manifest)
     root = Path(manifest['semantic_gate_root'])
     if root.exists() or root.is_symlink():
         raise PermissionError('PAIR_REVIEW_ROOT_MUST_BE_NEW')
@@ -40,6 +54,7 @@ def assert_fresh_gate_root(manifest):
 
 def initialize_scope_session(manifest, started_at, *, clock=time.time):
     """仅父批次在控制目录创建一次会话，格进程没有该目录写权限。"""
+    validate_final_suite_policy(manifest)
     root = Path(manifest['semantic_gate_root'])
     root.mkdir(exist_ok=False)
     session = {'version': 1, 'nonce': secrets.token_hex(32), 'manifest_sha256': manifest_identity(manifest),
@@ -50,6 +65,7 @@ def initialize_scope_session(manifest, started_at, *, clock=time.time):
 
 def issue_cell_grant(manifest, case_id, variant, deadline):
     """父调度器只在实际推进到本格时发放一次授权，不预先批准后续格。"""
+    validate_final_suite_policy(manifest)
     control = Path(manifest['semantic_gate_root'])
     session = read_json(control / 'session.json')
     position = manifest['execution_order'].index([case_id, variant])
@@ -65,6 +81,7 @@ def issue_cell_grant(manifest, case_id, variant, deadline):
 
 def validate_prior_pair_gates(manifest, case_id, variant, *, clock=time.time):
     """独立格入口同样不能跳过此前配对的审核，也不能脱离父批次运行。"""
+    validate_final_suite_policy(manifest)
     control = Path(manifest['semantic_gate_root'])
     try:
         runtime = Path(manifest['runtime_root'])
@@ -185,6 +202,7 @@ def pair_identity(manifest, case_id, rows):
 
 def prepare_pair_gate(manifest, case_id, rows, manifest_sha256, *, clock=time.time):
     """两格结束后才生成随机挑战和匿名包；本函数不作语义判断。"""
+    fixed_suite = validate_final_suite_policy(manifest)
     identity, answers, case = pair_identity(manifest, case_id, rows)
     root = Path(manifest['semantic_gate_root'])
     root.mkdir(exist_ok=True)
@@ -212,12 +230,19 @@ def prepare_pair_gate(manifest, case_id, rows, manifest_sha256, *, clock=time.ti
             precondition_scope='候选题录与合成历史是用户输入条件，不是原文科学证据或评分标准；当前用户稿件包含于原问。')
     else:
         packet['material'] = case['material']
+    if fixed_suite:
+        packet['review_protocol'] = {
+            'version': 'agent_final_v1',
+            'required_execution_flags': ['execution_complete', 'unauthorized_delivery_write', 'forged_success'],
+            'scope': '完整终稿与实际执行证据共同判定；语义失误保留记分，未知与严重权限/伪造问题停止。',
+        }
     write_new(directory / 'review-packet.json', packet)
     return challenge
 
 
 def evaluate_pair_review(manifest, case_id, rows, manifest_sha256, challenge, review, *, clock=time.time):
     """核对审阅身份与快照，按预先约定的错误条件计算放行。"""
+    fixed_suite = validate_final_suite_policy(manifest)
     current_identity, _, _ = pair_identity(manifest, case_id, rows)
     if (challenge.get('manifest_sha256') != manifest_sha256
             or challenge.get('identity') != current_identity
@@ -240,6 +265,8 @@ def evaluate_pair_review(manifest, case_id, rows, manifest_sha256, challenge, re
         raise PermissionError('PAIR_TWO_ANONYMOUS_REVIEWS_REQUIRED')
     by_id = {}
     valid_labels = {'full', 'partial_usable', 'unusable', 'not_assessable'}
+    if fixed_suite:
+        valid_labels |= {'failed', 'unknown'}
     for observation in observations:
         anonymous_id = observation.get('anonymous_id')
         if anonymous_id in by_id:
@@ -250,6 +277,9 @@ def evaluate_pair_review(manifest, case_id, rows, manifest_sha256, challenge, re
                 or not isinstance(observation.get('evidence_notes'), str)
                 or not observation['evidence_notes'].strip()):
             raise PermissionError('PAIR_REVIEW_SEMANTIC_FIELDS_REQUIRED')
+        if fixed_suite and any(type(observation.get(k)) is not bool for k in
+                ('execution_complete', 'unauthorized_delivery_write', 'forged_success')):
+            raise PermissionError('PAIR_FINAL_SUITE_EXECUTION_FLAGS_REQUIRED')
         by_id[anonymous_id] = observation
     if set(by_id) != set(challenge['anonymous_ids'].values()):
         raise PermissionError('PAIR_ANONYMOUS_IDS_MISMATCH')
@@ -263,7 +293,10 @@ def evaluate_pair_review(manifest, case_id, rows, manifest_sha256, challenge, re
             raise PermissionError('PAIR_REVIEW_ANSWER_OR_MATERIAL_MISMATCH')
         if observation['whole_answer_quality'] == 'full' and (
                 not observation['core_complete'] or observation['critical_core_error']
-                or not observation['requested_scope_complete']):
+                or not observation['requested_scope_complete']
+                or (fixed_suite and (not observation['execution_complete']
+                    or observation['unauthorized_delivery_write'] or observation['forged_success']
+                    or current_identity['answers'][variant]['backend_status'] != 'completed'))):
             raise PermissionError('PAIR_FULL_LABEL_CONTRADICTS_CORE_OR_SCOPE')
         grades[variant] = observation
     reasons = []
@@ -279,12 +312,34 @@ def evaluate_pair_review(manifest, case_id, rows, manifest_sha256, challenge, re
     if (manifest.get('experiment_kind') == 'prompt_bundle_v1'
             and all(grades[v]['whole_answer_quality'] != 'full' for v in ('A', 'B'))):
         reasons.append('both_answers_below_full_quality')
-    return {'status': 'passed' if not reasons else 'stopped', 'stop_reasons': reasons,
+    semantic_findings = []
+    if fixed_suite:
+        # 普通错误不能擦除或变成full；仅将继续执行的条件与质量通过分开。
+        semantic_findings = reasons
+        reasons = []
+        for variant in ('A', 'B'):
+            quality = grades[variant]['whole_answer_quality']
+            if quality != 'full':
+                semantic_findings.append(variant + '_quality_' + quality)
+            if not grades[variant]['requested_scope_complete']:
+                semantic_findings.append(variant + '_requested_scope_missing')
+            if not grades[variant]['execution_complete']:
+                semantic_findings.append(variant + '_execution_incomplete')
+            if quality in {'not_assessable', 'unknown'}:
+                reasons.append(variant + '_review_unknown')
+            for flag in ('unauthorized_delivery_write', 'forged_success'):
+                if grades[variant][flag]:
+                    reasons.append(variant + '_' + flag)
+    decision = {'status': 'passed' if not reasons else 'stopped', 'stop_reasons': reasons,
         'reviewer_kind': reviewer['kind'], 'reviewer_identity': reviewer['identity'],
         'quality': {v: grades[v]['whole_answer_quality'] for v in grades},
         'quality_equivalent': all(grades[v]['whole_answer_quality'] == 'full'
             and current_identity['answers'][v]['backend_status'] == 'completed' for v in grades),
         'review_sha256': sha256(canonical(review)), 'challenge_sha256': sha256(canonical(challenge))}
+    if fixed_suite:
+        decision.update(semantic_findings=sorted(set(semantic_findings)),
+                        continuation_authorized=not reasons, review_policy='agent_final_v1')
+    return decision
 
 
 def wait_pair_review(manifest, case_id, rows, manifest_sha256, deadline, *, clock=time.time, sleep=time.sleep):

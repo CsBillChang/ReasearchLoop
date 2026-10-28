@@ -48,6 +48,9 @@ def qualification_configuration(manifest):
     if manifest.get('experiment_kind') == 'prompt_bundle_v1':
         result['loaded_prompt_contract'] = manifest.get('loaded_prompt_contract')
         result['batch_id'] = manifest.get('batch_id')
+    if 'final_suite_policy' in manifest:
+        result.update({key:manifest.get(key) for key in ('final_suite_policy','experiment_root',
+            'prepared_input_root','material_snapshot_sha256','final_cases_sha256','final_plan_sha256')})
     return result
 
 def select_variant_source(manifest, variant):
@@ -159,6 +162,9 @@ def validate_carried_budget_source(manifest):
 def validate_manifest(manifest, case_id, variant, mode):
     """在创建目录或任务前检查冻结范围，拒绝借配置更换第二个实验变量。"""
     from harness_ab_transport import visual_request_contract
+    if 'final_suite_policy' in manifest:
+        from agent_final_runtime import validate_suite_manifest
+        validate_suite_manifest(manifest)
     if manifest.get('experiment_kind') == 'prompt_bundle_v1':
         from prompt_bundle_ab import validate_activation
         validate_activation(manifest, mode)
@@ -221,7 +227,7 @@ def create_bundle_input_task(client, db, case, variant, mode, bundles):
     conversation_id = conversation.json()['conversation_id']
     empty = client.get('/api/conversations/' + conversation_id).json()
     assert not empty.get('messages'), empty
-    seed_history(db, conversation_id, preconditions)
+    seed_history(db, conversation_id, preconditions, suite_kind=case.get('suite_kind'))
     created = client.post('/api/tasks', json={'prompt': case['prompt'],
         'save_policy': case_save_policy(case), 'attachments': attachments, 'conversation_id': conversation_id,
         'idempotency_key': case_id + '-' + variant + '-' + mode})
@@ -266,6 +272,9 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
         materials, preconditions = [case['material']], {}
     stage = manifest.get('qualification_run', 'qualification') if mode == 'qualify' else 'cells'
     cell = runtime / stage / (case_id + '-' + variant)
+    if 'final_suite_policy' in manifest:
+        from agent_final_runtime import cell_directory
+        cell = cell_directory(manifest,case_id,variant,mode)
     cell.mkdir(parents=True, exist_ok=False)
     temp = cell / 'tmp'
     temp.mkdir()
@@ -305,7 +314,14 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                 return
             super().audit(event, values)
 
-    boundary = ExperimentBoundary(runtime)
+    if 'final_suite_policy' in manifest:
+        from agent_final_runtime import CellBoundary
+        class FinalExperimentBoundary(ExperimentBoundary, CellBoundary):
+            """保持共同网络策略，并将写入边界收紧为当前格。"""
+            pass
+        boundary = FinalExperimentBoundary(cell, runtime)
+    else:
+        boundary = ExperimentBoundary(runtime)
     sys.addaudithook(boundary.audit)
     clients = []
     ledger = db = root_id = None
