@@ -14,6 +14,16 @@ import httpx
 from research_loop.providers.deepseek import RequestNotSent
 
 
+def require_generation_identity(ledger, root_id, check, *, operation):
+    """身份门在HTTP传输之前执行，也必须通过共同账本冻结首错。"""
+    try:
+        return check()
+    except Exception as exc:
+        reason = type(exc).__name__ + ': ' + str(exc)
+        ledger.halt(reason, operation=operation, root_id=root_id)
+        raise RequestNotSent('H1 generation identity rejected: ' + reason) from exc
+
+
 def visual_request_contract():
     """返回当前业务视觉节点的窄合同；不默认为实验开启图片能力。"""
     return {'version': 1, 'model': 'deepseek-flash', 'max_tokens': 8192,
@@ -112,6 +122,15 @@ class BudgetTransport(httpx.BaseTransport):
         path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
 
     def handle_request(self, request):
+        """任何本地拒绝都持久冻结整批；此前已放行的在途请求仍可结算。"""
+        try:
+            return self._handle_request(request)
+        except Exception as exc:
+            self.ledger.halt(type(exc).__name__ + ': ' + str(exc),
+                operation='request_rejected', root_id=self.root_id)
+            raise
+
+    def _handle_request(self, request):
         """仅向冻结生成入口发送，预留失败转换为确定未发送。"""
         if (request.method != 'POST' or request.url.scheme != 'https'
                 or request.url.host != 'api.deepseek.com'
@@ -157,18 +176,22 @@ class BudgetTransport(httpx.BaseTransport):
                     'body_sha256': hashlib.sha256(body).hexdigest(),
                     'request_kind': 'visual' if image_count else 'text', 'image_count': image_count})
         except Exception as exc:
-            raise RequestNotSent('H1 budget denied before transport: ' + type(exc).__name__) from exc
+            raise RequestNotSent('H1 budget denied before transport: '
+                + type(exc).__name__ + ': ' + str(exc)) from exc
         identity = reservation['reservation_id']
         try:
             self._write(self.directory / (identity + '.request.json'), payload)
-        except BaseException:
-            self.ledger.not_sent(identity, 'request_journal_failed_before_transport')
+        except BaseException as exc:
+            self.ledger.not_sent(identity, 'request_journal_failed_before_transport: '
+                + type(exc).__name__ + ': ' + str(exc))
             raise
         try:
             self.ledger.mark_sent(identity)
         except Exception as exc:
-            self.ledger.not_sent(identity, 'mark_sent_denied_before_transport')
-            raise RequestNotSent('H1 send denied before transport: ' + type(exc).__name__) from exc
+            self.ledger.not_sent(identity, 'mark_sent_denied_before_transport: '
+                + type(exc).__name__ + ': ' + str(exc))
+            raise RequestNotSent('H1 send denied before transport: '
+                + type(exc).__name__ + ': ' + str(exc)) from exc
         try:
             response = self.inner.handle_request(request)
             encoding = response.headers.get('content-encoding')

@@ -50,6 +50,8 @@ def reconcile_cell_report(cell, snapshot):
     native = read(cell / 'model-calls.json')
     physical = [r for r in snapshot['reservations'] if r['root_id'] == root]
     issues = []
+    if snapshot.get('halt_reason'):
+        issues.append('ledger_halted')
     if result.get('status') != 'executed' or not root:
         issues.append('cell_execution_not_complete')
     if any(r['status'] in {'reserved', 'sent', 'unknown'} for r in physical):
@@ -163,7 +165,8 @@ def reconcile_cell_report(cell, snapshot):
                         or data.get('strategy', {}).get('name') != 'located_fp16'
                         or data.get('effective_path') != 'located_bm25_rerank'):
                     issues.append('actual_retrieval_route_or_readiness_changed')
-    return {'issues': sorted(set(issues)), 'native_records': len(native),
+    return {'issues': sorted(set(issues)), 'ledger_halt_reason': snapshot.get('halt_reason'),
+        'first_error': snapshot.get('first_error'), 'native_records': len(native),
         'native_status_counts': native_status_counts,
         'physical_reservations': len(physical), 'physical_status_counts': physical_status_counts,
         'matched_successful_remote_receipts': matched,
