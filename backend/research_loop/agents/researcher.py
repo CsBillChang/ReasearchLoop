@@ -14,7 +14,7 @@ from research_loop.services.verification import validate_assessments
 from research_loop.tools.base import ToolSpec, ToolContext
 from research_loop.tools.papers import specs as paper_specs
 from research_loop.domain.research_progress import ResearchProgressInput, ProgressFinding
-from research_loop.services.research_progress import ResearchProgressService
+from research_loop.services.research_progress import ResearchProgressService, UnknownFindingIdError
 
 
 # Researcher 的结构化交付，不要求它调用写文件工具。
@@ -107,7 +107,12 @@ def _record_progress(args: ResearchProgressInput, ctx: ToolContext) -> Observati
     db = getattr(ctx.services.get('papers'), 'db', None)
     if db is None:
         raise ValueError('research progress requires persistent task storage')
-    value = ResearchProgressService(db).prepare(ctx.task_id, args)
+    try:
+        value = ResearchProgressService(db).prepare(ctx.task_id, args)
+    except UnknownFindingIdError as exc:
+        return Observation(ok=False, kind='validation_error', retryable=True,
+            data={'error_code': 'UNKNOWN_FINDING_ID'},
+            message=str(exc) + '; new findings omit finding_id; updates use an ID returned for this task')
     return Observation(ok=True, kind='success', data={'research_progress': value}, message='阶段成果候选已校验；行动成功提交后生效')
 
 
