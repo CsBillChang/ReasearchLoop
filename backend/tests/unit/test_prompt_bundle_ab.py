@@ -2,6 +2,8 @@
 from contextlib import ExitStack
 from copy import deepcopy
 import json
+import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -68,6 +70,145 @@ class BundleSourceTests(unittest.TestCase):
                 (researcher, 'finish_spec', lambda: (_ for _ in ()).throw(PermissionError('tampered registry')))):
             with self.subTest(attribute=attribute), patch.object(target, attribute, value), self.assertRaises(PermissionError):
                 bundle.verify_loaded(manifest, 'B')
+        self.assertEqual(bundle.verify_loaded(manifest, 'B'), identity)
+
+
+class CodeFingerprintTests(unittest.TestCase):
+    """检查指纹的稳定性及对真实代码变化的敏感性。"""
+
+    def test_reference_sharing_does_not_change_identity(self):
+        code = compile('result = None', 'synthetic.py', 'exec')
+        shared = bytes(bytearray(b'synthetic value'))
+        separate = bytes(bytearray(shared))
+        self.assertIsNot(shared, separate)
+        left = code.replace(co_consts=((shared, shared),))
+        right = code.replace(co_consts=((shared, separate),))
+        self.assertEqual(bundle.code_digest(left), bundle.code_digest(right))
+
+    def test_constant_types_and_float_bits_are_not_collapsed(self):
+        code = compile('result = None', 'synthetic.py', 'exec')
+        constants = [None, Ellipsis, True, 1, 1.0, 0.0, -0.0, 1j, 'x', b'x',
+                     ('x',), frozenset({'x'}), slice(1, 4, 2)]
+        hashes = [bundle.code_digest(code.replace(co_consts=(value,))) for value in constants]
+        self.assertEqual(len(hashes), len(set(hashes)))
+
+    def test_unordered_constants_are_stable(self):
+        values = ['text', 2, b'bytes', (3, 4)]
+        self.assertEqual(bundle.normalize_code(frozenset(values)),
+                         bundle.normalize_code(frozenset(reversed(values))))
+
+    def test_nested_code_and_exception_table_changes_are_detected(self):
+        left = compile('def outer():\n def inner(): return 1\n return inner\n', 'synthetic.py', 'exec')
+        right = compile('def outer():\n def inner(): return 2\n return inner\n', 'synthetic.py', 'exec')
+        self.assertNotEqual(bundle.code_digest(left), bundle.code_digest(right))
+        function = compile('try: x = 1\nexcept: x = 2\n', 'synthetic.py', 'exec')
+        self.assertTrue(function.co_exceptiontable)
+        self.assertNotEqual(bundle.code_digest(function),
+                            bundle.code_digest(function.replace(co_exceptiontable=b'')))
+
+    def test_executable_fields_and_legacy_identity_are_not_ignored(self):
+        left = compile('def calc(a, b): return a + b', 'synthetic.py', 'exec')
+        right = compile('def calc(a, b): return a - b', 'synthetic.py', 'exec')
+        self.assertNotEqual(bundle.code_digest(left), bundle.code_digest(right))
+        function = next(value for value in left.co_consts if hasattr(value, 'co_code'))
+        for change in ({'co_argcount': 1}, {'co_flags': function.co_flags ^ 16},
+                       {'co_varnames': ('changed', 'b')}, {'co_names': ('changed',)},
+                       {'co_freevars': ('changed',)}, {'co_cellvars': ('changed',)}):
+            with self.subTest(field=list(change)):
+                self.assertNotEqual(bundle.code_digest(function),
+                                    bundle.code_digest(function.replace(**change)))
+        source = str(Path(__file__).resolve().parents[3])
+        identity = bundle.loaded_identity(source)
+        legacy = {key: value for key, value in identity.items()
+                  if key not in {'code_fingerprint_format', 'python_runtime'}}
+        with self.assertRaisesRegex(PermissionError, 'LOADED_IDENTITY_MISMATCH'):
+            bundle.verify_loaded({'source_roots': {'B': source},
+                                  'loaded_prompt_contract': {'B': legacy}}, 'B')
+
+    def test_unknown_constant_fails_closed(self):
+        code = compile('result = None', 'synthetic.py', 'exec')
+        with self.assertRaises(TypeError):
+            bundle.code_digest(code.replace(co_consts=(object(),)))
+
+    def test_cold_preflight_runtime_import_and_repeated_identity_match(self):
+        source = Path(__file__).resolve().parents[3]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            roots = {v: str(root / v) for v in ('A', 'B')}
+            # 合成A/B只供源码预检；实际角色从当前被测源码加载。
+            for variant, target in roots.items():
+                (Path(target) / 'backend/scripts').mkdir(parents=True)
+                for name in bundle.BUSINESS_FILES:
+                    if variant == 'A' and name == bundle.NEW_PARTS:
+                        continue
+                    original = source / name
+                    content = original.read_text() if original.exists() else 'SYNTHETIC = True\n'
+                    path = Path(target) / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text('# synthetic ' + variant + '\n' + content)
+            manifest = {'experiment_kind': bundle.KIND, 'source_roots': roots,
+                'settings': {}, 'variant_settings': {'A': {}, 'B': {}},
+                'prompt_bundle_source_contract': bundle.build_contract(roots)}
+            path = root / 'manifest.json'; path.write_text(json.dumps(manifest))
+            script = r"""
+import json,socket,sys
+from pathlib import Path
+source,manifest,mode=sys.argv[1:]
+sys.dont_write_bytecode=True
+sys.path[:0]=[str(Path(source)/'backend/scripts')]
+socket.has_ipv6=False
+# 在进程内禁止网络、数据库、子进程及真实配置读取。
+def audit(event,args):
+    if event in {'socket.connect','socket.bind','socket.getaddrinfo','socket.sendto',
+                 'socket.sendmsg','sqlite3.connect','subprocess.Popen','os.system','os.posix_spawn'}:
+        raise AssertionError('forbidden cold probe event: '+event)
+    if event=='open' and isinstance(args[0],(str,bytes)) and Path(args[0]).name=='.env':
+        raise AssertionError('dotenv read forbidden')
+sys.addaudithook(audit)
+import run_read_paper_ab as runner
+runner.select_variant_source({'source_roots':{'B':source}},'B')
+import prompt_bundle_ab as bundle
+if 'ast' in mode:
+    bundle.validate_sources(json.loads(Path(manifest).read_text()))
+if 'runtime' in mode:
+    import httpx,harness_ab_resources,harness_ab_transport,harness_ab_network
+identity=bundle.loaded_identity(source)
+frozen={'experiment_kind':bundle.KIND,'source_roots':{'B':source},
+        'loaded_prompt_contract':{'B':identity}}
+for _ in range(5):
+    assert runner.verify_loaded_supervisor(frozen,'B')==identity
+print(json.dumps(identity,sort_keys=True))
+"""
+            results = []
+            for mode in ('cold', 'ast', 'runtime', 'ast-runtime'):
+                result = subprocess.run([sys.executable, '-I', '-B', '-c', script,
+                    str(source), str(path), mode], capture_output=True, text=True, timeout=60,
+                    env={'PATH': os.environ.get('PATH', ''), 'HOME': str(root), 'TMPDIR': str(root),
+                         'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1'})
+                self.assertEqual(result.returncode, 0, mode + ': ' + result.stderr)
+                results.append(json.loads(result.stdout))
+            self.assertTrue(all(value == results[0] for value in results))
+
+    def test_runtime_function_schema_roles_handler_and_mixed_source_rejected(self):
+        from dataclasses import replace
+        from research_loop.agents import graph
+        from research_loop.tools.registry import ToolRegistry
+        import research_loop.domain.evidence as evidence
+        source = str(Path(__file__).resolve().parents[3])
+        identity = bundle.loaded_identity(source)
+        manifest = {'source_roots': {'B': source}, 'loaded_prompt_contract': {'B': identity}}
+        original = ToolRegistry.get
+        changes = ({'description': 'synthetic changed description'}, {'roles': ('unexpected',)},
+                   {'handler': lambda *args, **kwargs: None})
+        for change in changes:
+            def changed(registry, name, change=change):
+                return replace(original(registry, name), **change)
+            with self.subTest(change=list(change)), patch.object(ToolRegistry, 'get', changed):
+                with self.assertRaises(PermissionError): bundle.verify_loaded(manifest, 'B')
+        with patch.object(graph, 'build_graph', lambda *args: None):
+            with self.assertRaises(PermissionError): bundle.verify_loaded(manifest, 'B')
+        with patch.object(evidence, '__file__', '/synthetic/wrong-source.py'):
+            with self.assertRaises(PermissionError): bundle.verify_loaded(manifest, 'B')
         self.assertEqual(bundle.verify_loaded(manifest, 'B'), identity)
 
 

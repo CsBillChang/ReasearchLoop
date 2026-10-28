@@ -7,14 +7,15 @@ import hashlib
 import importlib
 import inspect
 import json
-import marshal
 import math
 import os
 from pathlib import Path
 import socket
+import struct
 import subprocess
 import sys
 import time
+from types import CodeType
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -114,6 +115,61 @@ def _literal(value):
     raise TypeError('not a literal')
 
 
+def normalize_code(value):
+    """以带类型的确定性结构绑定代码，不依赖marshal的对象引用编码。
+
+    Args:
+        value: 代码对象或其中的不可变常量。
+
+    Returns:
+        保留类型、字节和嵌套代码字段的JSON可编码结构。
+
+    Raises:
+        TypeError: 常量类型不受支持；不能静默省略未知内容。
+    """
+    if isinstance(value, CodeType):
+        fields = ('co_argcount', 'co_posonlyargcount', 'co_kwonlyargcount',
+                  'co_nlocals', 'co_stacksize', 'co_flags', 'co_code', 'co_consts',
+                  'co_names', 'co_varnames', 'co_filename', 'co_name', 'co_qualname',
+                  'co_firstlineno', 'co_linetable', 'co_exceptiontable',
+                  'co_freevars', 'co_cellvars')
+        return ['code', {key: normalize_code(getattr(value, key)) for key in fields}]
+    if value is None:
+        return ['none']
+    if value is Ellipsis:
+        return ['ellipsis']
+    if type(value) is bool:
+        return ['bool', value]
+    if type(value) is int:
+        return ['int', str(value)]
+    if type(value) is float:
+        # 二进制编码保留负零及NaN位，避免JSON数字合并不同常量。
+        return ['float', struct.pack('!d', value).hex()]
+    if type(value) is complex:
+        return ['complex', normalize_code(value.real), normalize_code(value.imag)]
+    if type(value) is str:
+        return ['str', value.encode('utf-8', errors='surrogatepass').hex()]
+    if type(value) is bytes:
+        return ['bytes', value.hex()]
+    if type(value) is slice:
+        return ['slice', normalize_code(value.start), normalize_code(value.stop),
+                normalize_code(value.step)]
+    if type(value) is tuple:
+        return ['tuple', [normalize_code(item) for item in value]]
+    if type(value) is frozenset:
+        items = [normalize_code(item) for item in value]
+        return ['frozenset', sorted(items, key=lambda item: json.dumps(
+            item, sort_keys=True, ensure_ascii=True, separators=(',', ':')))]
+    raise TypeError('unsupported code constant type: ' + type(value).__name__)
+
+
+def code_digest(code):
+    """所有函数、类方法和工具handler共用版本化结构指纹。"""
+    if not isinstance(code, CodeType):
+        raise TypeError('code object required')
+    return digest({'format': 'structured-code-v1', 'code': normalize_code(code)})
+
+
 def loaded_identity(source):
     """检查实际模块位置、执行代码及六种角色装配，不能只核对磁盘字符串。"""
     source = Path(source).resolve(strict=True)
@@ -132,7 +188,7 @@ def loaded_identity(source):
             if key.startswith('__'):
                 continue
             if inspect.isfunction(value) and value.__module__ == module_name:
-                values[key] = {'code_sha256': digest(marshal.dumps(value.__code__))}
+                values[key] = {'code_sha256': code_digest(value.__code__)}
             elif inspect.isclass(value) and value.__module__ == module_name:
                 methods = {}
                 for method_name, method in vars(value).items():
@@ -142,9 +198,9 @@ def loaded_identity(source):
                         for slot in ('fget', 'fset', 'fdel'):
                             function = getattr(method, slot)
                             if function is not None:
-                                methods[method_name + '.' + slot] = digest(marshal.dumps(function.__code__))
+                                methods[method_name + '.' + slot] = code_digest(function.__code__)
                     elif inspect.isfunction(method):
-                        methods[method_name] = digest(marshal.dumps(method.__code__))
+                        methods[method_name] = code_digest(method.__code__)
                 values[key] = {'methods': methods}
             else:
                 try:
@@ -193,9 +249,12 @@ def loaded_identity(source):
             spec = registry.get(tool_name)
             identities.append({'schema': spec.schema(), 'roles': spec.roles,
                 'handler': spec.handler.__module__ + '.' + spec.handler.__qualname__,
-                'handler_code': digest(marshal.dumps(spec.handler.__code__))})
+                'handler_code': code_digest(spec.handler.__code__)})
         registry_identities[name] = digest(identities)
-    return {'modules': modules, 'assembled_prompt_sha256': {k: digest(v) for k, v in samples.items()},
+    return {'code_fingerprint_format': 'structured-code-v1',
+            'python_runtime': {'implementation': sys.implementation.name,
+                               'version': list(sys.version_info[:3])},
+            'modules': modules, 'assembled_prompt_sha256': {k: digest(v) for k, v in samples.items()},
             'registry_sha256': registry_identities}
 
 
