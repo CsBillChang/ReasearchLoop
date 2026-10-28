@@ -10,6 +10,10 @@ from research_loop.domain.research_progress import ResearchProgressInput
 from research_loop.storage.memory import MemoryStore, check_owner, digest, dump
 
 
+class UnknownFindingIdError(ValueError):
+    """发现ID不属于当前任务，拒绝本次提交并允许有界参数纠正。"""
+
+
 class ResearchProgressService:
     """复用行动日志保存候选发现、缺口及版本，无额外模型或文件写入。"""
 
@@ -111,7 +115,7 @@ class ResearchProgressService:
         for item in args.findings:
             refs = [self.source(task_id, eid) for eid in dict.fromkeys(item.evidence_ids)]
             if item.finding_id and item.finding_id not in findings:
-                raise ValueError('unknown finding_id; omit it for a new finding')
+                raise UnknownFindingIdError('unknown finding_id; omit it for a new finding')
             key = item.finding_id or digest([task_id, ' '.join(item.text.split()).casefold()])[:24]
             if key in findings and not item.finding_id:
                 refs = list({ref['evidence_id']: ref for ref in findings[key]['sources'] + refs}.values())
