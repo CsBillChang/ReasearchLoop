@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness_ab_budget import Ledger
 from run_read_paper_ab import validate_manifest
-from harness_ab_experiment import SUPERVISOR_KINDS
+from harness_ab_experiment import PAIRED_KINDS
 from harness_ab_pair_gate import (assert_fresh_gate_root, initialize_scope_session,
     issue_cell_grant, manifest_identity, wait_pair_review)
 
@@ -195,7 +195,7 @@ def main():
     for entry in manifest['frozen_files']:
         if hashlib.sha256(Path(entry['path']).read_bytes()).hexdigest() != entry['sha256']:
             raise PermissionError('frozen source or resource drift')
-    if manifest.get('experiment_kind') in SUPERVISOR_KINDS:
+    if manifest.get('experiment_kind') in PAIRED_KINDS:
         assert_fresh_gate_root(manifest)
     input_payload = json.loads(sys.stdin.read())
     secret = input_payload['api_key']
@@ -212,7 +212,7 @@ def main():
         json.dump({'started_at': started, 'pid': os.getpid(),
             'manifest_sha256': hashlib.sha256(args.manifest.read_bytes()).hexdigest()}, handle)
     ledger = Ledger(runtime / 'budget.sqlite3', start_time=started, **limits)
-    if manifest.get('experiment_kind') in SUPERVISOR_KINDS:
+    if manifest.get('experiment_kind') in PAIRED_KINDS:
         initialize_scope_session(manifest, started)
     deadline = ledger.snapshot()['batch_absolute_deadline']
     # 留出终止、收据读取及父驱动落盘时间，不把最后一请求送到总截止之后。
@@ -236,7 +236,7 @@ def main():
         if stop:
             break
         cell_deadline = min(time.time() + limits['root_seconds'], deadline - finish_reserve)
-        if manifest.get('experiment_kind') in SUPERVISOR_KINDS:
+        if manifest.get('experiment_kind') in PAIRED_KINDS:
             try:
                 issue_cell_grant(manifest, case, variant, cell_deadline)
             except (OSError, ValueError, KeyError, TypeError, PermissionError):
@@ -275,7 +275,7 @@ def main():
             stop = 'parent_postcell_error:' + type(exc).__name__
             rows.append({'case_id': case, 'variant': variant, 'status': 'unknown', 'root_id': None,
                 'issues': ['raw_cell_and_ledger_preserved']})
-        if not stop and manifest.get('experiment_kind') in SUPERVISOR_KINDS and index % 2 == 1:
+        if not stop and manifest.get('experiment_kind') in PAIRED_KINDS and index % 2 == 1:
             print(json.dumps({'event': 'pair_review_required', 'case_id': case,
                 'control_root': manifest['semantic_gate_root']}, ensure_ascii=False), flush=True)
             try:

@@ -1,4 +1,4 @@
-"""枚举合同下的单格入口：去重开关对照或Supervisor提示词对照。"""
+"""枚举合同下的单格入口：去重、Supervisor提示词或阶段交接对照。"""
 from __future__ import annotations
 
 import argparse
@@ -21,7 +21,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from harness_ab_experiment import SUPERVISOR_KINDS
+from harness_ab_experiment import PAIRED_KINDS
 
 
 def read(path):
@@ -37,14 +37,14 @@ def write(path, value):
 
 def qualification_configuration(manifest):
     """资格收据绑定本批源码、材料入口、资源、参数与允许矩阵。"""
-    from harness_ab_experiment import SUPERVISOR_KINDS
+    from harness_ab_experiment import PAIRED_KINDS, source_contract_key
     result = {key: manifest.get(key) for key in ('experiment_kind', 'runtime_root', 'source_roots',
         'cases_path', 'material_project_root', 'vector_manifest_path', 'vector_endpoint', 'vector_port',
         'model_manifest_path', 'settings', 'official_ip_addresses', 'variant_settings', 'github_commit',
         'ledger_limits', 'carried_budget_source', 'request_contracts', 'qualification_cells')}
-    if manifest.get('experiment_kind') in SUPERVISOR_KINDS:
+    if manifest.get('experiment_kind') in PAIRED_KINDS:
         result.update({key: manifest.get(key) for key in (
-            'supervisor_prompt_contract', 'semantic_gate_root', 'pair_review_policy', 'execution_order')})
+            source_contract_key(manifest['experiment_kind']), 'semantic_gate_root', 'pair_review_policy', 'execution_order')})
     return result
 
 def select_variant_source(manifest, variant):
@@ -62,24 +62,35 @@ def select_variant_source(manifest, variant):
 
 def verify_loaded_supervisor(manifest, variant):
     """对照磁盘摘要检查实际已加载的角色常量，而非只检查sys.path。"""
-    from harness_ab_experiment import SUPERVISOR_KINDS, sha256
-    if manifest.get('experiment_kind') not in SUPERVISOR_KINDS:
+    from harness_ab_experiment import HANDOFF_KIND, HANDOFF_FILES, PAIRED_KINDS, paired_source_contract, sha256
+    if manifest.get('experiment_kind') not in PAIRED_KINDS:
         return None
     from research_loop.agents import supervisor
     root = Path(manifest['source_roots'][variant]).resolve()
-    expected = manifest['supervisor_prompt_contract']['variants'][variant]
+    expected = paired_source_contract(manifest)['variants'][variant]
     actual_file = Path(supervisor.__file__).resolve()
     if (actual_file != root / 'backend/research_loop/agents/supervisor.py'
             or sha256(supervisor.SYSTEM_PROMPT) != expected['system_prompt_sha256']):
         raise PermissionError('SUPERVISOR_LOADED_SOURCE_OR_PROMPT_MISMATCH')
-    return {'file': str(actual_file), 'system_prompt_sha256': expected['system_prompt_sha256']}
+    result = {'file': str(actual_file), 'system_prompt_sha256': expected['system_prompt_sha256']}
+    if manifest.get('experiment_kind') == HANDOFF_KIND:
+        from research_loop.agents import researcher
+        from research_loop.services import research_progress
+        loaded = {name: module for name, module in (
+            ('backend/research_loop/agents/researcher.py', researcher),
+            ('backend/research_loop/services/research_progress.py', research_progress))}
+        if set(loaded) != HANDOFF_FILES or any(Path(module.__file__).resolve() != root / name
+                for name, module in loaded.items()):
+            raise PermissionError('HANDOFF_LOADED_BUSINESS_SOURCE_MISMATCH')
+        result['business_module_files'] = {name: str(Path(module.__file__).resolve()) for name, module in loaded.items()}
+    return result
 
 
 def validate_active_variant(manifest, variant):
     """每次预留/发送前检查磁盘与内存角色身份，漂移在远端调用前拒绝。"""
-    from harness_ab_experiment import SUPERVISOR_KINDS, validate_supervisor_sources
-    if manifest.get('experiment_kind') in SUPERVISOR_KINDS:
-        validate_supervisor_sources(manifest)
+    from harness_ab_experiment import PAIRED_KINDS, validate_paired_sources
+    if manifest.get('experiment_kind') in PAIRED_KINDS:
+        validate_paired_sources(manifest)
         return verify_loaded_supervisor(manifest, variant)
     return None
 
@@ -145,14 +156,14 @@ def validate_manifest(manifest, case_id, variant, mode):
         raise PermissionError('DEDUP_VISUAL_CONTRACT_REQUIRED')
     if mode == 'execute' or manifest.get('carried_budget_source') is not None:
         validate_carried_budget_source(manifest)
-    from harness_ab_experiment import SUPERVISOR_KINDS, validate_scope_manifest
+    from harness_ab_experiment import PAIRED_KINDS, validate_paired_manifest
     kind = manifest.get('experiment_kind')
-    if kind not in {'read_paper_exact_duplicate', *SUPERVISOR_KINDS}:
+    if kind not in {'read_paper_exact_duplicate', *PAIRED_KINDS}:
         raise PermissionError('DEDUP_EXPERIMENT_KIND_REQUIRED')
     if variant not in {'A', 'B'} or [case_id, variant] not in manifest['ledger_limits']['allowed_cells']:
         raise PermissionError('DEDUP_CELL_OUTSIDE_MATRIX')
-    if kind in SUPERVISOR_KINDS:
-        validate_scope_manifest(manifest)
+    if kind in PAIRED_KINDS:
+        validate_paired_manifest(manifest)
     else:
         if Path(manifest['source_roots']['A']).resolve() != Path(manifest['source_roots']['B']).resolve():
             raise PermissionError('DEDUP_SHARED_SOURCE_REQUIRED')
@@ -193,7 +204,7 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
     """
     source = select_variant_source(manifest, variant)
     validate_manifest(manifest, case_id, variant, mode)
-    if mode == 'execute' and manifest.get('experiment_kind') in SUPERVISOR_KINDS:
+    if mode == 'execute' and manifest.get('experiment_kind') in PAIRED_KINDS:
         from harness_ab_pair_gate import validate_prior_pair_gates
         validate_prior_pair_gates(manifest, case_id, variant)
     allowed_cells = manifest.get('ledger_limits', {}).get('allowed_cells')

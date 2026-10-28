@@ -17,6 +17,8 @@ parser.add_argument('--task-id', required=True)
 parser.add_argument('--model-sequence', type=int, required=True)
 parser.add_argument('--action-sequence', type=int, required=True)
 parser.add_argument('--output', type=Path, required=True)
+parser.add_argument('--expected-error-kind', choices=['execution_error', 'validation_error'],
+    default='execution_error')
 options=parser.parse_args()
 ROOT=options.workspace.resolve()
 SOURCE=options.source_db.resolve()
@@ -93,10 +95,13 @@ progress=ResearchProgressService(db)
 pre=progress.snapshot(CHILD)
 assert pre['revision']==0 and len(pre['findings'])==0
 obs=ToolRegistry([progress_spec()]).execute('record_research_progress',original,context(db))
-assert not obs.ok and obs.kind=='execution_error' and obs.retryable
-assert obs.message=='unknown finding_id; omit it for a new finding'
+assert not obs.ok and obs.kind==options.expected_error_kind and obs.retryable
+assert obs.message.startswith('unknown finding_id; omit it for a new finding')
+if options.expected_error_kind=='validation_error':
+    assert obs.data.get('error_code')=='UNKNOWN_FINDING_ID'
 assert pre==progress.snapshot(CHILD)
-results['original_tool']={'kind':obs.kind,'retryable':obs.retryable,'message':obs.message,'snapshot_unchanged':True,'new_findings_persisted':0}
+results['original_tool']={'kind':obs.kind,'retryable':obs.retryable,'message':obs.message,
+    'error_code':obs.data.get('error_code'),'snapshot_unchanged':True,'new_findings_persisted':0}
 obs2=ToolRegistry([progress_spec()]).execute('record_research_progress',corrected,context(db))
 assert obs2.ok
 candidate=obs2.data['research_progress']
@@ -127,11 +132,33 @@ raw_db=clone('original-graph')
 raw_state=state(raw_db,original)
 raw_before=ResearchProgressService(raw_db).snapshot(CHILD)
 raw_update=node(raw_db,ToolRegistry([progress_spec()])).invoke(raw_state)
-assert raw_update['finished'] is True and raw_update['final_reason']=='research readback made no progress'
-assert raw_update['research_handoff']['phase']=='unresolved'
-assert 'tool_error' not in raw_update['research_handoff']
+if options.expected_error_kind=='execution_error':
+    assert raw_update['finished'] is True and raw_update['final_reason']=='research readback made no progress'
+    assert raw_update['research_handoff']['phase']=='unresolved'
+    assert 'tool_error' not in raw_update['research_handoff']
+else:
+    assert raw_update.get('finished') is not True
+    assert raw_update['research_handoff']['phase']=='requested'
+    assert raw_update['research_handoff']['tool_error']['message']==obs.message
 assert ResearchProgressService(raw_db).snapshot(CHILD)==raw_before
-results['original_graph_node']={'finished':True,'final_reason':raw_update['final_reason'],'handoff_phase':'unresolved','tool_error_feedback_slot_used':False,'same_as_historical_stop':True,'findings_committed':0}
+results['original_graph_node']={'finished':raw_update.get('finished',False),
+    'final_reason':raw_update.get('final_reason'),
+    'handoff_phase':raw_update['research_handoff']['phase'],
+    'tool_error_feedback_slot_used':'tool_error' in raw_update['research_handoff'],
+    'same_as_historical_stop':options.expected_error_kind=='execution_error','findings_committed':0}
+if options.expected_error_kind=='validation_error':
+    retry_state={**raw_state,**raw_update}
+    retry_state.update(model_requests=options.model_sequence+1,
+        pending_tool_scope=['record_research_progress','finish_research'],
+        pending_tool_calls=[{'call_id':'offline-actual-handler-resubmit',
+            'name':'record_research_progress','arguments':deepcopy(corrected)}])
+    retried=node(raw_db,ToolRegistry([progress_spec()])).invoke(retry_state)
+    assert retried.get('finished') is not True
+    assert retried['research_handoff']['phase']=='progress_recorded'
+    assert len(ResearchProgressService(raw_db).snapshot(CHILD)['findings'])==finding_count
+    results['actual_handler_then_scripted_resubmit']={
+        'real_tool_and_graph_path':True,'manual_parameter_correction_not_model_decision':True,
+        'committed_unreviewed_findings':finding_count,'handoff_phase':'progress_recorded'}
 
 fixed_db=clone('corrected-graph')
 fixed_state=state(fixed_db,corrected)
@@ -178,7 +205,8 @@ results['classification_repeat_counterfactual']={'finished':True,'reason':second
 
 assert hashlib.sha256(SOURCE.read_bytes()).hexdigest()==source_hash
 assert model.requests==0 and not network_attempts
-summary={'status':'passed','source_database_sha256':source_hash,'source_database_unchanged':True,'child_evidence_grants_before_failure':len(evidence_times),'future_child_evidence_grants_used':0,
+summary={'status':'passed','expected_error_kind':options.expected_error_kind,
+    'source_database_sha256':source_hash,'source_database_unchanged':True,'child_evidence_grants_before_failure':len(evidence_times),'future_child_evidence_grants_used':0,
     'original_findings_in_failed_payload':finding_count,'paid_or_stub_model_send_invocations':0,'network_attempts':0,
     'replay_scope':'actual tools and execute_tools node only; persisted original response; no model decision execution',
     'fixture_adjustments':['SQLite backup in private directory','remove child actions at or after rejected sequence and subsequent events','reconstruct requested handoff from the original native request','restore pre-tool counters/history','disable expired historical Worker lease for offline tool-node scope'],

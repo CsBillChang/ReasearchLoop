@@ -8,7 +8,7 @@ from pathlib import Path
 import secrets
 import time
 
-from harness_ab_experiment import canonical, sha256
+from harness_ab_experiment import canonical, paired_source_contract, sha256
 
 
 def manifest_identity(manifest):
@@ -57,7 +57,7 @@ def issue_cell_grant(manifest, case_id, variant, deadline):
     grants.mkdir(exist_ok=True)
     value = {'version': 1, 'case_id': case_id, 'variant': variant, 'position': position,
         'manifest_sha256': manifest_identity(manifest), 'session_nonce': session['nonce'],
-        'source_contract_sha256': sha256(canonical(manifest['supervisor_prompt_contract'])),
+        'source_contract_sha256': sha256(canonical(paired_source_contract(manifest))),
         'cell_absolute_deadline': deadline, 'grant_nonce': secrets.token_hex(32)}
     write_new(grants / (str(position) + '.json'), value)
     return value
@@ -78,7 +78,7 @@ def validate_prior_pair_gates(manifest, case_id, variant, *, clock=time.time):
         grant = read_json(control / 'grants' / (str(position) + '.json'))
         expected = {'version': 1, 'case_id': case_id, 'variant': variant, 'position': position,
             'manifest_sha256': manifest_identity(manifest), 'session_nonce': session['nonce'],
-            'source_contract_sha256': sha256(canonical(manifest['supervisor_prompt_contract'])),
+            'source_contract_sha256': sha256(canonical(paired_source_contract(manifest))),
             'cell_absolute_deadline': manifest['cell_absolute_deadline']}
         if (set(grant) != set(expected) | {'grant_nonce'}
                 or any(grant.get(k) != v for k, v in expected.items())
