@@ -86,6 +86,7 @@ class ResearchBrief(BaseModel):
     input_refs: list[str] = Field(default_factory=list)
     comparison_dimensions: list[str] = Field(default_factory=list)
     save_policy: SavePolicy = SavePolicy.deny
+    # memory也用于仅依当前对话给定材料的零论文讨论；论文问答仍沿研究材料合同。
     task_kind: Literal["search", "compare", "survey", "memory"] = "search"
     goals: list[ResearchGoal] = Field(default_factory=list, max_length=12)
     save_requested: bool = False

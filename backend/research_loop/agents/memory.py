@@ -385,6 +385,13 @@ class ContextService:
                 # 完整来源保留在画像中；模型只需计数与主题，不按每轮重复注入历史引句。
                 preference['source'] = {key: value for key, value in preference['source'].items() if key != 'evidence'}
         context={'conversation_id':link['conversation_id'],'preferences':preferences,'messages':history,'recent_research':identities,'related_history':related}
+        from research_loop.services.continuation_memory import ContinuationMemoryService
+        continuation = ContinuationMemoryService(self.db)
+        if continuation.enabled(task_id):
+            seeds = [row['task_id'] for row in identities]
+            seeds.extend(row['source_id'] for row in related)
+            context['continuation_memory'] = continuation.context(
+                task_id, seeds, max_tokens=max(512, self.settings.memory_history_tokens // 3))
         cap=self.settings.memory_history_tokens
         for row in history[:-recent]:
             if estimate(context)<=cap:
@@ -467,6 +474,9 @@ class ContextService:
             context['current_task']['current_review_answer'] = review_answer
         context['available_tools'] = sorted(accessible)
         rules = RULES
+        if (context.get('continuation_memory') or {}).get('enabled'):
+            from research_loop.services.continuation_memory import INSTRUCTION
+            rules += INSTRUCTION
         if 'finish_task' in accessible:
             from research_loop.services.interests import InterestService
             context['interest_inference'] = InterestService(self.db).context(state['task_id'])
@@ -485,7 +495,9 @@ class ContextService:
         if 'read_memory' in accessible:
             rules += '\n历史可read_memory按来源分页读回，档案仍是历史，不能扩大原文权限。'
         if 'set_research_plan' in accessible:
-            rules += '\n纯记忆管理使用task_kind=memory和min_papers=0；新论文研究使用原研究计划。'
+            rules += ('\n纯记忆管理，或仅依当前用户给定数据/已有对话且无需论文材料、精读或文件保存的讨论推导，'
+                      '使用task_kind=memory和min_papers=0；不新增搜索的论文问答仍走研究计划。'
+                      'memory结束前须有成功的记忆工具读取或操作，按需要读画像或检索/读回相关历史；没有历史须如实说明。')
         rules += '\n阶段成果中的source_refs指向同一成果的source_catalog，保留原文版本/页码/hash；findings_in/context_path指向当前状态中同一版完整候选。它们不是核验通过标记，旧稿与额外发现仍独立保留。'
         # projected可能恢复了旧组；本次新档案的message范围必须对应实际待压缩原件。
         archive_messages = list(projected)

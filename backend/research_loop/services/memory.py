@@ -131,6 +131,10 @@ class MemoryService:
         from research_loop.domain.context import excerpt
         for hit in hits:
             record = hit['record']
+            if task_id and hit['source_type'] == 'research_history':
+                from research_loop.services.continuation_memory import ContinuationMemoryService, record_identity
+                if ContinuationMemoryService(self.db).enabled(task_id):
+                    hit['record_hash'] = record_identity(record)
             if hit['source_type'] == 'research_history':
                 hit['record'] = {k: record.get(k) for k in ('task_id','conversation_id','status','created_at')}
                 hit['record'].update(prompt=excerpt(record.get('prompt',''),query,400),
