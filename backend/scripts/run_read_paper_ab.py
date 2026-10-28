@@ -263,7 +263,6 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
     ledger = db = root_id = None
     report = {'case_id': case_id, 'variant': variant, 'mode': mode, 'status': 'starting',
         'started_at': datetime.now(timezone.utc).isoformat(), 'real_model_calls': 0}
-    report['loaded_supervisor'] = verify_loaded_supervisor(manifest, variant)
     try:
         with ExitStack() as stack:
             original_resolver = socket.getaddrinfo
@@ -288,6 +287,7 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                 'HF_HOME': str(temp / 'huggingface'), 'XDG_CACHE_HOME': str(temp / 'cache'),
                 'TOKENIZERS_PARALLELISM': 'false', 'PYTORCH_ENABLE_MPS_FALLBACK': '0'}, clear=True))
             stack.enter_context(patch.object(socket, 'has_ipv6', False))
+            report['loaded_supervisor'] = verify_loaded_supervisor(manifest, variant)
             from research_loop.config import Settings
             from research_loop import config
             values = dict(manifest['settings'])
