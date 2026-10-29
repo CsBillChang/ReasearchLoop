@@ -19,6 +19,7 @@ from run_read_paper_ab import validate_manifest
 from harness_ab_experiment import PAIRED_KINDS
 from harness_ab_pair_gate import (assert_fresh_gate_root, initialize_scope_session,
     issue_cell_grant, manifest_identity, wait_pair_review)
+from agent_final_continuation import planned_order, retained_rows, validate_continuation
 
 
 def read(path):
@@ -187,11 +188,19 @@ def main():
     limits = manifest['ledger_limits']
     if len(order) != len({tuple(c) for c in order}) or sorted(order) != sorted(limits['allowed_cells']):
         raise PermissionError('matrix order does not match frozen allowed cells')
+    continuation = validate_continuation(manifest)
+    scheduled = planned_order(manifest)
+    model_deadline = (continuation['clock']['model_absolute_deadline'] if continuation else None)
+    if model_deadline is not None and time.time() >= model_deadline:
+        raise PermissionError('original model deadline already passed; no continuation start')
     authorization = read(manifest['authorization_path'])
     if not authorization.get('approved') or authorization.get('ledger_limits') != limits:
         raise PermissionError('real execution not authorized')
-    for case, variant in order:
-        validate_manifest({**manifest, 'cell_absolute_deadline': started + limits['root_seconds']}, case, variant, 'execute')
+    for case, variant in scheduled:
+        cell_limit = started + limits['root_seconds']
+        if model_deadline is not None:
+            cell_limit = min(cell_limit, model_deadline)
+        validate_manifest({**manifest, 'cell_absolute_deadline': cell_limit}, case, variant, 'execute')
     for entry in manifest['frozen_files']:
         if hashlib.sha256(Path(entry['path']).read_bytes()).hexdigest() != entry['sha256']:
             raise PermissionError('frozen source or resource drift')
@@ -220,17 +229,21 @@ def main():
     deadline = ledger.snapshot()['batch_absolute_deadline']
     # 留出终止、收据读取及父驱动落盘时间，不把最后一请求送到总截止之后。
     finish_reserve = 5.0
-    rows = []
+    rows = retained_rows(manifest)
+    retained_count = len(rows)
     stop = None
     script = Path(__file__).with_name('run_read_paper_ab.py')
     manifest_sha256 = manifest_identity(manifest)
-    for index, (case, variant) in enumerate(order):
+    for case, variant in scheduled:
+        index = order.index([case, variant])
         snapshot = ledger.snapshot()
         usage = snapshot['charged_or_reserved']
         reserve = 1_048_576 + limits['max_output_tokens']
         reserve_nano = 1_048_576 * 2000 + limits['max_output_tokens'] * 8000
         if snapshot['halt_reason']:
             stop = 'ledger_halted'
+        elif model_deadline is not None and time.time() >= model_deadline:
+            stop = 'original_model_deadline'
         elif time.time() >= deadline - finish_reserve:
             stop = 'batch_deadline'
         elif (usage['requests'] + 1 > limits['batch_requests'] or usage['tokens'] + reserve > limits['batch_tokens']
@@ -239,9 +252,12 @@ def main():
         if stop:
             break
         cell_deadline = min(time.time() + limits['root_seconds'], deadline - finish_reserve)
+        if model_deadline is not None:
+            cell_deadline = min(cell_deadline, model_deadline)
+        grant = None
         if manifest.get('experiment_kind') in PAIRED_KINDS:
             try:
-                issue_cell_grant(manifest, case, variant, cell_deadline)
+                grant = issue_cell_grant(manifest, case, variant, cell_deadline)
             except (OSError, ValueError, KeyError, TypeError, PermissionError):
                 stop = 'cell_scheduler_grant_invalid'
                 break
@@ -267,6 +283,14 @@ def main():
                 'root_id': result.get('root_id'), 'issues': issues, 'returncode': run.returncode,
                 'native_status_counts': reconciliation.get('native_status_counts'),
                 'physical_status_counts': reconciliation.get('physical_status_counts')}
+            if continuation:
+                row.update(original_position=index, retained=False,
+                    attempt_id=grant['attempt_id'], attempt_kind=grant['attempt_kind'])
+                expected_attempt = {key: grant[key] for key in
+                    ('attempt_id', 'attempt_kind', 'position', 'continuation_sha256')}
+                if result.get('experiment_attempt') != expected_attempt:
+                    row['issues'] = sorted(set(row['issues']) | {'new_attempt_identity_mismatch'})
+                    stop = 'cell_receipt_or_isolation_gate'
             rows.append(row)
             print(json.dumps({'event': 'cell_end', **row, 'known_tokens': snapshot['actual_known_tokens'],
                 'requests': snapshot['physical_sent_requests'], 'estimated_yuan': snapshot['actual_known_estimated_nano_yuan'] / 1e9}, ensure_ascii=False), flush=True)
@@ -278,11 +302,15 @@ def main():
             stop = 'parent_postcell_error:' + type(exc).__name__
             rows.append({'case_id': case, 'variant': variant, 'status': 'unknown', 'root_id': None,
                 'issues': ['raw_cell_and_ledger_preserved']})
+        if continuation:
+            rows[-1].update(original_position=index, retained=False,
+                attempt_id=grant['attempt_id'], attempt_kind=grant['attempt_kind'])
         if not stop and manifest.get('experiment_kind') in PAIRED_KINDS and index % 2 == 1:
             print(json.dumps({'event': 'pair_review_required', 'case_id': case,
                 'control_root': manifest['semantic_gate_root']}, ensure_ascii=False), flush=True)
             try:
-                decision = wait_pair_review(manifest, case, rows, manifest_sha256, deadline - finish_reserve)
+                review_deadline = min(deadline - finish_reserve, model_deadline) if model_deadline is not None else deadline - finish_reserve
+                decision = wait_pair_review(manifest, case, rows, manifest_sha256, review_deadline)
                 if decision['status'] != 'passed':
                     stop = 'semantic_pair_gate:' + ','.join(decision['stop_reasons'])
             except BaseException as exc:
@@ -290,6 +318,11 @@ def main():
         write(runtime / 'progress.json', {'rows': rows, 'stop_reason': stop})
         if stop:
             break
+    if continuation and stop:
+        last = rows[-1] if rows else {}
+        ledger.halt(stop, operation='continuation_controller',
+            root_id=last.get('root_id') if not last.get('retained') else None,
+            details={'new_attempted_cells': len(rows) - retained_count})
     snapshot = ledger.snapshot()
     write(runtime / 'ledger-final.json', snapshot)
     uncreated = [c for c in order if tuple(c) not in {(r['case_id'], r['variant']) for r in rows}]
@@ -297,7 +330,17 @@ def main():
         'rows': rows, 'not_created': uncreated, 'stop_reason': stop, 'started_at': started,
         'finished_at': time.time(), 'execution_seconds': time.time() - started,
         'limits': limits, 'actual_known_tokens': snapshot['actual_known_tokens'],
-        'physical_requests': snapshot['physical_sent_requests'], 'actual_known_estimated_nano_yuan': snapshot['actual_known_estimated_nano_yuan']})
+        'physical_requests': snapshot['physical_sent_requests'], 'actual_known_estimated_nano_yuan': snapshot['actual_known_estimated_nano_yuan'],
+        **({'continuation_sha256': hashlib.sha256(json.dumps(manifest['continuation_contract'],
+                sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest(),
+            'retained_observations': retained_count,
+            'new_created_count': sum(bool(row.get('root_id')) for row in rows[retained_count:]),
+            'new_attempted_count': len(rows) - retained_count,
+            'new_confirmed_root_count': sum(bool(row.get('root_id')) for row in rows[retained_count:]),
+            'new_roots_planned': len(scheduled), 'excluded_technical_attempts': [continuation['failed_attempt']],
+            'total_root_attempts': len(rows) + 1,
+            'primary_measurement_cells': len(order),
+            'same_original_clock': True} if continuation else {})})
     print(json.dumps({'event': 'batch_end', 'created': len(rows), 'not_created': len(uncreated), 'stop_reason': stop,
         'known_tokens': snapshot['actual_known_tokens']}, ensure_ascii=False), flush=True)
 

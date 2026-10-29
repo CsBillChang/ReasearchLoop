@@ -51,6 +51,8 @@ def qualification_configuration(manifest):
     if 'final_suite_policy' in manifest:
         result.update({key:manifest.get(key) for key in ('final_suite_policy','experiment_root',
             'prepared_input_root','material_snapshot_sha256','final_cases_sha256','final_plan_sha256')})
+    if 'continuation_contract' in manifest:
+        result['continuation_contract'] = manifest['continuation_contract']
     return result
 
 def select_variant_source(manifest, variant):
@@ -109,6 +111,9 @@ def validate_active_variant(manifest, variant):
 
 def validate_carried_budget_source(manifest):
     """从不可变的旧批次收据计算carry，防止初始冻结时漏填或归零。"""
+    if 'continuation_contract' in manifest:
+        from agent_final_continuation import validate_shared_clock_carry
+        return validate_shared_clock_carry(manifest)
     source = manifest.get('carried_budget_source')
     if not isinstance(source, dict) or set(source) != {
             'batch_results_path', 'batch_results_sha256', 'ledger_final_path', 'ledger_final_sha256'}:
@@ -283,9 +288,10 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
     """
     source = select_variant_source(manifest, variant)
     validate_manifest(manifest, case_id, variant, mode)
+    control_session = None
     if mode == 'execute' and manifest.get('experiment_kind') in PAIRED_KINDS:
         from harness_ab_pair_gate import validate_prior_pair_gates
-        validate_prior_pair_gates(manifest, case_id, variant)
+        control_session = validate_prior_pair_gates(manifest, case_id, variant)
     allowed_cells = manifest.get('ledger_limits', {}).get('allowed_cells')
     if allowed_cells is not None and [case_id, variant] not in allowed_cells:
         raise PermissionError('H1 cell outside remaining authorized matrix')
@@ -360,6 +366,10 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
     ledger = db = root_id = None
     report = {'case_id': case_id, 'variant': variant, 'mode': mode, 'status': 'starting',
         'started_at': datetime.now(timezone.utc).isoformat(), 'real_model_calls': 0}
+    if control_session and 'active_grant' in control_session:
+        grant = control_session['active_grant']
+        report['experiment_attempt'] = {key: grant[key] for key in
+            ('attempt_id', 'attempt_kind', 'position', 'continuation_sha256')}
     try:
         with ExitStack() as stack:
             original_resolver = socket.getaddrinfo

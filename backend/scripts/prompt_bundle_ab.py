@@ -312,6 +312,14 @@ def validate_round_clock(manifest, auth, *, clock=time.time):
     if (type(total) is not int or type(carried) is not int or not 0 <= carried < total
             or not 0 < started <= now < deadline or deadline != started + total - carried):
         raise PermissionError('PROMPT_BUNDLE_ROUND_CLOCK_MISMATCH')
+    if 'continuation_contract' in manifest:
+        contract = manifest['continuation_contract']
+        clock_contract = contract.get('clock') if isinstance(contract, dict) else None
+        if (not isinstance(clock_contract, dict)
+                or started != clock_contract.get('round_started_at')
+                or deadline != clock_contract.get('round_absolute_deadline')
+                or auth.get('expires_at') != clock_contract.get('model_absolute_deadline')):
+            raise PermissionError('PROMPT_BUNDLE_CONTINUATION_CLOCK_MISMATCH')
     return started, deadline
 
 

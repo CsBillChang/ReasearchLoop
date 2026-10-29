@@ -63,18 +63,75 @@ def initialize_scope_session(manifest, started_at, *, clock=time.time):
     return session
 
 
+def _prior_reviews(manifest, position, continuation, clock):
+    """旧两对仍按原manifest核验，新配对只接受当前控制目录的真实审阅。"""
+    order = manifest['execution_order']
+    retained = continuation['retained_count'] if continuation else 0
+    for offset in range(0, position // 2 * 2, 2):
+        active = continuation['anchor_manifest'] if offset < retained else manifest
+        prior = order[offset][0]
+        directory = Path(active['semantic_gate_root']) / prior
+        challenge = read_json(directory / 'challenge-private.json')
+        review = read_json(directory / 'review.json')
+        decision = read_json(directory / 'decision.json')
+        rows = [{'case_id': prior, 'variant': variant, 'root_id': answer['root_id'], 'issues': []}
+            for variant, answer in challenge['identity']['answers'].items()]
+        expected = evaluate_pair_review(active, prior, rows, manifest_identity(active),
+            challenge, review, clock=clock)
+        if decision != expected or decision.get('status') != 'passed':
+            raise PermissionError('prior semantic review did not pass')
+
+
+def _preceding_cell(manifest, position, continuation):
+    """新根必须顺序结束；不将旧失败根当作本轮精读A的前置成功。"""
+    first_new = continuation['retained_count'] if continuation else 0
+    if not (position % 2 or (continuation and position > first_new)):
+        return
+    case, variant = manifest['execution_order'][position - 1]
+    cell = Path(manifest['runtime_root']) / 'cells' / (case + '-' + variant)
+    result, view = read_json(cell / 'result.json'), read_json(cell / 'task-view.json')
+    if (result.get('status') != 'executed' or not result.get('root_id')
+            or view.get('task_id') != result['root_id'] or view.get('status') not in {'completed', 'partial'}):
+        raise PermissionError('preceding new cell has not ended')
+    if continuation:
+        native = read_json(cell / 'model-calls.json')
+        if any(row.get('status') != 'succeeded' for row in native):
+            raise PermissionError('preceding new cell contains a technical model failure')
+
+
 def issue_cell_grant(manifest, case_id, variant, deadline):
     """父调度器只在实际推进到本格时发放一次授权，不预先批准后续格。"""
     validate_final_suite_policy(manifest)
     control = Path(manifest['semantic_gate_root'])
     session = read_json(control / 'session.json')
     position = manifest['execution_order'].index([case_id, variant])
+    from agent_final_continuation import validate_continuation
+    continuation = validate_continuation(manifest)
     grants = control / 'grants'
+    if continuation:
+        first = continuation['retained_count']
+        existing = set()
+        if grants.exists():
+            for path in grants.iterdir():
+                if (path.is_symlink() or not path.is_file() or not path.stem.isdigit()
+                        or path.suffix != '.json' or path.name != str(int(path.stem)) + '.json'):
+                    raise PermissionError('continuation grant directory contains unrecognized entries')
+                existing.add(int(path.stem))
+        if position < first or existing != set(range(first, position)):
+            raise PermissionError('continuation scheduler cannot skip or replay an ordinal')
+        _prior_reviews(manifest, position, continuation, time.time)
+        _preceding_cell(manifest, position, continuation)
     grants.mkdir(exist_ok=True)
     value = {'version': 1, 'case_id': case_id, 'variant': variant, 'position': position,
         'manifest_sha256': manifest_identity(manifest), 'session_nonce': session['nonce'],
         'source_contract_sha256': sha256(canonical(paired_source_contract(manifest))),
         'cell_absolute_deadline': deadline, 'grant_nonce': secrets.token_hex(32)}
+    if continuation:
+        if not time.time() < deadline <= continuation['clock']['model_absolute_deadline']:
+            raise PermissionError('continuation grant outside original model deadline')
+        value.update(attempt_id=secrets.token_hex(32),
+            attempt_kind='technical_retry' if position == continuation['retained_count'] else 'first_attempt',
+            continuation_sha256=sha256(canonical(manifest['continuation_contract'])))
     write_new(grants / (str(position) + '.json'), value)
     return value
 
@@ -92,37 +149,34 @@ def validate_prior_pair_gates(manifest, case_id, variant, *, clock=time.time):
             raise PermissionError('scope session manifest differs')
         order = manifest['execution_order']
         position = order.index([case_id, variant])
+        from agent_final_continuation import validate_continuation
+        continuation = validate_continuation(manifest)
+        if continuation and position < continuation['retained_count']:
+            raise PermissionError('retained observations cannot receive new execution grants')
         grant = read_json(control / 'grants' / (str(position) + '.json'))
         expected = {'version': 1, 'case_id': case_id, 'variant': variant, 'position': position,
             'manifest_sha256': manifest_identity(manifest), 'session_nonce': session['nonce'],
             'source_contract_sha256': sha256(canonical(paired_source_contract(manifest))),
             'cell_absolute_deadline': manifest['cell_absolute_deadline']}
-        if (set(grant) != set(expected) | {'grant_nonce'}
+        extras = {'grant_nonce'}
+        if continuation:
+            extras |= {'attempt_id'}
+            expected.update(attempt_kind='technical_retry' if position == continuation['retained_count'] else 'first_attempt',
+                continuation_sha256=sha256(canonical(manifest['continuation_contract'])))
+            if (not isinstance(grant.get('attempt_id'), str) or len(grant['attempt_id']) != 64
+                    or any(c not in '0123456789abcdef' for c in grant['attempt_id'])
+                    or grant['cell_absolute_deadline'] > continuation['clock']['model_absolute_deadline']):
+                raise PermissionError('continuation attempt identity or deadline invalid')
+        if (set(grant) != set(expected) | extras
                 or any(grant.get(k) != v for k, v in expected.items())
                 or not isinstance(grant['grant_nonce'], str) or len(grant['grant_nonce']) != 64
                 or not clock() < grant['cell_absolute_deadline']):
             raise PermissionError('scheduler grant does not match active cell or deadline')
-        for offset in range(0, position // 2 * 2, 2):
-            prior = order[offset][0]
-            directory = control / prior
-            challenge = read_json(directory / 'challenge-private.json')
-            review = read_json(directory / 'review.json')
-            decision = read_json(directory / 'decision.json')
-            rows = [{'case_id': prior, 'variant': v, 'root_id': a['root_id'], 'issues': []}
-                for v, a in challenge['identity']['answers'].items()]
-            expected = evaluate_pair_review(manifest, prior, rows, manifest_identity(manifest), challenge, review, clock=clock)
-            if decision != expected or decision.get('status') != 'passed':
-                raise PermissionError('prior semantic review did not pass')
-        if position % 2:
-            preceding_case, preceding_variant = order[position - 1]
-            cell = Path(manifest['runtime_root']) / 'cells' / (preceding_case + '-' + preceding_variant)
-            result, view = read_json(cell / 'result.json'), read_json(cell / 'task-view.json')
-            if (result.get('status') != 'executed' or not result.get('root_id')
-                    or view.get('task_id') != result['root_id'] or view.get('status') not in {'completed', 'partial'}):
-                raise PermissionError('first cell of this pair has not ended')
+        _prior_reviews(manifest, position, continuation, clock)
+        _preceding_cell(manifest, position, continuation)
     except (OSError, KeyError, TypeError, ValueError) as exc:
         raise PermissionError('PAIR_PRIOR_REVIEW_REQUIRED') from exc
-    return session
+    return {**session, 'active_grant': grant} if continuation else session
 
 
 def evidence_locators(actions, source_sha256):
