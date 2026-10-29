@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -83,10 +85,11 @@ def make_leaf(directory):
 
 class CompletionChainTests(unittest.TestCase):
     def setUp(self):
+        chain._PARSED_ANCHORS.clear();self.addCleanup(chain._PARSED_ANCHORS.clear)
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.fixture,self.decision=make_leaf(Path(self.temp.name).resolve())
         self.root=self.fixture['new_root'];self.parent=self.fixture['base']
-        self.parent_patch=patch.object(chain,'_parent',return_value=self.parent);self.parent_patch.start();self.addCleanup(self.parent_patch.stop)
+        self.parent_patch=patch.object(chain,'_parent',return_value=self.parent);self.parent_mock=self.parent_patch.start();self.addCleanup(self.parent_patch.stop)
         self.grade_patch=patch.object(completion,'_old_grade',return_value=self.decision);self.grade_patch.start();self.addCleanup(self.grade_patch.stop)
 
     def build(self):
@@ -115,7 +118,99 @@ class CompletionChainTests(unittest.TestCase):
         self.assertEqual(value['retained_rows'][:10],self.parent['retained_rows'][:10])
         self.assertIsNone(self.parent['retained_rows'][10]['quality'])
 
+    def test_hot_cache_skips_SQL_but_rechecks_parent_seal_and_closure(self):
+        with patch.object(completion,'_ledger',wraps=completion._ledger) as ledger, \
+             patch.object(completion,'_sealed',wraps=completion._sealed) as seals, \
+             patch.object(chain,'_closure',wraps=chain._closure) as closure:
+            first=self.build();second=self.build()
+        self.assertEqual(first,second);self.assertEqual(ledger.call_count,1)
+        self.assertEqual(seals.call_count,2);self.assertEqual(closure.call_count,2)
+        self.assertEqual(self.parent_mock.call_count,2)
+
+    def test_cached_context_returns_deepcopies_and_never_accepts_parent_identity_drift(self):
+        value=self.build();expected=deepcopy(value)
+        value['retained_rows'][7]['quality']='full';value['pending_reservations'].clear()
+        self.assertEqual(self.build(),expected)
+        with patch.object(completion,'_ledger',wraps=completion._ledger) as ledger:
+            self.parent['carried_usage']['tokens']+=1
+            with self.assertRaises(PermissionError):self.build()
+        self.assertEqual(ledger.call_count,1)
+        self.assertEqual(len(chain._PARSED_ANCHORS),1)
+
+    def test_warm_cache_still_rejects_seal_leaf_and_parent_proof_changes(self):
+        self.build()
+        path=self.root/'formal-execution-auth.json';before=path.read_bytes()
+        try:
+            path.write_bytes(before+b' ')
+            with self.assertRaises(PermissionError):self.build()
+        finally:path.write_bytes(before)
+        with patch.object(chain,'_parent',side_effect=PermissionError('ancestor seal changed')):
+            with self.assertRaises(PermissionError):self.build()
+        self.assertEqual(len(chain._PARSED_ANCHORS),1)
+
+    def test_external_protection_binding_rechecked_before_warm_cache_return(self):
+        outside=self.root.parent/'external-proof.json';outside.write_text('{}');expected=digest(outside)
+        original=chain._protection
+        def protection(root,load):
+            original(root,load)
+            chain._require(digest(outside)==expected,'EXTERNAL_PROOF_CHANGED')
+        with patch.object(chain,'_protection',side_effect=protection):
+            self.build();outside.write_text('{"changed":true}')
+            with patch.object(completion,'_ledger',side_effect=AssertionError('historical SQL must not be reached')):
+                with self.assertRaises(PermissionError):self.build()
+        self.assertEqual(len(chain._PARSED_ANCHORS),1)
+
+    def test_incomplete_validation_never_writes_cache(self):
+        with patch.object(completion,'_receipts',side_effect=PermissionError('receipt mismatch')):
+            with self.assertRaises(PermissionError):self.build()
+        self.assertEqual(chain._PARSED_ANCHORS,{})
+
+    def test_current_source_auth_and_declared_prompt_checks_remain_live_after_cache_warmup(self):
+        from agent_final_pdf_acquisition import SOURCE_ACQUISITION_CONTRACT
+        from harness_ab_pair_gate import manifest_identity
+        from prompt_bundle_ab import validate_activation
+        contract=self.build();m=deepcopy(self.fixture['manifest']);owned=self.root.parent/'live-candidate'
+        shutil.copytree(self.root/'inputs',owned/'inputs')
+        for v in ('A','B'):shutil.copytree(self.root/'snapshots'/v,owned/'snapshots'/v)
+        def rebind(value,key=''):
+            if isinstance(value,dict):return {k:rebind(v,k) for k,v in value.items()}
+            if isinstance(value,list):return [rebind(v,key) for v in value]
+            if key in {'copy','pdf_path','parsed_path'} and isinstance(value,str) and value.startswith(str(self.root)+'/'):
+                return str(owned/Path(value).relative_to(self.root))
+            return value
+        for path in (owned/'inputs').glob('*.json'):
+            original=json.loads(path.read_text());changed=rebind(original)
+            if changed!=original:write_json(path,changed)
+        m.update(completion_contract=contract,experiment_root=str(owned),runtime_root=str(owned/'runtime'),
+            semantic_gate_root=str(owned/'semantic-gates'),prepared_input_root=str(owned/'inputs'),cases_path=str(owned/'inputs/cases.json'),
+            model_manifest_path=str(owned/'inputs/model-manifest.json'),authorization_path=str(owned/'auth.json'),
+            source_roots={v:str(owned/'snapshots'/v) for v in ('A','B')},real_execution_released=True,
+            live_qualification_released=False,evaluation_policy=deepcopy(completion.EVALUATION_POLICY),
+            source_acquisition_contract=deepcopy(SOURCE_ACQUISITION_CONTRACT),batch_id='synthetic-live-cache-auth')
+        m['ledger_limits']['carried_usage']=deepcopy(contract['carried_usage'])
+        m['carried_budget_source']={'version':chain.VERSION,'anchor_root':str(self.root),
+            'ledger_path':str(self.root/'runtime/budget.sqlite3'),'ledger_sha256':contract['anchors']['runtime/budget.sqlite3'],
+            'seal_sha256':contract['anchor_seals'][str(self.root)]}
+        auth={'approved':True,'human_approved':True,'policy':'financial_only','expires_at':None,
+            'round_started_at':contract['clock']['round_started_at'],'round_absolute_deadline':None,
+            'experiment_kind':m['experiment_kind'],'batch_id':m['batch_id'],'manifest_sha256':manifest_identity(m),
+            'ledger_limits':m['ledger_limits'],'execution_order':m['execution_order'],'allowed_modes':['execute']}
+        path=Path(m['authorization_path']);write_json(path,auth)
+        self.assertEqual(validate_activation(m,'execute')['approved'],True)
+        auth['approved']=False;write_json(path,auth)
+        with self.assertRaises(PermissionError):validate_activation(m,'execute')
+        auth['approved']=True;write_json(path,auth)
+        source=owned/'snapshots/A/backend/research_loop/__init__.py';original=source.read_bytes()
+        try:
+            source.write_bytes(original+b'# changed current source\n')
+            with self.assertRaises(PermissionError):validate_activation(m,'execute')
+        finally:source.write_bytes(original)
+        self.assertTrue(validate_activation(m,'execute')['approved'])
+        m['loaded_prompt_contract']['A']['assembled_prompt_sha256']['supervisor']='changed'
+        with self.assertRaises(PermissionError):completion.validate_completion(m)
+
     def test_unsealed_missing_changed_or_extra_anchor_files_rejected(self):
+        self.build()
         for relative in ('SEAL.json','runtime/budget.sqlite3','runtime/cells/'+self.fixture['order'][11][0]+'-'+self.fixture['order'][11][1]+'/result.json'):
             path=self.root/relative;before=path.read_bytes()
             try:
@@ -131,6 +226,7 @@ class CompletionChainTests(unittest.TestCase):
         finally:seal.write_bytes(before)
 
     def test_stage_halt_root_grade_receipts_order_and_carry_not_rewritten(self):
+        self.build()
         for change in ('halt','old-grade','native-id','order','carry','controller','auth','denial'):
             if change=='old-grade':
                 previous=self.parent['retained_rows'][10]['quality'];self.parent['retained_rows'][10]['quality']='full'
@@ -205,6 +301,56 @@ class CompletionRealChainReadonlyTests(unittest.TestCase):
         self.assertNotEqual(x['retained_rows'][10]['source_manifest_path'],x['retained_rows'][10]['score_manifest_path'])
         self.assertEqual(len(x['pending_reservations']),2)
         self.assertEqual(before,{n:digest(root/n) for n in before})
+
+    @unittest.skipUnless(os.environ.get('AGENT_FINAL_COMPLETION_GUARD_MANIFEST'),'explicit frozen live-shape manifest not supplied')
+    def test_real_prewarmed_V3_has_zero_old_SQL_inside_CellBoundary_and_miss_stays_closed(self):
+        code=r'''
+from pathlib import Path
+import hashlib,json,sys,tempfile
+sys.dont_write_bytecode=True
+sys.path.insert(0,sys.argv[1])
+from agent_final_continuation import validate_continuation
+from agent_final_runtime import CellBoundary
+import agent_final_completion_chain as chain
+m=json.loads(Path(sys.argv[2]).read_text())
+ledger=Path(m['completion_contract']['anchor_root'])/'runtime/budget.sqlite3'
+digest=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+before=digest(ledger);state={'phase':'warmup'};sql=[];network=[]
+def observer(event,args):
+    if event=='sqlite3.connect':sql.append({'phase':state['phase'],'path':str(args[0])})
+    elif event in {'socket.connect','socket.getaddrinfo','socket.bind'}:
+        network.append(event);raise AssertionError('network forbidden')
+sys.addaudithook(observer)
+value=validate_continuation(m)
+assert chain._PARSED_ANCHORS
+with tempfile.TemporaryDirectory() as temp:
+    runtime=Path(temp).resolve();cell=runtime/'current-cell';cell.mkdir()
+    guard=CellBoundary(cell,runtime);guard.enabled=False;sys.addaudithook(guard.audit)
+    guard.phase='live_guard_replay';state['phase']='live_guard_replay';guard.enabled=True
+    try:
+        assert validate_continuation(m)==value
+    finally:guard.enabled=False
+    hot=[x for x in sql if x['phase']=='live_guard_replay']
+    assert hot==[] and guard.denials==[]
+    chain._PARSED_ANCHORS.clear();state['phase']='unprimed_guard_replay';guard.enabled=True
+    rejected=None
+    try:validate_continuation(m)
+    except RuntimeError as exc:rejected=type(exc).__name__
+    finally:guard.enabled=False
+    assert rejected=='IsolationError' and not chain._PARSED_ANCHORS
+    assert guard.denials[-1]['operation']=='sqlite_not_current_cell_or_shared_ledger'
+assert not network and digest(ledger)==before
+print(json.dumps({'status':'passed','warmup_sqlite_attempts':sum(x['phase']=='warmup' for x in sql),
+    'hot_guard_sqlite_attempts':len(hot),'hot_guard_denials':0,'unprimed_denied':True,
+    'network_calls':0,'model_calls':0,'Ledger_instantiations':0,'anchor_ledger_unchanged':True}))
+'''
+        scripts=Path(__file__).resolve().parents[2]/'scripts'
+        result=subprocess.run([sys.executable,'-I','-B','-c',code,str(scripts),
+            os.environ['AGENT_FINAL_COMPLETION_GUARD_MANIFEST']],capture_output=True,text=True,timeout=300)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        value=json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(value['hot_guard_sqlite_attempts'],0);self.assertTrue(value['unprimed_denied'])
+        self.assertEqual(value['network_calls'],0)
 
 
 if __name__=='__main__':unittest.main()

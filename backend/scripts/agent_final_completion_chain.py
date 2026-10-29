@@ -8,6 +8,7 @@ import re
 import sqlite3
 
 VERSION = 'agent_final_completion_v3'
+_PARSED_ANCHORS = {}
 
 
 def _c():
@@ -180,7 +181,12 @@ def _anchor(anchor_root, seen):
     _require(Path(manifest['experiment_root']) == root and Path(manifest['runtime_root']) == root/'runtime', 'LEAF_GEOMETRY')
     parent = _parent(manifest, seen)
     _require(str(root) not in parent['closed_ledger_roots'], 'DUPLICATE_LEAF_ROOT')
-    _closure(root,manifest,load);ledger = c._ledger(root,load);_ledger_limits(manifest,ledger,parent)
+    # 热身份门仍重验整棵seal、父合同与闭合证明，仅复用已验不可变SQL解析。
+    _closure(root,manifest,load)
+    cache_key = (str(root),seal_sha,c._digest(parent))
+    if cache_key in _PARSED_ANCHORS:
+        return deepcopy(_PARSED_ANCHORS[cache_key])
+    ledger = c._ledger(root,load);_ledger_limits(manifest,ledger,parent)
     batch = load('runtime/batch-results.json');order = parent['full_execution_order'];first = parent['retained_count']
     old_rows,rows = batch['rows'][:first],batch['rows'][first:]
     _require(c._equal(old_rows,parent['retained_rows']) and rows and len(rows) == len(ledger['roots'])
@@ -232,7 +238,7 @@ def _anchor(anchor_root, seen):
     _require(len({x['reservation_id'] for x in all_pending}) == len(all_pending), 'PENDING_IDENTITY_REUSED')
     carry = {k:parent['carried_usage'][k]+charge[k] for k in charge};carry['seconds'] = parent['carried_usage']['seconds']
     original = parent['anchor_manifest']
-    return {**deepcopy(parent),'anchor_root':str(root),'anchors':anchors,
+    result = {**deepcopy(parent),'anchor_root':str(root),'anchors':anchors,
         'anchor_seals':{**parent['anchor_seals'],str(root):seal_sha},'retained_rows':retained,
         'retained_count':len(retained),'technical_attempts':technical,'new_execution_order':deepcopy(order[len(retained):]),
         'carried_usage':carry,'closed_ledger_roots':parent['closed_ledger_roots']+[str(root)],
@@ -241,6 +247,8 @@ def _anchor(anchor_root, seen):
         'leaf_charged_or_reserved':charge,'minimum_complete_attempts':len(order)+len(technical),
         'old_cases':c._helpers()._read(original['cases_path']),
         'old_materials':c._helpers()._read(Path(original['prepared_input_root'])/'material-snapshot.json')}
+    _PARSED_ANCHORS[cache_key] = deepcopy(result)
+    return result
 
 
 def build_completion_chain_contract(anchor_root, timing_authorization, *, _seen=frozenset()):
