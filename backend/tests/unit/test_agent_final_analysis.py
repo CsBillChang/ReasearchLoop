@@ -3,6 +3,7 @@ from copy import deepcopy
 from pathlib import Path
 import json
 import socket
+import subprocess
 import sys
 import tempfile
 import types
@@ -276,6 +277,48 @@ class AnalysisTests(unittest.TestCase):
             self.assertTrue((output/'SEAL.json').exists())
             with self.assertRaises(FileExistsError):analysis.main(['--manifest',str(path),'--output-dir',str(output)])
             with self.assertRaises(PermissionError):analysis.main(['--manifest',str(path),'--output-dir',str(self.root/'outside')])
+
+    def test_isolated_python_script_entry_loads_real_sibling_helper_and_keeps_gates(self):
+        scripts=self.root/'isolated-scripts';scripts.mkdir()
+        source=Path(analysis.__file__).resolve()
+        target=scripts/source.name;target.write_bytes(source.read_bytes())
+        helper=scripts/'agent_final_continuation.py'
+        helper.write_bytes((source.parent/helper.name).read_bytes())
+        manifest={'experiment_root':str(self.root),'runtime_root':str(self.root/'runtime'),
+            'semantic_gate_root':str(self.root/'semantic-gates'),
+            'authorization_path':str(self.root/'not-created-authorization.json'),
+            'live_qualification_released':False,'real_execution_released':False,
+            'execution_order':self.order(),'ledger_limits':{'batch_tokens':1000,
+                'batch_requests':200,'batch_yuan':'1','batch_seconds':1000}}
+        candidate=self.write('candidate.json',manifest);original=candidate.read_bytes()
+        def run(path,output,progress=True):
+            command=[sys.executable,'-I','-B',str(target),'--manifest',str(path),
+                     '--output-dir',str(output)]
+            if progress:command.append('--progress')
+            return subprocess.run(command,cwd=self.root,capture_output=True,text=True,timeout=20)
+        output=self.root/'formal-analysis'/'isolated-progress'
+        result=run(candidate,output)
+        self.assertEqual(result.returncode,0,result.stderr)
+        metrics=json.loads((output/'metrics.json').read_text())
+        self.assertEqual(metrics['input_sha256'][str(candidate)],analysis.sha(original))
+        self.assertEqual(metrics['created_roots'],0)
+        self.assertFalse(metrics['efficiency_conclusion']['authorized_by_complete_evidence'])
+        self.assertEqual(candidate.read_bytes(),original)
+        self.assertFalse(Path(manifest['authorization_path']).exists())
+        self.assertFalse((self.root/'runtime/budget.sqlite3').exists())
+        final_output=self.root/'formal-analysis'/'not-released-final'
+        closed=run(candidate,final_output,progress=False)
+        self.assertNotEqual(closed.returncode,0)
+        self.assertIn('formal batch not independently closed',closed.stderr)
+        self.assertFalse(final_output.exists())
+        invalid=self.write('invalid-candidate.json',{**manifest,'continuation_contract':{}})
+        invalid_output=self.root/'formal-analysis'/'invalid-contract'
+        rejected=run(invalid,invalid_output)
+        self.assertNotEqual(rejected.returncode,0)
+        self.assertIn('FINAL_CONTINUATION_',rejected.stderr)
+        self.assertNotIn('ModuleNotFoundError',rejected.stderr)
+        self.assertFalse(invalid_output.exists())
+        self.assertFalse((scripts/'__pycache__').exists())
 
     def test_closed_snapshot_sqlite_and_output_are_read_only(self):
         db_path=self.root/'synthetic.sqlite3'

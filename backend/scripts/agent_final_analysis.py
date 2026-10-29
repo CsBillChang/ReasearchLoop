@@ -15,6 +15,7 @@ import sys
 import time
 
 sys.dont_write_bytecode = True
+sys.path.insert(0,str(Path(__file__).resolve().parent))
 
 CATEGORIES = {'QA':'单篇问答','NUM':'表格与实验分析','CROSS':'跨论文比较','REC':'论文筛选推荐',
               'REV':'定向核验修订','MEM':'Memory接续','DEEP':'完整精读保存'}
