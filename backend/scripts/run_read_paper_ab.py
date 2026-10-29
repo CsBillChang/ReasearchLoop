@@ -164,6 +164,8 @@ def qualification_configuration(manifest):
         result['evaluation_policy'] = manifest.get('evaluation_policy')
     if 'source_acquisition_contract' in manifest:
         result['source_acquisition_contract'] = manifest['source_acquisition_contract']
+    if 'observation_policy' in manifest:
+        result['observation_policy'] = manifest['observation_policy']
     return result
 
 def select_variant_source(manifest, variant):
@@ -693,7 +695,8 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                         from agent_final_pdf_acquisition import qualify_catalog
                         discovery = DiscoveryProvider.from_settings(settings)
                         stack.callback(discovery.close)
-                        catalog_rows, catalog_summary = qualify_catalog(db, root_id, pdf, discovery, case)
+                        catalog_rows, catalog_summary = qualify_catalog(db, root_id, pdf, discovery, case,
+                            registered_search='observation_policy' in manifest)
                         report.update(qualification_input_mode='catalog_native_search_read',
                                       qualification_catalog=catalog_summary)
                         acquired = [(materials[row['entry']['material_index']],

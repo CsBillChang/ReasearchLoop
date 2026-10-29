@@ -27,7 +27,7 @@ def validate_source_acquisition_contract(manifest):
     value = manifest.get('source_acquisition_contract')
     version = (manifest.get('completion_contract') or {}).get('version')
     if value is None:
-        if version == 'agent_final_completion_v3':
+        if version in {'agent_final_completion_v3', 'agent_final_completion_v4'}:
             raise PermissionError('FINAL_SOURCE_ACQUISITION_CONTRACT_REQUIRED')
         return False
     try:
@@ -276,7 +276,89 @@ def install_runtime_catalog_sources(stack, discovery_type, resolver):
     stack.enter_context(patch.object(discovery_type, 'search', new=search))
 
 
-def qualify_catalog(db, root_id, pdf, discovery, case):
+def qualify_registered_catalog_search(papers, root_id, case, entries, require):
+    """经实际ToolSpec校验合法检索参数，证明冻结目录可达而不替模型选论文。"""
+    from collections import Counter
+    from prompt_bundle_cases import validate_preconditions
+    from research_loop.domain.tasks import SavePolicy
+    from research_loop.tools.base import ToolContext, execute_spec
+    from research_loop.tools.papers import specs
+
+    spec = next(item for item in specs() if item.name == 'search_papers')
+    require('supervisor' in spec.roles and spec.schema()['function']['parameters']['properties']['limit']['maximum'] == 20,
+            'registered_search_schema_changed')
+    ctx = ToolContext(task_id=root_id, root_task_id=root_id, save_policy=SavePolicy.deny,
+                      services={'papers': papers, 'scope': {}})
+    catalog = {row['material_index']: row for row in validate_preconditions(case)['catalog']}
+    mapping = {entry['paper_id']: entry for entry in entries}
+    require(len(entries) == len(mapping) == 54, 'registered_search_population_changed')
+
+    def search(arguments):
+        observed = execute_spec(spec, arguments, ctx)
+        require(observed.kind in {'success', 'empty'} and isinstance(observed.data, dict),
+                'registered_search_tool_execution_failed')
+        data = observed.data
+        rows = data.get('candidates', [])
+        require(len(rows) <= arguments['limit'] <= 20
+                and data.get('query_scope') == 'frozen_local_candidate_pool_lexical_bm25_not_web_search',
+                'registered_search_scope_changed')
+        for row in rows:
+            entry = mapping.get(row.get('paper_id'))
+            require(entry is not None and row.get('metadata', {}).get('source_pdf_sha256') == entry['pdf_sha256'],
+                    'registered_search_source_identity_changed')
+        return data, rows
+
+    neutral_args = {'query': 'research method', 'limit': 20, 'sources': None}
+    neutral, neutral_rows = search(neutral_args)
+    require(len(neutral_rows) == 20 and neutral.get('truncated') is True, 'registered_search_neutral_limit_changed')
+    exact = []
+    for entry in entries:
+        arguments = {'query': catalog[entry['material_index']]['title'], 'limit': 20, 'sources': None}
+        _, rows = search(arguments)
+        selected = [row for row in rows if row['paper_id'] == entry['paper_id']]
+        require(len(selected) == 1, 'registered_exact_title_not_reachable')
+        match = selected[0]
+        exact.append({'paper_id': entry['paper_id'], 'pdf_sha256': entry['pdf_sha256'],
+                      'material_index': entry['material_index'], 'source': match['source'],
+                      'arguments': arguments, 'returned_ids': [row['paper_id'] for row in rows]})
+    source_counts = Counter(row['source'].lower() for row in exact)
+    filters, filtered_exact = [], []
+    for source, count in sorted(source_counts.items()):
+        arguments = {'query': 'research method', 'limit': 20, 'sources': [source]}
+        data, rows = search(arguments)
+        expected = {row['paper_id'] for row in exact if row['source'].lower() == source}
+        ids = {row['paper_id'] for row in rows}
+        require(ids <= expected and len(ids) == min(count, 20)
+                and data.get('truncated') is (count > 20)
+                and all(row['source'].lower() == source for row in rows), 'registered_source_filter_changed')
+        filters.append({'source': source, 'population_count': count, 'arguments': arguments,
+                        'returned_ids': [row['paper_id'] for row in rows], 'truncated': data['truncated']})
+    for row in exact:
+        arguments = {'query': row['arguments']['query'], 'limit': 20, 'sources': [row['source']]}
+        _, rows = search(arguments)
+        require(row['paper_id'] in {item['paper_id'] for item in rows}
+                and all(item['source'].lower() == row['source'].lower() for item in rows),
+                'registered_filtered_exact_title_not_reachable')
+        filtered_exact.append({'paper_id': row['paper_id'], 'arguments': arguments,
+                               'returned_ids': [item['paper_id'] for item in rows]})
+    invalid = execute_spec(spec, {'query': 'research method', 'limit': 54}, ctx)
+    require(invalid.kind == 'validation_error' and invalid.ok is False,
+            'registered_limit54_must_not_execute')
+    return {'version': 'registered_catalog_search_v1', 'status': 'passed_registered_tool_contract',
+            'tool_name': spec.name, 'tool_schema_sha256': hashlib.sha256(_canonical(spec.schema()).encode()).hexdigest(),
+            'candidate_population': len(entries), 'legal_limit_max': 20,
+            'neutral_unfiltered': {'arguments': neutral_args, 'returned_ids': [row['paper_id'] for row in neutral_rows],
+                                   'truncated': neutral['truncated']},
+            'exact_title_queries': exact, 'source_filter_queries': filters,
+            'source_filtered_exact_title_queries': filtered_exact, 'source_counts': dict(sorted(source_counts.items())),
+            'illegal_limit54_probe': {'kind': invalid.kind, 'ok': invalid.ok,
+                                     'meaning': 'actual execute_spec parameter validation rejected limit54'},
+            'source_semantics': 'frozen_metadata_origin_filter_not_live_provider_dispatch',
+            'local_is_not_all54_alias': True, 'model_calls': 0,
+            'native_service_bulk_coverage_is_separate': True}
+
+
+def qualify_catalog(db, root_id, pdf, discovery, case, *, registered_search=False):
     """用原生search授权及分页/全文read验证真实题录入口，不植入伪造grant。"""
     from research_loop.services.papers import PaperService
     from research_loop.providers.paper_acquisition import resolve_pdf_url
@@ -288,6 +370,8 @@ def qualify_catalog(db, root_id, pdf, discovery, case):
                       and not db.fetchall('SELECT input_ref FROM task_inputs WHERE task_id=?', (root_id,)),
                       'qualification_must_start_without_upload_or_pregrants')
     papers = PaperService(db, discovery, pdf)
+    registered = (qualify_registered_catalog_search(papers, root_id, case, entries, resolver._require)
+                  if registered_search else None)
     search = papers.search('research method', limit=len(entries), task_id=root_id)
     returned = {p.paper_id: p for p in search.candidates}
     resolver._require(len(search.candidates) == len(returned) == len(entries)
@@ -318,4 +402,6 @@ def qualify_catalog(db, root_id, pdf, discovery, case):
                               for kind in sorted({e['source_kind'] for e in entries})},
         'version_status_counts': {kind: sum(e['version_status'] == kind for e in entries)
                                  for kind in sorted({e['version_status'] for e in entries})}}
+    if registered is not None:
+        summary['registered_search'] = registered
     return rows, summary

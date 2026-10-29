@@ -83,6 +83,40 @@ class AnalysisTests(unittest.TestCase):
         child={'task_id':'child','status':'running','updated_at':111}
         family=analysis.latency(task,events,[task,child],{},{});self.assertFalse(family['delivery_ready_observed'])
         self.assertEqual(family['seconds'],10)
+        paused={'task_id':'child','status':'needs_input','updated_at':109}
+        family=analysis.latency(task,events,[task,paused],{}, {})
+        self.assertFalse(family['delivery_ready_observed'])
+        self.assertIsNone(family['successful_delivery_seconds'])
+        self.assertEqual(family['active_descendant_ids'],['child'])
+
+    def test_needs_input_measures_observed_stop_not_backend_terminal_delivery(self):
+        task={'task_id':'root','status':'needs_input','created_at':100,'updated_at':999,
+              'result_json':json.dumps({'answer_markdown':'Task not completed: clarification requested.'})}
+        events=[{'task_id':'root','event_type':'task_created','created_at':100},
+                {'task_id':'root','event_type':'task_finished','created_at':110}]
+        row=analysis.latency(task,events,[task],{}, {})
+        self.assertEqual(row['seconds'],10)
+        self.assertEqual(row['measurement_kind'],'observed_stop_duration_not_delivery')
+        self.assertFalse(row['backend_terminal_observed'])
+        self.assertFalse(row['delivery_ready_observed'])
+        self.assertIsNone(row['successful_delivery_seconds'])
+
+    def test_multiple_technical_attempts_do_not_replace_the_true_first_attempt(self):
+        def row(root,status,created,quality=None):
+            return {'expanded_case_id':'SYNTH-QA-01-R1','variant':'A','root_id':root,'status':status,
+                    'end_to_end':{'task_created_at':created,'delivery_ready_observed':status=='completed'},
+                    'score':{'whole_answer_quality':quality}}
+        primary=row('primary','completed',30,'full')
+        first=row('first','failed',10);later=row('later','cancelled',20)
+        for technical in ([first,later],[later,first]):
+            result=analysis.attempt_reliability([primary],technical)
+            self.assertEqual(result['all_attempts_planned'],3)
+            self.assertEqual(result['technical_attempts'],2)
+            self.assertEqual(result['multiple_technical_attempt_cells'],1)
+            self.assertEqual(result['first_attempts']['status_counts'],{'failed':1})
+        earliest=row('original','completed',1,'full')
+        result=analysis.attempt_reliability([earliest],[first,later])
+        self.assertEqual(result['first_attempts']['status_counts'],{'completed':1})
 
     def test_missing_ledger_is_null_and_unknown_reservations_are_held(self):
         self.assertIsNone(analysis.ledger_totals(None)['known']['tokens'])

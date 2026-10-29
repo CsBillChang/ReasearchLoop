@@ -109,6 +109,17 @@ class FrozenAcquisitionTests(unittest.TestCase):
         self.assertFalse(self.db.fetchall('SELECT * FROM task_inputs'))
         self.assertEqual(self.pdf.controlled_resolver.contract['catalog_bindings'], 54)
 
+    def test_registered_tool_qualification_also_preserves_full973_read_contract(self):
+        rows, summary = qualify_catalog(self.db, 'root', self.pdf, self.discovery, self.case, registered_search=True)
+        proof = summary['registered_search']
+        self.assertEqual(proof['status'], 'passed_registered_tool_contract')
+        self.assertEqual(len(proof['exact_title_queries']), 54)
+        self.assertEqual(len(proof['source_filtered_exact_title_queries']), 54)
+        self.assertEqual(proof['illegal_limit54_probe']['kind'], 'validation_error')
+        self.assertEqual(summary['observed_physical_pages'], 973)
+        self.assertEqual(len(rows), 54)
+        self.assertTrue(all(row['arguments']['limit'] <= 20 for row in proof['exact_title_queries']))
+
     def test_versioned_sources_keep_ID_versions_and_native_page_hashes(self):
         papers = self.papers()
         entries = [e for e in self.pdf.controlled_resolver.catalog_entries if e['source_kind'] == 'versioned_arxiv'][:3]

@@ -19,7 +19,8 @@ sys.path.insert(0,str(Path(__file__).resolve().parent))
 
 CATEGORIES = {'QA':'单篇问答','NUM':'表格与实验分析','CROSS':'跨论文比较','REC':'论文筛选推荐',
               'REV':'定向核验修订','MEM':'Memory接续','DEEP':'完整精读保存'}
-TERMINAL = {'completed','partial','failed','cancelled','needs_input'}
+OBSERVED_STOPS = {'completed','partial','failed','cancelled','needs_input'}
+BACKEND_TERMINAL = OBSERVED_STOPS - {'needs_input'}
 FINAL_CONTROLLER = {'exited','model_hard_deadline','cancelled','controller_error','refused_model_deadline_already_passed'}
 COMPLETION_EVALUATION_POLICY = {'version':'agent_completion_descriptive_v1',
     'minimum_B_full':None,'retain_quality_comparison':True}
@@ -180,7 +181,7 @@ def latency(root,events,all_tasks,export,controller):
     if a is not None and own_created is not None and abs(own_created-a)>.01:issue.append('root_creation_event_timestamp_mismatch')
     if a is None:issue.append('unique_creation_event_missing')
     if b is not None and (a is None or b<a):issue.append('invalid_terminal_timestamp');b=None
-    active=[x['task_id'] for x in all_tasks if x.get('status') not in TERMINAL]
+    active=[x['task_id'] for x in all_tasks if x.get('status') not in BACKEND_TERMINAL]
     later=[x['task_id'] for x in all_tasks if b is not None and stamp(x.get('updated_at')) is not None
            and stamp(x['updated_at'])>b+.01 and x['task_id']!=identity]
     answer=decoded(root.get('result_json'),{}) or {}
@@ -190,7 +191,10 @@ def latency(root,events,all_tasks,export,controller):
     stop=min((v for v in observed_stops if v is not None),default=None)
     duration=b-a if a is not None and b is not None and not issue else None
     return {'seconds':duration,'source':'unique_root_task_created_to_task_finished_events',
-            'measurement_kind':'delivery_terminal_duration' if ready else 'terminal_or_failure_duration_not_quality_success',
+            'measurement_kind':'delivery_terminal_duration' if ready else 'observed_stop_duration_not_delivery',
+            'backend_terminal_observed':root.get('status') in BACKEND_TERMINAL,
+            'needs_input_is_not_backend_terminal':True,
+            'successful_delivery_seconds':duration if ready else None,
             'delivery_ready_observed':ready,'task_created_event_count':len(starts),'task_finished_event_count':len(ends),
             'task_created_at':starts[0].get('created_at') if len(starts)==1 else None,
             'task_finished_at':ends[0].get('created_at') if len(ends)==1 else None,
@@ -212,7 +216,15 @@ def semantic_score(reader,root,manifest,case_id,variant,root_id,answer,*,artifac
     issues=[]
     manifest_id=sha(canonical({k:v for k,v in manifest.items() if k!='cell_absolute_deadline'}))
     identity=(challenge.get('identity') or {}).get('answers',{}).get(variant,{})
-    expected=sha(answer) if isinstance(answer,str) else None
+    observation_policy = False
+    if ('observation_policy' in manifest
+            or (manifest.get('completion_contract') or {}).get('version') == 'agent_final_completion_v4'
+            or 'observation_recovery_lineage' in (manifest.get('completion_contract') or {})):
+        from agent_final_observation_recovery import validate_observation_policy
+        observation_policy = validate_observation_policy(manifest)
+    absent = bool(observation_policy and identity.get('answer_absent') is True
+        and identity.get('observed_status') in manifest['observation_policy']['non_delivery_statuses'])
+    expected=sha(answer) if isinstance(answer,str) else sha('') if absent and answer is None else None
     if challenge.get('manifest_sha256')!=manifest_id:issues.append('review_manifest_mismatch')
     if review.get('challenge_nonce')!=challenge.get('nonce') or review.get('challenge_sha256')!=sha(canonical(challenge)):
         issues.append('review_challenge_mismatch')
@@ -228,7 +240,8 @@ def semantic_score(reader,root,manifest,case_id,variant,root_id,answer,*,artifac
                  if k!='cell_absolute_deadline'})),
                 'source_contract_sha256':sha(canonical(paired_source_contract(owner))),
                 'loaded_prompt_contract_sha256':sha(canonical(owner['loaded_prompt_contract'][variant])),
-                'retained':artifact_cell is not None}
+                # 保留于本次分析不等于在原审阅时已经是旧格。
+                'retained':sha(canonical({k:v for k,v in owner.items() if k!='cell_absolute_deadline'})) != manifest_id}
         if identity.get('source_provenance')!=origin:issues.append('review_artifact_source_provenance_mismatch')
     for name,expected_file in identity.get('files',{}).items():
         path=cell/name
@@ -240,6 +253,13 @@ def semantic_score(reader,root,manifest,case_id,variant,root_id,answer,*,artifac
     if grade.get('answer_sha256')!=expected or grade.get('source_sha256s')!=sources:issues.append('grade_answer_or_material_mismatch')
     if decision.get('quality',{}).get(variant)!=grade.get('whole_answer_quality'):issues.append('decision_grade_label_mismatch')
     quality=grade.get('whole_answer_quality')
+    if observation_policy:
+        view=reader.json(cell/'task-view.json',{})
+        if identity.get('observed_status')!=view.get('status') or identity.get('backend_status')!=view.get('status'):
+            issues.append('review_observed_stop_status_mismatch')
+        if view.get('status') in manifest['observation_policy']['non_delivery_statuses'] and (
+                quality=='full' or grade.get('execution_complete') is not False):
+            issues.append('non_delivery_grade_contradiction')
     if quality=='full' and (grade.get('core_complete') is not True or grade.get('requested_scope_complete') is not True
          or grade.get('critical_core_error') is not False or grade.get('execution_complete') is not True
          or grade.get('unauthorized_delivery_write') is not False or grade.get('forged_success') is not False):issues.append('full_grade_contradiction')
@@ -275,7 +295,7 @@ def analyze_cell(reader,root,manifest,case_id,variant,ledger,controller,*,artifa
     row['backend_task_status']=task.get('status')
     row['execution_attempt_status']=result.get('status')
     row['exception_type']=result.get('exception_type')
-    row['status']=('technical_failed_before_terminal' if result.get('status')=='failed' and task.get('status') not in TERMINAL
+    row['status']=('technical_failed_before_terminal' if result.get('status')=='failed' and task.get('status') not in OBSERVED_STOPS
                    else task.get('status',result.get('task_status','unknown')))
     if len(candidates)!=1:row['issues'].append('root_sqlite_record_missing_or_ambiguous')
     family=[x for x in tasks or [] if x.get('root_task_id')==root_id or x.get('task_id')==root_id]
@@ -404,7 +424,7 @@ def aggregate(rows,*,require_delivery_ready=False):
     local=[{'case_id':x['case_id'],'category':x['category'],'latency_change':x['latency_change'],'token_change':x['token_change']} for x in means
            if any(x[k] and x[k]['B_minus_A']>0 for k in ['latency_change','token_change'])]
     return {'overall':overall,'categories':categories,'case_means':means,'matched_full_sensitivity':sensitivity,
-            'latency_population':'observed_complete_delivery_only' if require_delivery_ready else 'observed_terminal_duration',
+            'latency_population':'observed_complete_delivery_only' if require_delivery_ready else 'observed_stop_duration_including_non_delivery',
             'comparable_case_count':sum(x['latency_change'] is not None and x['token_change'] is not None for x in means),
             'local_regressions':local}
 
@@ -566,8 +586,17 @@ def validate_matrix(order):
 
 def attempt_reliability(primary,technical):
     """重试保留为额外attempt，不覆盖原第一次失败或改变主96格。"""
-    replacements={(r['expanded_case_id'],r['variant']):r for r in technical}
-    first=[replacements.get((r['expanded_case_id'],r['variant']),r) for r in primary]
+    replacements=defaultdict(list)
+    for row in technical:
+        replacements[(row['expanded_case_id'],row['variant'])].append(row)
+    first=[]
+    for row in primary:
+        prior=replacements.get((row['expanded_case_id'],row['variant']),[])
+        choices=[*prior,row]
+        starts=[stamp(item.get('end_to_end',{}).get('task_created_at')) for item in choices]
+        # 缺时间时保留合同中原技术尝试的顺序，不能让后一次覆盖第一次。
+        chosen=min(range(len(choices)),key=lambda i:(starts[i],i)) if all(v is not None for v in starts) else 0
+        first.append(choices[chosen])
     def counts(rows):
         return {'planned':len(rows),'created':sum(r.get('root_id') is not None for r in rows),
                 'delivery_ready_observed':sum(r.get('end_to_end',{}).get('delivery_ready_observed') is True for r in rows),
@@ -577,6 +606,8 @@ def attempt_reliability(primary,technical):
             'all_attempts_created':sum(r.get('root_id') is not None for r in primary+technical),
             'first_attempts':counts(first),'first_attempts_by_variant':{v:counts([r for r in first if r['variant']==v]) for v in ('A','B')},
             'technical_attempts':len(technical),'retry_does_not_erase_first_attempt':True,
+            'first_attempt_selection':'earliest_task_created_when_all_known_else_preserved_technical_order',
+            'multiple_technical_attempt_cells':sum(len(items)>1 for items in replacements.values()),
             'technical_attempt_outcomes':dict(Counter(r.get('observed_attempt_outcome') or r['status'] for r in technical)),
             'delivery_ready_is_not_quality_full':True}
 
@@ -691,7 +722,7 @@ def summarize(reader,root,manifest,progress=False):
               'quality':dict(Counter(r['score'].get('whole_answer_quality') or ('not_created' if not r['root_id'] else 'not_scored') for r in rows if r['variant']==v))} for v in ('A','B')}
     stats=aggregate(rows,require_delivery_ready=completion)
     terminal_stats=aggregate(rows) if completion else None
-    complete=all(r['root_id'] is not None and r['status'] in TERMINAL for r in rows)
+    complete=all(r['root_id'] is not None and r['status'] in OBSERVED_STOPS for r in rows)
     full={v:counts[v]['quality'].get('full',0) for v in ('A','B')}
     scores_complete=all(r['score'].get('whole_answer_quality') in {'full','partial_usable','unusable','failed'} for r in rows)
     severe=[r['expanded_case_id']+'-'+r['variant'] for r in rows if any(r['score'].get(k) is True for k in ('unauthorized_delivery_write','forged_success'))]
@@ -761,7 +792,7 @@ def summarize(reader,root,manifest,progress=False):
                        'relative_quality_non_regression':relative_quality,
                        'scores_complete':scores_complete,'quality_gate_passed':quality_ok,'severe_violation_cells':severe,
                        'completed_status_does_not_imply_full':True},
-            'statistics':stats,'terminal_outcome_statistics':terminal_stats,
+            'statistics':stats,'terminal_outcome_statistics':terminal_stats,'observed_stop_statistics':terminal_stats,
             'efficiency_conclusion':{'authorized_by_complete_evidence':success,
                 'primary_comparison_supported':primary_supported,
                 'primary_comparison_scope':'fixed96_primary_observations_excluding_extra_technical_attempt_costs',
@@ -810,7 +841,7 @@ def report_text(summary):
     if summary.get('terminal_outcome_statistics') is not None:
         terminal=summary['terminal_outcome_statistics']['overall']['latency_seconds']
         means=terminal['equal_case_weight_mean'];d=terminal['change']
-        lines+=['','主96格任务创建→终态耗时（包含partial/failed，非成功交付时延）：A '+show(means['A'])+
+        lines+=['','主96格任务创建→本次停止观测耗时（包含partial/failed，非成功交付时延；needs_input为暂停停点）：A '+show(means['A'])+
                 ' 秒；B '+show(means['B'])+' 秒；变化 '+('N/A' if d is None else f"{d['B_minus_A_percent']:+.2f}%")+'。',
                 '主96格测量完整 '+str(summary['primary_measurement_complete'])+'；全部attempt实际成本完整 '+
                 str(a['all_attempt_actual_cost_complete'])+'。旧技术attempt未决不改变主96格分母。',

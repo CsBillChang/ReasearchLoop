@@ -24,6 +24,9 @@ def _require(value, reason):
 def _parent(manifest, seen):
     value = manifest.get('completion_contract')
     _require(isinstance(value, dict), 'EXPLICIT_PARENT_REQUIRED')
+    if value.get('version') == 'agent_final_completion_v4':
+        from agent_final_observation_recovery import validate_observation_recovery
+        return validate_observation_recovery(manifest, _seen=seen)
     if value.get('version') == VERSION:
         return validate_completion_chain(manifest, _seen=seen)
     _require(value.get('version') == _c().VERSION, 'PARENT_VERSION_UNSUPPORTED')
@@ -171,6 +174,23 @@ def _technical(root, manifest, row, ledger, load):
             'files':{name:c._helpers()._hash(cell/name) for name in (*c._helpers()._CELL_FILES,'task.sqlite3')}}}
 
 
+def _bind_deferred_reviews(root, manifest, parent, retained, load):
+    """新评分归新叶，原停点正文与原十二份评分仍归各自源锚。"""
+    c = _c()
+    for case in parent.get('deferred_review_cases', []):
+        pair = [row for row in retained if row['case_id'] == case]
+        _require(len(pair) == 2 and {r['variant'] for r in pair} == {'A', 'B'}
+                 and all(r.get('quality') is None and r.get('score_owner') == 'current_manifest' for r in pair),
+                 'EXACT_DEFERRED_PAIR_REQUIRED')
+        decision = c._old_grade(root, manifest, case, load)
+        for row in pair:
+            path = root / 'semantic-gates' / case / 'decision.json'
+            row.update(quality=decision['quality'][row['variant']], score_owner='sealed_score_manifest',
+                       deferred_review=False, score_manifest_path=str(root / 'manifest.formal.json'),
+                       score_manifest_sha256=c._helpers()._hash(root / 'manifest.formal.json'))
+            row['provenance'].update(grade_decision_path=str(path), grade_decision_sha256=c._helpers()._hash(path))
+
+
 def _anchor(anchor_root, seen):
     c = _c(); root = Path(anchor_root)
     _require((root/'SEAL.json').is_file(), 'ANCHOR_PENDING_SEAL')
@@ -180,6 +200,11 @@ def _anchor(anchor_root, seen):
     manifest = load('manifest.formal.json')
     _require(Path(manifest['experiment_root']) == root and Path(manifest['runtime_root']) == root/'runtime', 'LEAF_GEOMETRY')
     parent = _parent(manifest, seen)
+    observation_policy = False
+    if manifest['completion_contract'].get('version') == 'agent_final_completion_v4' or (
+            'observation_recovery_lineage' in manifest['completion_contract'] or 'observation_policy' in manifest):
+        from agent_final_observation_recovery import validate_observation_policy
+        observation_policy = validate_observation_policy(manifest)
     _require(str(root) not in parent['closed_ledger_roots'], 'DUPLICATE_LEAF_ROOT')
     # 热身份门仍重验整棵seal、父合同与闭合证明，仅复用已验不可变SQL解析。
     _closure(root,manifest,load)
@@ -207,14 +232,17 @@ def _anchor(anchor_root, seen):
                  and grant['continuation_sha256'] == c._digest(manifest['completion_contract'])
                  and c._equal(result.get('experiment_attempt'),{k:grant[k] for k in ('attempt_id','attempt_kind','position','continuation_sha256')}),
                  'LEAF_GRANT_CHANGED')
+        expected_kind = ('technical_retry' if position in parent['retry_positions'] else 'first_attempt') if 'retry_positions' in parent else (
+            'technical_retry' if position == first else 'first_attempt')
         _require(re.fullmatch('[0-9a-f]{64}',grant['attempt_id']) and grant['attempt_id'] not in attempt_ids
-                 and grant['attempt_kind'] == ('technical_retry' if position == first else 'first_attempt'),
+                 and grant['attempt_kind'] == expected_kind,
                  'LEAF_ATTEMPT_KIND_OR_ID_CHANGED')
         attempt_ids.add(grant['attempt_id'])
         if result['status'] == 'executed' and row.get('issues') == []:
             _require(all(x['phase'] == 'guard_selfcheck' for x in result['isolation']['denials']), 'RETAINED_RUNTIME_DENIAL')
             grade = (root/'semantic-gates'/row['case_id']/'decision.json').exists()
-            enriched = c._row(root,manifest,position,ledger,load,graded=grade)
+            kwargs = {'allow_observation_stops': True} if observation_policy else {}
+            enriched = c._row(root,manifest,position,ledger,load,graded=grade,**kwargs)
             retained.append(enriched);new_good.append(enriched)
         else:
             failed = _technical(root,manifest,row,ledger,load);technical.append(failed)
@@ -222,6 +250,7 @@ def _anchor(anchor_root, seen):
     _require(failed is not None and batch['status'] == 'stopped' and batch['stop_reason'] == 'cell_receipt_or_isolation_gate'
              and meta.get('halt_reason') == batch['stop_reason']
              and (meta.get('first_error') or {}).get('root_id') == failed['root_id'], 'EXACT_LEAF_FIRST_ERROR_REQUIRED')
+    _bind_deferred_reviews(root, manifest, parent, retained, load)
     for position in range(0,len(retained)-1,2):
         pair = retained[position:position+2]
         if not any(x in new_good for x in pair):continue
@@ -247,6 +276,8 @@ def _anchor(anchor_root, seen):
         'leaf_charged_or_reserved':charge,'minimum_complete_attempts':len(order)+len(technical),
         'old_cases':c._helpers()._read(original['cases_path']),
         'old_materials':c._helpers()._read(Path(original['prepared_input_root'])/'material-snapshot.json')}
+    if parent.get('observation_recovery_lineage'):
+        result.update(deferred_review_cases=[], retry_positions=[failed['original_position']])
     _PARSED_ANCHORS[cache_key] = deepcopy(result)
     return result
 
@@ -275,6 +306,12 @@ def validate_completion_chain(manifest, *, _seen=frozenset()):
         _require(isinstance(supplied,dict) and supplied.get('version') == VERSION, 'EXPLICIT_VERSION_REQUIRED')
         expected = build_completion_chain_contract(supplied['anchor_root'],supplied['timing_authorization'],_seen=_seen)
         _require(c._equal(expected,supplied), 'CONTRACT_OR_ANCHOR_CHANGED')
+        observation_policy = False
+        if 'observation_recovery_lineage' in expected or 'observation_policy' in manifest:
+            from agent_final_observation_recovery import validate_observation_policy
+            observation_policy = validate_observation_policy(manifest)
+        _require(observation_policy is bool(expected.get('observation_recovery_lineage')),
+                 'INHERITED_OBSERVATION_POLICY_REQUIRED')
         base = _anchor(supplied['anchor_root'],_seen);original = base['anchor_manifest']
         _require(manifest.get('experiment_kind') == 'prompt_bundle_v1' and c._equal(manifest.get('evaluation_policy'),c.EVALUATION_POLICY)
                  and c._equal(manifest['execution_order'],expected['full_execution_order']), 'FIXED_SUITE_OR_EVALUATION_CHANGED')

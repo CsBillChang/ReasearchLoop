@@ -156,7 +156,7 @@ def _old_grade(root, manifest, case, load):
     return decision
 
 
-def _row(root, manifest, position, ledger, load, *, graded):
+def _row(root, manifest, position, ledger, load, *, graded, allow_observation_stops=False):
     case, variant = manifest['execution_order'][position]
     relative = 'runtime/cells/' + case + '-' + variant
     cell = root / relative
@@ -164,13 +164,19 @@ def _row(root, manifest, position, ledger, load, *, graded):
     view = load(relative + '/task-view.json')
     native = load(relative + '/model-calls.json')
     load(relative + '/actions.json', False)
+    _require(type(allow_observation_stops) is bool, 'EXPLICIT_OBSERVATION_STOP_FLAG_REQUIRED')
+    allowed = {'completed', 'partial'}
+    if allow_observation_stops:
+        allowed |= {'failed', 'cancelled', 'needs_input'}
     _require(result.get('status') == 'executed' and result.get('case_id') == case
              and result.get('variant') == variant and result.get('root_id') == view.get('task_id')
-             and view.get('status') in {'completed', 'partial'}, 'RETAINED_TERMINAL_REQUIRED')
+             and view.get('status') in allowed, 'RETAINED_TERMINAL_REQUIRED')
     _require(any(r['root_id'] == result['root_id'] and r['case_id'] == case and r['variant'] == variant
                  for r in ledger['roots']), 'RETAINED_LEDGER_ROOT_IDENTITY')
     physical = [x for x in ledger['reservations'] if x['root_id'] == result['root_id']]
-    proofs = _receipts(result['root_id'], native, physical)
+    proofs = ({'physical_receipts_verified': True, 'native_status_counts': {}, 'physical_status_counts': {}}
+              if allow_observation_stops and view['status'] in {'failed', 'cancelled', 'needs_input'}
+              and not native and not physical else _receipts(result['root_id'], native, physical))
     row = {'case_id': case, 'variant': variant, 'root_id': result['root_id'], 'status': view['status'],
            'issues': [], 'returncode': 0, 'original_position': position, 'retained': True,
            'source_manifest_path': str(root / 'manifest.formal.json'),
@@ -178,6 +184,27 @@ def _row(root, manifest, position, ledger, load, *, graded):
            'ledger_root': str(root), 'ledger_path': str(root / 'runtime/budget.sqlite3'),
            'provenance': {'anchor_root': str(root), 'cell_root': str(cell),
                'files': {name: _helpers()._hash(cell / name) for name in _helpers()._CELL_FILES}}}
+    if allow_observation_stops:
+        from agent_final_observation_recovery import exported_stop
+        events = load(relative + '/events.json')
+        observation = exported_stop(view, events)
+        for name in ('task.sqlite3', 'root-row.json', 'ledger-snapshot.json'):
+            load(relative + '/' + name, False)
+        for suffix in ('-wal', '-journal'):
+            sidecar = cell / ('task.sqlite3' + suffix)
+            _require(not sidecar.exists() or sidecar.stat().st_size == 0,
+                     'RETAINED_OBSERVATION_UNCHECKPOINTED')
+        # 只在不可变锚的冷解析阶段读原状态，绝不UPDATE或恢复旧任务。
+        with closing(sqlite3.connect((cell / 'task.sqlite3').as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+            db.execute('PRAGMA query_only=ON')
+            stored = db.execute('SELECT task_id,status,prompt,result_json,parent_task_id FROM tasks WHERE task_id=?',
+                                (result['root_id'],)).fetchall()
+        _require(len(stored) == 1 and stored[0][:3] == (result['root_id'], view['status'], view.get('prompt'))
+                 and stored[0][4] is None and _equal(json.loads(stored[0][3]), view.get('result')),
+                 'RETAINED_OBSERVATION_SQL_STATE_CHANGED')
+        row.update(observed_status=view['status'], observation_stop=observation)
+        row['provenance']['files'].update({name: _helpers()._hash(cell / name) for name in
+            ('events.json', 'task.sqlite3', 'root-row.json', 'ledger-snapshot.json')})
     if graded:
         decision = _old_grade(root, manifest, case, load)
         row['quality'] = decision['quality'][variant]
@@ -404,6 +431,10 @@ def _sources(manifest, original):
     allowed = h._EXPERIMENT_SCRIPTS | {'backend/scripts/agent_final_completion.py',
         'backend/scripts/harness_ab_budget.py', 'backend/scripts/harness_financial_process.py',
         'backend/scripts/agent_final_completion_chain.py', 'backend/scripts/agent_final_pdf_acquisition.py'}
+    contract = manifest.get('completion_contract') or {}
+    if (contract.get('version') == 'agent_final_completion_v4'
+            or contract.get('observation_recovery_lineage')):
+        allowed |= {'backend/scripts/agent_final_observation_recovery.py'}
     for key in ('settings', 'variant_settings', 'pair_review_policy', 'final_suite_policy'):
         _require(_equal(manifest.get(key), original.get(key)), 'EXPERIMENT_CONDITIONS_CHANGED')
     _require(_equal(h._read(manifest['model_manifest_path']), h._read(original['model_manifest_path'])),
@@ -412,6 +443,10 @@ def _sources(manifest, original):
     for variant in ('A', 'B'):
         expected = original['prompt_bundle_source_contract']['variants'][variant]['source_files']
         actual = h._runtime_files(Path(manifest['source_roots'][variant]))
+        if (contract.get('version') == 'agent_final_completion_v4'
+                or contract.get('observation_recovery_lineage')):
+            _require('backend/scripts/agent_final_observation_recovery.py' in actual,
+                     'RECOVERY_RUNTIME_HELPER_REQUIRED')
         _require(set(expected) <= set(actual) and set(actual) - set(expected) <= allowed, 'RUNTIME_FILE_SET_CHANGED')
         hashes = {rel: h._hash(path) for rel, path in actual.items()}
         _require(all(hashes[rel] == digest for rel, digest in expected.items() if rel not in allowed),
@@ -435,6 +470,9 @@ def validate_completion(manifest):
     try:
         _require('continuation_contract' not in manifest, 'TWO_CONTRACT_KEYS_FORBIDDEN')
         supplied = manifest['completion_contract']
+        if isinstance(supplied, dict) and supplied.get('version') == 'agent_final_completion_v4':
+            from agent_final_observation_recovery import validate_observation_recovery
+            return validate_observation_recovery(manifest)
         if isinstance(supplied, dict) and supplied.get('version') == 'agent_final_completion_v3':
             from agent_final_completion_chain import validate_completion_chain
             return validate_completion_chain(manifest)
@@ -505,6 +543,8 @@ def prior_pair_manifest(manifest, offset):
     if offset >= context['retained_count'] - 1:
         return None
     rows = context['retained_rows'][offset:offset + 2]
+    if rows[0]['case_id'] in context.get('deferred_review_cases', []):
+        return None
     owners = {row.get('score_manifest_path', row['source_manifest_path']) for row in rows}
     _require(len(owners) == 1, 'PRIOR_PAIR_SCORE_OWNER_MISMATCH')
     return _helpers()._read(next(iter(owners)))

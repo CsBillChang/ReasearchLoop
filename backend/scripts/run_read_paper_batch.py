@@ -18,7 +18,7 @@ from harness_ab_budget import Ledger
 from run_read_paper_ab import validate_manifest
 from harness_ab_experiment import PAIRED_KINDS
 from harness_ab_pair_gate import (assert_fresh_gate_root, initialize_scope_session,
-    issue_cell_grant, manifest_identity, wait_pair_review)
+    issue_cell_grant, manifest_identity, wait_pair_review, _observation_policy)
 from agent_final_continuation import planned_order, retained_rows, validate_continuation
 
 
@@ -185,6 +185,29 @@ def reconcile_cell_report(cell, snapshot):
         'unmatched_physical_response_ids': unmatched_physical}
 
 
+def review_deferred_pairs(manifest, continuation, rows, identity, deadline):
+    """先评原输出再授首格；只在新目录建挑战，原材料和旧评分均只读。"""
+    cases = continuation.get('deferred_review_cases', []) if continuation else []
+    if not cases:
+        return None
+    if (not _observation_policy(manifest) or not isinstance(cases, list)
+            or any(not isinstance(c, str) for c in cases) or len(set(cases)) != len(cases)):
+        raise PermissionError('deferred observation reviews require explicit v4 policy')
+    retained = continuation['retained_count']
+    for case in cases:
+        indices = [i for i, entry in enumerate(manifest['execution_order'][:retained]) if entry[0] == case]
+        matching = [r for r in rows if r['case_id'] == case]
+        if (len(indices) != 2 or indices[0] % 2 or indices != [indices[0], indices[0] + 1]
+                or len(matching) != 2 or {r['variant'] for r in matching} != {'A', 'B'}):
+            raise PermissionError('deferred review must bind one complete retained pair')
+        print(json.dumps({'event': 'deferred_pair_review_required', 'case_id': case,
+            'control_root': manifest['semantic_gate_root']}, ensure_ascii=False), flush=True)
+        decision = wait_pair_review(manifest, case, rows, identity, deadline)
+        if decision['status'] != 'passed':
+            return 'deferred_semantic_pair_gate:' + ','.join(decision['stop_reasons'])
+    return None
+
+
 def main():
     """凭据仅经内存标准输入传递；一次性标记阻止重复付费执行。"""
     started = time.time()
@@ -250,7 +273,17 @@ def main():
     stop = None
     script = Path(__file__).with_name('run_read_paper_ab.py')
     manifest_sha256 = manifest_identity(manifest)
+    try:
+        ends = ([deadline - finish_reserve] if deadline is not None else [])
+        if model_deadline is not None:
+            ends.append(model_deadline)
+        stop = review_deferred_pairs(manifest, continuation, rows, manifest_sha256,
+                                     min(ends) if ends else None)
+    except BaseException as exc:
+        stop = 'deferred_semantic_pair_gate_invalid:' + type(exc).__name__
     for case, variant in scheduled:
+        if stop:
+            break
         index = order.index([case, variant])
         snapshot = ledger.snapshot()
         usage = snapshot['charged_or_reserved']
