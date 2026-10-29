@@ -23,7 +23,9 @@ class Ledger:
                  root_seconds=900, max_output_tokens=65_536, carried_usage=None):
         """创建专用账本；已有不完整发送记录的账本重新打开时保持冻结。"""
         self.path = Path(path).resolve()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # 父驱动已准备共享目录时，不再触发逐格隔离所禁止的目录写入审计。
+        if not self.path.parent.is_dir():
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self.clock = clock or time.time
         allowed_cells = allowed_cells or [(f'H1-Q{i}', variant) for i in range(1, 5) for variant in ('A', 'B')]
         try:
