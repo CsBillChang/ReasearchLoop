@@ -12,9 +12,12 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'scripts'))
+sys.path[:0]=[str(Path(__file__).resolve().parents[2]/'scripts'),
+              str(Path(__file__).resolve().parents[2])]
 from agent_final_runtime import CellBoundary, cell_directory, digest, validate_suite_manifest
 from harness_ab_boundary import IsolationError
+from harness_ab_transport import (deep_reading_request_contract, matrix_request_contract,
+                                  visual_request_contract)
 
 
 class CellBoundaryTests(unittest.TestCase):
@@ -85,7 +88,9 @@ class FinalManifestTests(unittest.TestCase):
             'experiment_root':str(self.root),'prepared_input_root':str(self.inputs),'material_project_root':str(self.inputs),'cases_path':str(self.inputs/'cases.json'),
             'material_snapshot_sha256':digest(self.inputs/'material-snapshot.json'),'final_cases_sha256':digest(self.inputs/'cases.json'),'final_plan_sha256':digest(self.inputs/'execution-plan.json'),
             'runtime_root':str(self.root/'runtime'),'semantic_gate_root':str(self.root/'semantic-gates'),'source_roots':{'A':str(self.root/'snapshots/A'),'B':str(self.root/'snapshots/B')},
-            'execution_order':order,'ledger_limits':{'allowed_cells':order},'vector_endpoint':'http://127.0.0.1:6431','vector_port':6431}
+            'execution_order':order,'ledger_limits':{'allowed_cells':order},'vector_endpoint':'http://127.0.0.1:6431','vector_port':6431,
+            'request_contracts':{'visual':visual_request_contract(),
+                'deep_reading':deep_reading_request_contract(),'matrix_delivery':matrix_request_contract()}}
 
     def test_full_matrix_passes_without_release(self):
         self.assertEqual(validate_suite_manifest(self.m)['cells'],96)
@@ -248,6 +253,41 @@ class ExecuteBoundaryChainTests(unittest.TestCase):
         self.assertEqual(result['denial_phases'],['guard_selfcheck'])
         self.assertEqual(result['real_socket_connections'],0)
 
+    def test_pdf_deep_read_initial_continuation_exports_exact_completed_note(self):
+        """真实精读子图续写后原样建稿、保存和交付，全部原生收据归同一根。"""
+        result=self.run_fixture('deep_read')
+        self.assertEqual(result['status'],'executed',result)
+        self.assertEqual(result['task_status'],'completed',result)
+        self.assertEqual(result['deep_max_tokens'],[4096,2048],result)
+        self.assertEqual(result['deep_phases'],['initial','continuation'],result)
+        self.assertEqual(result['deep_statuses'],['complete'],result)
+        self.assertEqual(result['saved_note_count'],1,result)
+        self.assertTrue(result['note_exact_merged'],result)
+        self.assertTrue(result['note_hashes_match'],result)
+        self.assertTrue(result['delivered_note_matches'],result)
+        self.assertEqual(result['note_heading_count'],8,result)
+        self.assertTrue(result['note_ends_complete'],result)
+        self.assertEqual(result['native_success'],result['physical_settled'])
+        self.assertGreaterEqual(result['descendant_native_success'],4,result)
+        self.assertEqual(result['budget_root_count'],1)
+        self.assertEqual(result['reservation_root_count'],1)
+        self.assertEqual(result['actual_tokens'],15*result['physical_settled'])
+        self.assertEqual(result['denial_phases'],['guard_selfcheck'])
+        self.assertEqual(result['real_socket_connections'],0)
+
+    def test_matrix_plan_and_existing_page_evidence_allow_native_text_sse(self):
+        """真实计划与读页证据触发既有矩阵非思考请求，仍走原生SSE及请求证明。"""
+        result=self.run_fixture('matrix')
+        self.assertEqual(result['status'],'executed',result)
+        self.assertEqual(result['task_status'],'completed',result)
+        self.assertEqual(result['matrix_disabled_sse_requests'],1,result)
+        self.assertEqual(result['matrix_plan_requested'],True,result)
+        self.assertGreater(result['matrix_source_evidence_count'],0,result)
+        self.assertEqual(result['native_success'],result['physical_settled'])
+        self.assertEqual(result['actual_tokens'],15*result['physical_settled'])
+        self.assertEqual(result['denial_phases'],['guard_selfcheck'])
+        self.assertEqual(result['real_socket_connections'],0)
+
 
 def _execute_fixture(scenario,root):
     """用合成资格门运行实际execute核心路径，不冒充正式96格身份资格。"""
@@ -256,14 +296,15 @@ def _execute_fixture(scenario,root):
     import httpx
     import run_read_paper_ab as runner
     from harness_ab_budget import Ledger
-    from harness_ab_transport import visual_request_contract
+    from research_loop.storage.mysql import Database
+    from unit.test_harness_deep_read_contract import INITIAL, CONTINUATION
     root=Path(root).resolve();runtime=root/'runtime';runtime.mkdir()
     case={'case_id':'SYNTHETIC-R1','suite_kind':'agent_final_v1',
           'prompt':'回顾历史偏好，使用中文回答，不保存文件。','materials':[],
           'preconditions':{'history_messages':[{'role':'user','content':'以后默认中文，不保存文件。'}],
                            'save_policy':'deny'}}
     bundle=None
-    if scenario=='visual':
+    if scenario in {'visual','deep_read','matrix'}:
         from unit.test_visual_reading import fixture
         fixture_files,pdf,visual_input,pages=fixture(root/'source-fixture')
         parsed=next(fixture_files.parse_dir.glob('*.json'))
@@ -274,6 +315,11 @@ def _execute_fixture(scenario,root):
              'pdf_sha256':digest(pdf),'parsed_path':str(parsed),'parsed_cache_sha256':digest(parsed),
              'metadata':{'title':'Synthetic fixture only','source':'upload'}},
              'manifest':{'source':{'document_id':visual_input.document_id}}}
+        if scenario=='deep_read':
+            case.update(prompt='请精读附件，写成八点完整笔记并保存文件，保留结尾（完）。',
+                        preconditions={'save_policy':'allow'})
+        elif scenario=='matrix':
+            case.update(prompt='请读取附件，用结构化证据矩阵列出A与B，不保存文件。')
     cases=root/'cases.json';cases.write_text(json.dumps({'cases':[case]}))
     auth=root/'synthetic-auth.json';auth.write_text(json.dumps({'approved':True}))
     frozen=root/'synthetic-frozen.txt';frozen.write_text('synthetic chain only')
@@ -293,7 +339,8 @@ def _execute_fixture(scenario,root):
                    'parser_name':'pymupdf','parser_version':'1','execution_budget_mode':'observe'},
        'variant_settings':{'A':{},'B':{}},'model_manifest_path':str(root/'unused-model.json'),
        'material_project_root':str(root),'vector_manifest_path':str(root/'unused-vectors.json'),
-       'ledger_limits':options,'request_contracts':{'visual':visual_request_contract()}}
+       'ledger_limits':options,'request_contracts':{'visual':visual_request_contract(),
+           'deep_reading':deep_reading_request_contract(),'matrix_delivery':matrix_request_contract()}}
     requests=[];connections=[];input_refs=[]
     actual_create=runner.create_bundle_input_task
 
@@ -342,7 +389,51 @@ def _execute_fixture(scenario,root):
         observations=[json.loads(m['content']) for m in body['messages'] if m['role']=='tool']
         images=any(isinstance(m.get('content'),list) and any(x.get('type')=='image_url'
             for x in m['content']) for m in body['messages'])
-        if images:value=reply(None,content='合成图表观察：A为12，B为24；不代表真实模型质量。')
+        tools={t['function']['name'] for t in body.get('tools',[])}
+        if scenario=='deep_read' and body.get('temperature')==.3:
+            value=reply(None,content=INITIAL if body['max_tokens']==4096 else CONTINUATION)
+        elif scenario=='deep_read' and 'finish_research' in tools:
+            if 'read_paper' not in done:
+                value=reply('read_paper',{'target_ref':input_refs[0],'start_page':1,'page_count':2})
+            else:
+                read=next(o['data'] for o in observations if o.get('data',{}).get('pages'))
+                value=reply('finish_research',{'status':'completed','findings':['已读合成全文'],
+                    'paper_ids':[read['paper_id']],
+                    'evidence_ids':[p['evidence_id'] for p in read['pages']]})
+        elif scenario=='deep_read' and 'set_research_plan' not in done:
+            value=reply('set_research_plan',{'goal':'八点精读并保存','requested_count':1,
+                'count_confirmed':True,'task_kind':'compare','input_refs':input_refs,
+                'save_policy':'allow','save_requested':True,'deep_reading_requested':True,
+                'goals':[{'goal_id':'deep','description':'八点精读','min_papers':1,'requires_fulltext':True}]})
+        elif scenario=='deep_read' and 'delegate_research' not in done:
+            value=reply('delegate_research',{'subtasks':[{'objective':'八点精读','input_refs':input_refs,
+                'goal_ids':['deep'],'mode':'deep_read','start_page':1,'page_count':2}]})
+        elif scenario=='deep_read':
+            delegated=next(o['data']['subtasks'][0] for o in observations
+                if o.get('data',{}).get('subtasks'))
+            if 'create_note' not in done:
+                value=reply('create_note',{'title':'合成八点精读笔记',
+                    'markdown':INITIAL+'\n\n'+CONTINUATION,'evidence_ids':delegated['evidence_ids']})
+            else:
+                draft=next(o['data'] for o in observations if o.get('data',{}).get('draft_id'))
+                if 'save_note' not in done:
+                    value=reply('save_note',{'draft_id':draft['draft_id'],'content_hash':draft['content_hash']})
+                else:
+                    value=reply('finish_task',{'draft_id':draft['draft_id'],
+                        'goals':[{'goal_id':'deep','status':'satisfied','reason':'精读完成并保存',
+                                  'subtask_ids':[delegated['subtask_id']]}]})
+        elif scenario=='matrix' and 'set_research_plan' not in done:
+            value=reply('set_research_plan',{'goal':'合成证据矩阵','requested_count':1,
+                'count_confirmed':True,'task_kind':'compare','input_refs':input_refs,
+                'evidence_matrix_requested':True,
+                'goals':[{'goal_id':'matrix','description':'按原文列出证据矩阵',
+                          'min_papers':1,'requires_fulltext':True}]})
+        elif scenario=='matrix' and 'read_paper' not in done:
+            value=reply('read_paper',{'target_ref':input_refs[0],'start_page':1,'page_count':2})
+        elif scenario=='matrix':
+            value=reply('finish_task',{'answer_markdown':'| 合成项目 | 值 |\n|---|---|\n| A | 12 |\n| B | 24 |',
+                'goals':[{'goal_id':'matrix','status':'satisfied','reason':'已读取合成页证据并制表'}]})
+        elif images:value=reply(None,content='合成图表观察：A为12，B为24；不代表真实模型质量。')
         elif scenario=='visual' and 'set_research_plan' not in done:
             value=reply('set_research_plan',{'goal':'回答附件图表','requested_count':1,
                 'count_confirmed':True,'task_kind':'compare','input_refs':input_refs,
@@ -381,7 +472,7 @@ def _execute_fixture(scenario,root):
         stack.enter_context(patch('harness_ab_pair_gate.validate_prior_pair_gates',return_value={}))
         stack.enter_context(patch.object(httpx.HTTPTransport,'handle_request',handler))
         stack.enter_context(patch.object(runner,'create_bundle_input_task',capture_input))
-        if scenario=='visual':
+        if scenario in {'visual','deep_read','matrix'}:
             stack.enter_context(patch('harness_ab_resources.load_source_bundles',return_value={digest(pdf):bundle}))
             stack.enter_context(patch('harness_ab_resources.rebind_bundle',side_effect=lambda value,*_:value))
             stack.enter_context(patch('harness_ab_resources.install_bundle',return_value={'synthetic_external_vectors':True}))
@@ -407,7 +498,33 @@ def _execute_fixture(scenario,root):
         descendant_native_success=sum(r['status']=='succeeded' and r['task_id']!=root_id for r in native),
         budget_root_count=len(snapshot['roots']),
         reservation_root_count=len({r['root_id'] for r in snapshot['reservations']}),
-        mocked_external_rag=scenario=='visual')
+        mocked_external_rag=scenario in {'visual','deep_read','matrix'})
+    if scenario=='matrix':
+        db=Database('sqlite:///'+str(cell/'task.sqlite3'))
+        checkpoint=db.fetchone('SELECT state_json FROM checkpoints WHERE task_id=?',(root_id,))
+        state=json.loads(checkpoint['state_json']) if checkpoint else {}
+        result.update(matrix_disabled_sse_requests=sum(b.get('stream') is True
+            and b.get('temperature')==.1 and b.get('thinking')=={'type':'disabled'} for b in requests),
+            matrix_plan_requested=state.get('research_plan',{}).get('evidence_matrix_requested'),
+            matrix_source_evidence_count=len(state.get('evidence_ids',[])))
+    if scenario=='deep_read':
+        db=Database('sqlite:///'+str(cell/'task.sqlite3'))
+        rows=db.fetchall('SELECT d.markdown,d.content_hash,s.path,e.file_sha256 FROM drafts d '
+            'JOIN save_receipts s ON s.draft_id=d.draft_id AND s.content_hash=d.content_hash '
+            'JOIN note_exports e ON e.draft_id=d.draft_id AND e.content_hash=d.content_hash WHERE d.task_id=?',(root_id,))
+        note=rows[0] if rows else {}
+        markdown=note.get('markdown','')
+        children=db.list_subtasks(root_id)
+        task=db.get_task(root_id)
+        delivered=json.loads(task['result_json']) if task and task.get('result_json') else {}
+        result.update(deep_max_tokens=[b['max_tokens'] for b in requests if b.get('temperature')==.3],
+            deep_phases=[json.loads(r['request_json']).get('deep_reading_phase') for r in snapshot['reservations']
+                         if json.loads(r['request_json']).get('component')=='dpr_deep_reading'],
+            deep_statuses=[(c.get('result') or {}).get('result',{}).get('deep_reading_status') for c in children],
+            saved_note_count=len(rows),note_exact_merged=markdown==INITIAL+'\n\n'+CONTINUATION,
+            note_heading_count=markdown.count('## '),note_ends_complete=markdown.endswith('（完）'),
+            note_hashes_match=bool(note) and digest(Path(note['path']))==note['file_sha256']==note['content_hash'],
+            delivered_note_matches=delivered.get('answer_markdown')==markdown)
     (root/'fixture-result.json').write_text(json.dumps(result))
     if report['status']!='executed':print((cell/'failure.log').read_text())
 

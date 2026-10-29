@@ -159,9 +159,39 @@ def validate_carried_budget_source(manifest):
     return expected
 
 
+def validate_matrix_delivery_witness(db, root_id, payload, model):
+    """用本格根Supervisor的原生计划和唯一在途收据证明矩阵请求身份。"""
+    from research_loop.agents.graph import matrix_thinking
+    task = db.get_task(root_id) or {}
+    state = db.get_checkpoint(root_id) or {}
+    if (task.get('role') != 'supervisor' or task.get('parent_task_id')
+            or task.get('root_task_id') != root_id or state.get('task_id') != root_id
+            or matrix_thinking(state) != {'type': 'disabled'}):
+        return False
+    streaming = bool(db.fetchone('SELECT conversation_id FROM conversation_links WHERE task_id=?', (root_id,)))
+    matched = 0
+    for row in db.fetchall("SELECT request_json FROM model_calls WHERE task_id=? "
+            "AND status='started' AND sent_state='sent'", (root_id,)):
+        request = json.loads(row['request_json'])
+        if request.get('stage') or request.get('thinking') != {'type': 'disabled'}:
+            continue
+        expected = {'model': model, 'messages': request['messages'], 'temperature': 0.1}
+        for key in ('max_tokens', 'thinking'):
+            if key in request:
+                expected[key] = request[key]
+        if streaming:
+            expected.update(stream=True, stream_options={'include_usage': True})
+        if request.get('tools') and not request.get('force_text'):
+            expected.update(tools=request['tools'], tool_choice='auto')
+        if json.dumps(payload, sort_keys=True, separators=(',', ':'), allow_nan=False) == json.dumps(
+                expected, sort_keys=True, separators=(',', ':'), allow_nan=False):
+            matched += 1
+    return matched == 1
+
+
 def validate_manifest(manifest, case_id, variant, mode):
     """在创建目录或任务前检查冻结范围，拒绝借配置更换第二个实验变量。"""
-    from harness_ab_transport import visual_request_contract
+    from harness_ab_transport import validate_request_contracts
     if 'final_suite_policy' in manifest:
         from agent_final_runtime import validate_suite_manifest
         validate_suite_manifest(manifest)
@@ -169,9 +199,11 @@ def validate_manifest(manifest, case_id, variant, mode):
         from prompt_bundle_ab import validate_activation
         validate_activation(manifest, mode)
     contracts = manifest.get('request_contracts')
-    if ((contracts is not None or mode == 'execute')
-            and contracts != {'visual': visual_request_contract()}):
-        raise PermissionError('DEDUP_VISUAL_CONTRACT_REQUIRED')
+    if contracts is not None or mode == 'execute' or 'final_suite_policy' in manifest:
+        try:
+            validate_request_contracts(contracts, final_suite='final_suite_policy' in manifest)
+        except ValueError as exc:
+            raise PermissionError('DEDUP_COMPONENT_REQUEST_CONTRACT_REQUIRED') from exc
     if mode == 'execute' or manifest.get('carried_budget_source') is not None:
         validate_carried_budget_source(manifest)
     from harness_ab_experiment import PAIRED_KINDS, validate_paired_manifest
@@ -290,7 +322,8 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
     from harness_ab_budget import Ledger
     from harness_ab_resources import (load_source_bundles, rebind_bundle, prepare_parsed_cache,
         install_bundle, HarnessRetrievalRuntime)
-    from harness_ab_transport import BudgetTransport, require_generation_identity
+    from harness_ab_transport import (BudgetTransport, bind_deep_reading_client,
+        require_generation_identity)
     from harness_ab_network import OfficialNetworkPolicy
     network_policy = OfficialNetworkPolicy(mode, manifest['vector_port'], manifest['official_ip_addresses'])
     denied_connections = []
@@ -541,7 +574,11 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                                 from research_loop.providers.deepseek import RequestNotSent
                                 raise RequestNotSent('H1 model or visual provider outside frozen scope')
                             transport = SourceBoundTransport(ledger, root_id, cell / 'requests', deadline=deadline,
-                                visual_contract=manifest['request_contracts']['visual'])
+                                visual_contract=manifest['request_contracts']['visual'],
+                                deep_reading_contract=manifest['request_contracts'].get('deep_reading'),
+                                matrix_contract=manifest['request_contracts'].get('matrix_delivery'),
+                                matrix_request_check=lambda payload: validate_matrix_delivery_witness(
+                                    db, root_id, payload, settings.deepseek_model))
                             native_client = httpx.Client(transport=transport, timeout=settings.request_timeout_seconds,
                                 trust_env=False, follow_redirects=False)
                             clients.append(native_client)
@@ -561,7 +598,9 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                     watchdog = threading.Thread(target=deadline_watchdog, daemon=True)
                     watchdog.start()
                     try:
-                        executor.execute(root_id, 'harness-h1-' + case_id + '-' + variant)
+                        from research_loop.agents.deep_reading import _ReceiptClient
+                        with bind_deep_reading_client(_ReceiptClient):
+                            executor.execute(root_id, 'harness-h1-' + case_id + '-' + variant)
                     finally:
                         stop_watchdog.set()
                         watchdog.join(timeout=1)

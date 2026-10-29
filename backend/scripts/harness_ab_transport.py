@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import base64
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 import json
 from pathlib import Path
 import struct
@@ -12,6 +15,73 @@ import zlib
 import httpx
 
 from research_loop.providers.deepseek import RequestNotSent
+
+
+_DEEP_READING_OUTPUT = ContextVar('harness_deep_reading_output', default=None)
+
+
+def deep_reading_request_contract():
+    """冻结上游精读初稿与续写的已有参数，不改变业务生成行为。"""
+    return {'version': 1, 'model': 'deepseek-flash', 'temperature': 0.3,
+        'thinking': {'type': 'disabled'}, 'stream': False,
+        'max_tokens_by_phase': {'initial': 4096, 'continuation': 2048}}
+
+
+def matrix_request_contract():
+    """允许既有矩阵交付显式关闭思考，仍须本格原生状态和请求证明。"""
+    return {'version': 1, 'model': 'deepseek-flash', 'temperature': 0.1,
+        'thinking': {'type': 'disabled'}, 'max_output_tokens': 65536,
+        'stream_modes': [False, True], 'native_witness': 'root_supervisor_matrix_v1'}
+
+
+@contextmanager
+def deep_reading_request_scope(max_tokens):
+    """仅在当前精读调用栈中绑定输出上限，退出及异常时恢复原作用域。"""
+    token = _DEEP_READING_OUTPUT.set((max_tokens,))
+    try:
+        yield
+    finally:
+        _DEEP_READING_OUTPUT.reset(token)
+
+
+@contextmanager
+def bind_deep_reading_client(client_type):
+    """在实验进程包装原生入口，只提供组件身份，不改消息、参数或收据。"""
+    from unittest.mock import patch
+    original = client_type.chat
+
+    @wraps(original)
+    def scoped_chat(client, *args, **kwargs):
+        with deep_reading_request_scope(client.kwargs.get('max_tokens')):
+            return original(client, *args, **kwargs)
+
+    with patch.object(client_type, 'chat', scoped_chat):
+        yield
+
+
+def validate_request_contracts(contracts, *, final_suite=False):
+    """最终套件必须显式覆盖精读；旧非最终实验仍只许可原视觉合同。"""
+    expected = {'visual': visual_request_contract(),
+                'deep_reading': deep_reading_request_contract(),
+                'matrix_delivery': matrix_request_contract()}
+    if contracts != expected and (final_suite or contracts != {'visual': visual_request_contract()}):
+        raise ValueError('experiment request contracts differ from frozen components')
+    return contracts
+
+
+def validate_deep_reading_payload(payload, contract, maximum):
+    """只有精读原生作用域可使用精读参数，不能靠请求字段冒充组件身份。"""
+    expected = deep_reading_request_contract()
+    allowed = {'model', 'messages', 'temperature', 'max_tokens', 'thinking', 'stream'}
+    phases = expected['max_tokens_by_phase']
+    if (contract is None or contract != expected or type(maximum) is not int
+            or maximum not in phases.values() or set(payload) - allowed
+            or any(payload.get(key) != expected[key] for key in ('model', 'temperature', 'thinking'))
+            or type(payload.get('max_tokens')) is not int or payload['max_tokens'] != maximum
+            or payload.get('stream', False) is not False
+            or any(not isinstance(message.get('content'), str) for message in payload['messages'])):
+        raise RequestNotSent('deep reading parameters differ from frozen component contract')
+    return next(phase for phase, value in phases.items() if value == maximum)
 
 
 def require_generation_identity(ledger, root_id, check, *, operation):
@@ -94,7 +164,8 @@ class BudgetTransport(httpx.BaseTransport):
     """约束一个根任务族的所有原生生成请求，不改变消息或工具内容。"""
 
     def __init__(self, ledger, root_id, directory: Path, *, inner=None,
-                 expected_model='deepseek-flash', deadline=None, visual_contract=None):
+                 expected_model='deepseek-flash', deadline=None, visual_contract=None,
+                 deep_reading_contract=None, matrix_contract=None, matrix_request_check=None):
         """绑定共同账本、根身份和私有请求记录目录。
 
         Args:
@@ -105,6 +176,9 @@ class BudgetTransport(httpx.BaseTransport):
             expected_model: 冻结的模型别名。
             deadline: 可选绝对墙钟截止时间。
             visual_contract: 显式冻结的视觉合同；未提供时保持禁止图片。
+            deep_reading_contract: 精读组件窄合同；仍须原生调用作用域才可放行。
+            matrix_contract: 已取证矩阵交付的普通文本合同。
+            matrix_request_check: 由共同入口核对本格原生请求和计划，不能由模型消息指定。
         """
         self.ledger, self.root_id = ledger, root_id
         self.directory = Path(directory)
@@ -112,6 +186,12 @@ class BudgetTransport(httpx.BaseTransport):
         self.inner = inner or httpx.HTTPTransport(retries=0, trust_env=False)
         self.expected_model, self.deadline = expected_model, deadline
         self.visual_contract = validate_visual_contract(visual_contract)
+        if deep_reading_contract is not None and deep_reading_contract != deep_reading_request_contract():
+            raise ValueError('deep reading contract differs from current business component')
+        self.deep_reading_contract = deep_reading_contract
+        if matrix_contract is not None and matrix_contract != matrix_request_contract():
+            raise ValueError('matrix contract differs from current business component')
+        self.matrix_contract, self.matrix_request_check = matrix_contract, matrix_request_check
 
     def _unknown(self, identity, reason):
         """保留完整预留并冻结后续真实请求。"""
@@ -152,11 +232,19 @@ class BudgetTransport(httpx.BaseTransport):
                         raise RequestNotSent('multimodal block outside frozen inline PNG scope')
                     if item['type'] == 'image_url':
                         image_blocks.append(item)
-        image_count = 0
-        if image_blocks:
+        image_count, deep_phase, matrix_delivery = 0, None, False
+        deep_binding = _DEEP_READING_OUTPUT.get()
+        if deep_binding is not None:
+            deep_phase = validate_deep_reading_payload(payload, self.deep_reading_contract, deep_binding[0])
+        elif image_blocks:
             image_count = validate_visual_payload(payload, len(body), self.visual_contract)
-        elif (payload.get('temperature') != 0.1 or payload.get('thinking') is not None):
+        elif payload.get('temperature') != 0.1:
             raise RequestNotSent('H1 model parameters differ from freeze')
+        elif payload.get('thinking') is not None:
+            if (self.matrix_contract is None or payload['thinking'] != {'type': 'disabled'}
+                    or self.matrix_request_check is None or self.matrix_request_check(payload) is not True):
+                raise RequestNotSent('matrix request has no frozen native witness')
+            matrix_delivery = True
         if payload.get('model') != self.expected_model:
             raise RequestNotSent('H1 model parameters differ from freeze')
         maximum = payload.get('max_tokens')
@@ -174,7 +262,9 @@ class BudgetTransport(httpx.BaseTransport):
                 input_upper_bound=1048576,
                 request_metadata={'model': payload['model'], 'stream': bool(payload.get('stream')),
                     'body_sha256': hashlib.sha256(body).hexdigest(),
-                    'request_kind': 'visual' if image_count else 'text', 'image_count': image_count})
+                    'request_kind': 'visual' if image_count else 'text', 'image_count': image_count,
+                    **({'component': 'dpr_deep_reading', 'deep_reading_phase': deep_phase}
+                       if deep_phase else {'component': 'matrix_delivery'} if matrix_delivery else {})})
         except Exception as exc:
             raise RequestNotSent('H1 budget denied before transport: '
                 + type(exc).__name__ + ': ' + str(exc)) from exc
