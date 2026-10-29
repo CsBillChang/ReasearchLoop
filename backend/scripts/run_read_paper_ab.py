@@ -51,6 +51,96 @@ def bounded_deadline(root_deadline, *optional_deadlines):
     return min(deadlines)
 
 
+class LiveIsolationLatch:
+    """非自检拒绝立即关闭新准入；已发送收据仍使用原账本结算。"""
+
+    def __init__(self, persist, *, clock=time.time):
+        self.persist, self.clock = persist, clock
+        self.closed = threading.Event()
+        self.state_lock, self.admission_lock = threading.RLock(), threading.RLock()
+        self.local = threading.local()
+        self.first_error = None
+        self.ledger = self.root_id = None
+        self.artifact_persisted = self.ledger_persisted = False
+        self.persistence_errors = []
+
+    def record(self, phase, operation):
+        if phase == 'guard_selfcheck':
+            return
+        with self.state_lock:
+            if self.first_error is None:
+                self.first_error = {'version': 1, 'phase': phase, 'operation': operation,
+                                    'detected_at': self.clock()}
+                # 在等待SQLite准入锁之前关门，后续排队线程不得再预留或mark_sent。
+                self.closed.set()
+        with self.admission_lock:
+            self._persist()
+
+    def _persist(self):
+        if self.first_error is None or getattr(self.local, 'persisting', False):
+            return
+        self.local.persisting = True
+        try:
+            if not self.artifact_persisted:
+                try:
+                    self.persist(dict(self.first_error))
+                    self.artifact_persisted = True
+                except Exception as exc:
+                    self.persistence_errors.append({'target': 'cell_artifact', 'error_type': type(exc).__name__})
+            if self.ledger is not None and not self.ledger_persisted:
+                try:
+                    self.ledger.halt('live isolation rejected: ' + self.first_error['operation'],
+                        operation='live_isolation', root_id=self.root_id, details={'isolation_first_error': self.first_error})
+                    self.ledger_persisted = True
+                except Exception as exc:
+                    self.persistence_errors.append({'target': 'ledger', 'error_type': type(exc).__name__})
+        finally:
+            self.local.persisting = False
+
+    def check_open(self):
+        if self.closed.is_set():
+            with self.admission_lock:
+                self._persist()
+            from harness_ab_budget import BudgetHalt
+            raise BudgetHalt('live isolation latch closed before new request admission')
+
+    def bind(self, ledger, root_id):
+        with self.admission_lock:
+            self.ledger, self.root_id = ledger, root_id
+            self._persist()
+            self.check_open()
+        latch = self
+
+        class GuardedLedger:
+            def __getattr__(self, name):
+                return getattr(ledger, name)
+
+            def _admit(self, method, *args, **kwargs):
+                with latch.admission_lock:
+                    latch.check_open()
+                    return method(*args, **kwargs)
+
+            def begin_root(self, *args, **kwargs):
+                return self._admit(ledger.begin_root, *args, **kwargs)
+
+            def reserve(self, *args, **kwargs):
+                return self._admit(ledger.reserve, *args, **kwargs)
+
+            def mark_sent(self, *args, **kwargs):
+                return self._admit(ledger.mark_sent, *args, **kwargs)
+        return GuardedLedger()
+
+    def snapshot(self):
+        with self.state_lock:
+            return {'version': 1, 'guard_selfcheck_excluded': True,
+                'first_error': dict(self.first_error) if self.first_error else None,
+                'closed': self.closed.is_set(), 'ledger_bound': self.ledger is not None,
+                'artifact_persisted': self.artifact_persisted, 'ledger_persisted': self.ledger_persisted,
+                'persistence_errors': list(self.persistence_errors),
+                'admission_policy': 'deny_new_reservations_and_send_after_first_runtime_denial',
+                'inflight_settlement_allowed': True}
+
+
 def qualification_configuration(manifest):
     """资格收据绑定本批源码、材料入口、资源、参数与允许矩阵。"""
     from harness_ab_experiment import PAIRED_KINDS, source_contract_key
@@ -72,6 +162,8 @@ def qualification_configuration(manifest):
     if 'completion_contract' in manifest:
         result['completion_contract'] = manifest['completion_contract']
         result['evaluation_policy'] = manifest.get('evaluation_policy')
+    if 'source_acquisition_contract' in manifest:
+        result['source_acquisition_contract'] = manifest['source_acquisition_contract']
     return result
 
 def select_variant_source(manifest, variant):
@@ -216,6 +308,8 @@ def validate_matrix_delivery_witness(db, root_id, payload, model):
 def validate_manifest(manifest, case_id, variant, mode):
     """在创建目录或任务前检查冻结范围，拒绝借配置更换第二个实验变量。"""
     from harness_ab_transport import validate_request_contracts
+    from agent_final_pdf_acquisition import validate_source_acquisition_contract
+    validate_source_acquisition_contract(manifest)
     if manifest.get('ledger_limits', {}).get('enforce_batch_seconds', True) is not True:
         if 'completion_contract' not in manifest:
             raise PermissionError('GLOBAL_TIME_CANCELLATION_REQUIRES_COMPLETION_AUTHORIZATION')
@@ -274,16 +368,18 @@ def validate_manifest(manifest, case_id, variant, mode):
             raise PermissionError('DEDUP_QUALIFICATION_RECEIPT_MISMATCH')
 
 
-def create_bundle_input_task(client, db, case, variant, mode, bundles):
+def create_bundle_input_task(client, db, case, variant, mode, bundles, *, catalog_acquisition=False):
     """通过真实后端API建立本格输入；种子与权限不由评分标签推导。"""
     from prompt_bundle_cases import case_save_policy, seed_history, upload_materials, validate_preconditions
     case_id = case['case_id']
     preconditions = validate_preconditions(case)
     report = {}
     upload_case = case
-    if mode == 'qualify' and preconditions.get('catalog'):
+    if mode == 'qualify' and preconditions.get('catalog') and not catalog_acquisition:
         upload_case = {**case, 'preconditions': {**preconditions, 'catalog': []}}
         report['qualification_only_attachment_override'] = True
+    elif mode == 'qualify' and catalog_acquisition:
+        report['qualification_only_attachment_override'] = False
     attachments = upload_materials(client, upload_case, bundles)
     conversation = client.post('/api/conversations', json={'title': 'Prompt bundle independent task',
         'idempotency_key': case_id + '-' + variant + '-' + mode + '-conversation'})
@@ -315,6 +411,8 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
     """
     source = select_variant_source(manifest, variant)
     validate_manifest(manifest, case_id, variant, mode)
+    from agent_final_pdf_acquisition import validate_source_acquisition_contract
+    controlled_acquisition = validate_source_acquisition_contract(manifest)
     control_session = None
     if mode == 'execute' and manifest.get('experiment_kind') in PAIRED_KINDS:
         from harness_ab_pair_gate import validate_prior_pair_gates
@@ -360,9 +458,25 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
     from harness_ab_network import OfficialNetworkPolicy
     network_policy = OfficialNetworkPolicy(mode, manifest['vector_port'], manifest['official_ip_addresses'])
     denied_connections = []
+    def persist_isolation_first_error(event):
+        path = cell / 'isolation-first-error.json'
+        if path.exists():
+            if read(path) != event:
+                raise PermissionError('isolation first-error artifact must not change')
+        else:
+            with path.open('x') as handle:
+                json.dump(event, handle, ensure_ascii=False, sort_keys=True)
+                handle.write('\n')
+                handle.flush()
+                os.fsync(handle.fileno())
+    isolation_latch = LiveIsolationLatch(persist_isolation_first_error)
 
     class ExperimentBoundary(Boundary):
         """文件写入限定本次运行根，网络仅许可冻结官方 IP 与专属向量端口。"""
+        def reject(self, operation):
+            isolation_latch.record(self.phase, operation)
+            return super().reject(operation)
+
         def audit(self, event, values):
             if not self.enabled:
                 return
@@ -490,12 +604,22 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
             if not joint:
                 report['index'] = report['indexes'][0]
                 report['copied_cache'] = report['copied_caches'][0]
-            pdf = PDFProvider(files, parser_name=settings.parser_name, parser_version=settings.parser_version,
-                parser_config=settings.parser_config)
+            pdf_kwargs = {'parser_name': settings.parser_name, 'parser_version': settings.parser_version,
+                          'parser_config': settings.parser_config}
+            if controlled_acquisition:
+                from agent_final_pdf_acquisition import controlled_pdf_provider
+                pdf = controlled_pdf_provider(PDFProvider, files, case, bundles,
+                    on_denial=boundary.reject, **pdf_kwargs)
+                report['controlled_pdf_acquisition'] = pdf.controlled_resolver.contract
+            else:
+                pdf = PDFProvider(files, **pdf_kwargs)
             stack.callback(pdf.close)
             if joint:
                 from prompt_bundle_cases import install_catalog, seed_history, upload_materials
                 install_catalog(stack, DiscoveryProvider, case, bundles)
+                if controlled_acquisition and preconditions.get('catalog'):
+                    from agent_final_pdf_acquisition import install_runtime_catalog_sources
+                    install_runtime_catalog_sources(stack, DiscoveryProvider, pdf.controlled_resolver)
             report['settings'] = {k: v for k, v in settings.model_dump(mode='json').items() if not any(
                 token in k for token in ('api_key', 'supabase_key'))}
             if materials:
@@ -538,7 +662,8 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
             stack.callback(lambda: (main.app.dependency_overrides.clear(), main.app.dependency_overrides.update(overrides)))
             with TestClient(main.app) as client:
                 if joint:
-                    input_report, attachments_for_task = create_bundle_input_task(client, db, case, variant, mode, bundles)
+                    input_report, attachments_for_task = create_bundle_input_task(client, db, case, variant, mode, bundles,
+                        **({'catalog_acquisition': True} if controlled_acquisition else {}))
                     report.update(input_report)
                     root_id = report['root_id']
                 else:
@@ -563,8 +688,23 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                 if mode == 'qualify':
                     attachments = {a['input_ref']: a for a in json.loads(db.get_task(root_id)['attachments_json'])}
                     qualified = []
-                    for material, attachment, bundle in zip(materials, attachments_for_task, rebound, strict=True):
-                        data = PaperService(db, None, pdf).read(root_id, attachment['input_ref'], attachments=attachments)
+                    catalog_qualification = controlled_acquisition and bool(preconditions.get('catalog'))
+                    if catalog_qualification:
+                        from agent_final_pdf_acquisition import qualify_catalog
+                        discovery = DiscoveryProvider.from_settings(settings)
+                        stack.callback(discovery.close)
+                        catalog_rows, catalog_summary = qualify_catalog(db, root_id, pdf, discovery, case)
+                        report.update(qualification_input_mode='catalog_native_search_read',
+                                      qualification_catalog=catalog_summary)
+                        acquired = [(materials[row['entry']['material_index']],
+                            rebound[row['entry']['material_index']], row['data'], row) for row in catalog_rows]
+                    else:
+                        acquired = [(material, bundle,
+                            PaperService(db, None, pdf).read(root_id, attachment['input_ref'], attachments=attachments), None)
+                            for material, attachment, bundle in zip(materials, attachments_for_task, rebound, strict=True)]
+                        if controlled_acquisition:
+                            report['qualification_input_mode'] = 'native_attachment' if materials else 'zero_paper_memory'
+                    for material, bundle, data, catalog_row in acquired:
                         assert len(data['pages']) == material['physical_pages']
                         resources = retrieval.ensure_task_resources(root_id, [bundle['manifest']['source']['document_id']])
                         from research_loop.domain.retrieval import RetrievalQuery
@@ -578,7 +718,16 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                         qualified.append({'pdf_sha256': material['pdf_sha256'], 'pages': len(data['pages']),
                             'authorized_resources': resources, 'retrieval_status': found['status'], 'hits': len(found['hits']),
                             'retrieval': {key: found.get(key) for key in ('strategy', 'effective_path', 'reranker',
-                                'embedding', 'selection_trace', 'degradations')}})
+                                'embedding', 'selection_trace', 'degradations')},
+                            **({'paper_id': catalog_row['entry']['paper_id'],
+                                'source_locator': catalog_row['entry']['source_locator'],
+                                **{key: catalog_row['entry'][key] for key in ('original_paper_url',
+                                    'original_pdf_url', 'original_catalog_source_url', 'source_kind', 'version_status')},
+                                'parsed_cache_sha256': catalog_row['entry']['parsed_sha256'],
+                                'material_id': catalog_row['entry']['material_id'], 'page1_verified': True,
+                                'page1_text_sha256': catalog_row['page1_text_sha256'],
+                                'full_text_page_hashes_verified': True, 'acquisition_kind': 'frozen_local_pdf'}
+                               if catalog_row else {})})
                     report.update(status='passed', real_model_calls=0, qualification_materials=qualified,
                         qualification={'materials': len(qualified), 'rag_required': bool(materials)})
                     if not joint:
@@ -589,7 +738,8 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                     if not credential or read(manifest['authorization_path'])['approved'] is not True:
                         raise PermissionError('H1 execution authorization or credential absent')
                     ledger = Ledger(runtime / 'budget.sqlite3', **manifest.get('ledger_limits', {}))
-                    begun = ledger.begin_root(root_id, case_id, variant)
+                    guarded_ledger = isolation_latch.bind(ledger, root_id)
+                    begun = guarded_ledger.begin_root(root_id, case_id, variant)
                     snap = ledger.snapshot()
                     deadline = bounded_deadline(begun['started_at'] + ledger.config['root_seconds'],
                         snap['batch_absolute_deadline'], manifest['cell_absolute_deadline'])
@@ -598,19 +748,23 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                         """共享传输保留原预算合同，增加新提示词实验的发送前身份门。"""
 
                         def handle_request(self, request):
+                            def identity_before_reservation():
+                                isolation_latch.check_open()
+                                return validate_active_variant(manifest, variant)
                             require_generation_identity(ledger, root_id,
-                                lambda: validate_active_variant(manifest, variant),
+                                identity_before_reservation,
                                 operation='source_identity')
                             return super().handle_request(request)
 
                     def factory(_settings):
                         """所有角色共用根账本；原生适配器仅替换 HTTP 传输。"""
                         def build():
+                            isolation_latch.check_open()
                             if (_settings.deepseek_model != settings.deepseek_model
                                     or _settings.deepseek_base_url != settings.deepseek_base_url):
                                 from research_loop.providers.deepseek import RequestNotSent
                                 raise RequestNotSent('H1 model or visual provider outside frozen scope')
-                            transport = SourceBoundTransport(ledger, root_id, cell / 'requests', deadline=deadline,
+                            transport = SourceBoundTransport(guarded_ledger, root_id, cell / 'requests', deadline=deadline,
                                 visual_contract=manifest['request_contracts']['visual'],
                                 deep_reading_contract=manifest['request_contracts'].get('deep_reading'),
                                 matrix_contract=manifest['request_contracts'].get('matrix_delivery'),
@@ -683,6 +837,7 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
         report['isolation'] = {'write_root': str(runtime), 'denials': boundary.denials,
             'sqlite_paths': sorted(boundary.sqlite_paths), 'implicit_settings_and_dotenv_denied': True,
             'network_policy': network_policy.snapshot(), 'denied_connections': denied_connections}
+        report['live_isolation_guard'] = isolation_latch.snapshot()
         if any(row['phase'] != 'guard_selfcheck' for row in boundary.denials):
             report['status'] = 'failed'
         report['finished_at'] = datetime.now(timezone.utc).isoformat()

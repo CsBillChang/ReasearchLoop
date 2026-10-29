@@ -402,7 +402,8 @@ def build_completion_contract(anchor_root, timing_authorization):
 def _sources(manifest, original):
     h = _helpers()
     allowed = h._EXPERIMENT_SCRIPTS | {'backend/scripts/agent_final_completion.py',
-        'backend/scripts/harness_ab_budget.py', 'backend/scripts/harness_financial_process.py'}
+        'backend/scripts/harness_ab_budget.py', 'backend/scripts/harness_financial_process.py',
+        'backend/scripts/agent_final_completion_chain.py', 'backend/scripts/agent_final_pdf_acquisition.py'}
     for key in ('settings', 'variant_settings', 'pair_review_policy', 'final_suite_policy'):
         _require(_equal(manifest.get(key), original.get(key)), 'EXPERIMENT_CONDITIONS_CHANGED')
     _require(_equal(h._read(manifest['model_manifest_path']), h._read(original['model_manifest_path'])),
@@ -434,6 +435,9 @@ def validate_completion(manifest):
     try:
         _require('continuation_contract' not in manifest, 'TWO_CONTRACT_KEYS_FORBIDDEN')
         supplied = manifest['completion_contract']
+        if isinstance(supplied, dict) and supplied.get('version') == 'agent_final_completion_v3':
+            from agent_final_completion_chain import validate_completion_chain
+            return validate_completion_chain(manifest)
         _require(isinstance(supplied, dict) and supplied.get('version') == VERSION, 'EXPLICIT_VERSION_REQUIRED')
         expected = build_completion_contract(supplied['anchor_root'], supplied['timing_authorization'])
         _require(_equal(supplied, expected), 'CONTRACT_OR_ANCHOR_CHANGED')
@@ -500,7 +504,10 @@ def prior_pair_manifest(manifest, offset):
     _require(type(offset) is int and offset >= 0 and offset % 2 == 0, 'PAIR_OFFSET_INVALID')
     if offset >= context['retained_count'] - 1:
         return None
-    return deepcopy(context['anchor_manifest'] if offset < 4 else context['latest_anchor_manifest'])
+    rows = context['retained_rows'][offset:offset + 2]
+    owners = {row.get('score_manifest_path', row['source_manifest_path']) for row in rows}
+    _require(len(owners) == 1, 'PRIOR_PAIR_SCORE_OWNER_MISMATCH')
+    return _helpers()._read(next(iter(owners)))
 
 
 def technical_attempts(context):

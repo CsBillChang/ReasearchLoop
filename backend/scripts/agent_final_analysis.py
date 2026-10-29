@@ -516,7 +516,16 @@ def completion_artifacts(reader,manifest,context):
                 or source_sha is None or sha(reader.bytes(source_path))!=source_sha):
             raise ValueError('completion source manifest identity mismatch')
         score_owner=owner
-        if not technical and item.get('quality') is None:
+        score_path=item.get('score_manifest_path',provenance.get('score_manifest_path'))
+        score_sha=item.get('score_manifest_sha256',provenance.get('score_manifest_sha256'))
+        if not technical and (score_path is not None or score_sha is not None):
+            if score_path is None or score_sha is None:
+                raise ValueError('completion score manifest identity incomplete')
+            path=Path(score_path)
+            if path.name!='manifest.formal.json' or str(path.parent) not in owners or sha(reader.bytes(path))!=score_sha:
+                raise ValueError('completion score manifest identity mismatch')
+            score_owner=owners[str(path.parent)]
+        elif not technical and item.get('quality') is None:
             score_owner=manifest
         row=analyze_cell(reader,root,owner,*key,ledgers[str(root)],closures[str(root)]['controller'],
                          artifact_cell=cell,score_manifest=score_owner)
