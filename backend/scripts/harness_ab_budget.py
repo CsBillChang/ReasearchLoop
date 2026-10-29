@@ -20,13 +20,17 @@ class Ledger:
     def __init__(self, path, *, allowed_cells=None, clock=None, start_time=None,
                  batch_tokens=12_000_000, batch_requests=192, batch_yuan=96,
                  batch_seconds=5400, root_tokens=4_000_000, root_requests=32,
-                 root_seconds=900, max_output_tokens=65_536, carried_usage=None):
+                 root_seconds=900, max_output_tokens=65_536, carried_usage=None,
+                 enforce_batch_seconds=True):
         """创建专用账本；已有不完整发送记录的账本重新打开时保持冻结。"""
         self.path = Path(path).resolve()
         # 父驱动已准备共享目录时，不再触发逐格隔离所禁止的目录写入审计。
         if not self.path.parent.is_dir():
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self.clock = clock or time.time
+        if type(enforce_batch_seconds) is not bool:
+            raise ValueError('global time enforcement must be an explicit boolean')
+        self.enforce_batch_seconds = enforce_batch_seconds
         allowed_cells = allowed_cells or [(f'H1-Q{i}', variant) for i in range(1, 5) for variant in ('A', 'B')]
         try:
             amount = Decimal(str(batch_yuan))
@@ -45,6 +49,9 @@ class Ledger:
             'root_seconds': root_seconds, 'max_output_tokens': max_output_tokens,
             'input_nano_per_token': 2000, 'cached_input_nano_per_token': 40,
             'output_nano_per_token': 8000}
+        # 默认配置字节保持旧账本兼容；只有新显式合同可取消整批时限。
+        if not enforce_batch_seconds:
+            self.config['enforce_batch_seconds'] = False
         if any(self.config[key] <= 0 for key in ('batch_tokens', 'batch_requests', 'batch_nano_yuan',
                 'batch_seconds', 'root_tokens', 'root_requests', 'root_seconds', 'max_output_tokens')):
             raise ValueError('budget limits must be positive')
@@ -163,7 +170,7 @@ class Ledger:
         if now < self._meta(db, 'last_clock'):
             raise BudgetHalt('clock moved backwards')
         self._put(db, 'last_clock', now)
-        if (self.carried_usage['seconds'] + now - self._meta(db, 'started_at')
+        if (self.enforce_batch_seconds and self.carried_usage['seconds'] + now - self._meta(db, 'started_at')
                 >= self.config['batch_seconds']):
             raise BudgetHalt('batch time exhausted')
         if root is not None and now - root['started_at'] >= self.config['root_seconds']:
@@ -358,8 +365,9 @@ class Ledger:
                 'charged_or_reserved': totals,
                 'carried_usage': self.carried_usage.copy(),
                 'current_charged_or_reserved': self._totals(db),
-                'batch_absolute_deadline': (self._meta(db, 'started_at')
-                    + self.config['batch_seconds'] - self.carried_usage['seconds']),
+                'batch_absolute_deadline': ((self._meta(db, 'started_at')
+                    + self.config['batch_seconds'] - self.carried_usage['seconds'])
+                    if self.enforce_batch_seconds else None),
                 'actual_known_tokens': sum(r['actual_tokens'] for r in known),
                 'actual_known_input': sum(r['actual_input'] for r in known),
                 'actual_known_output': sum(r['actual_output'] for r in known),

@@ -364,6 +364,10 @@ def validate_continuation(manifest):
     Returns:
         无该键时为 None；否则为只读旧批次身份和92格执行计划的副本。
     """
+    if 'completion_contract' in manifest:
+        _require('continuation_contract' not in manifest, 'MULTIPLE_CONTRACTS_FORBIDDEN')
+        from agent_final_completion import validate_completion
+        return validate_completion(manifest)
     if 'continuation_contract' not in manifest:
         return None
     try:

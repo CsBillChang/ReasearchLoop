@@ -1,4 +1,4 @@
-"""一次性运行冻结的去重对照矩阵；计时、请求、Token和金额共享硬上限。"""
+"""一次性运行冻结矩阵；按授权合同执行共享预算与单根时间上限。"""
 from __future__ import annotations
 
 import argparse
@@ -28,6 +28,15 @@ def read(path):
 
 def write(path, value):
     Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+
+
+def active_contract(manifest):
+    """新合同与旧合同互斥，grant保留原字段名但不借旧hash。"""
+    if 'completion_contract' in manifest:
+        if 'continuation_contract' in manifest:
+            raise PermissionError('two continuation contracts are forbidden')
+        return manifest['completion_contract']
+    return manifest['continuation_contract']
 
 
 def reconcile_cell(cell, snapshot):
@@ -191,6 +200,13 @@ def main():
     continuation = validate_continuation(manifest)
     scheduled = planned_order(manifest)
     model_deadline = (continuation['clock']['model_absolute_deadline'] if continuation else None)
+    financial_only = bool(continuation and continuation['clock'].get('policy') == 'financial_only')
+    if financial_only:
+        if (model_deadline is not None or continuation['clock']['round_absolute_deadline'] is not None
+                or limits.get('enforce_batch_seconds') is not False):
+            raise PermissionError('financial-only continuation clock contract differs')
+    elif limits.get('enforce_batch_seconds', True) is not True:
+        raise PermissionError('legacy batch cannot disable its global deadline')
     if model_deadline is not None and time.time() >= model_deadline:
         raise PermissionError('original model deadline already passed; no continuation start')
     authorization = read(manifest['authorization_path'])
@@ -244,14 +260,16 @@ def main():
             stop = 'ledger_halted'
         elif model_deadline is not None and time.time() >= model_deadline:
             stop = 'original_model_deadline'
-        elif time.time() >= deadline - finish_reserve:
+        elif deadline is not None and time.time() >= deadline - finish_reserve:
             stop = 'batch_deadline'
         elif (usage['requests'] + 1 > limits['batch_requests'] or usage['tokens'] + reserve > limits['batch_tokens']
                 or usage['nano'] + reserve_nano > ledger.config['batch_nano_yuan']):
             stop = 'insufficient_next_request_reservation'
         if stop:
             break
-        cell_deadline = min(time.time() + limits['root_seconds'], deadline - finish_reserve)
+        cell_deadline = time.time() + limits['root_seconds']
+        if deadline is not None:
+            cell_deadline = min(cell_deadline, deadline - finish_reserve)
         if model_deadline is not None:
             cell_deadline = min(cell_deadline, model_deadline)
         grant = None
@@ -309,7 +327,10 @@ def main():
             print(json.dumps({'event': 'pair_review_required', 'case_id': case,
                 'control_root': manifest['semantic_gate_root']}, ensure_ascii=False), flush=True)
             try:
-                review_deadline = min(deadline - finish_reserve, model_deadline) if model_deadline is not None else deadline - finish_reserve
+                ends = ([deadline - finish_reserve] if deadline is not None else [])
+                if model_deadline is not None:
+                    ends.append(model_deadline)
+                review_deadline = min(ends) if ends else None
                 decision = wait_pair_review(manifest, case, rows, manifest_sha256, review_deadline)
                 if decision['status'] != 'passed':
                     stop = 'semantic_pair_gate:' + ','.join(decision['stop_reasons'])
@@ -326,19 +347,22 @@ def main():
     snapshot = ledger.snapshot()
     write(runtime / 'ledger-final.json', snapshot)
     uncreated = [c for c in order if tuple(c) not in {(r['case_id'], r['variant']) for r in rows}]
+    technical = (continuation.get('technical_attempts', [continuation.get('failed_attempt')])
+                 if continuation else [])
+    technical = [row for row in technical if row is not None]
     write(runtime / 'batch-results.json', {'status': 'complete' if not stop and len(rows) == len(order) else 'stopped',
         'rows': rows, 'not_created': uncreated, 'stop_reason': stop, 'started_at': started,
         'finished_at': time.time(), 'execution_seconds': time.time() - started,
         'limits': limits, 'actual_known_tokens': snapshot['actual_known_tokens'],
         'physical_requests': snapshot['physical_sent_requests'], 'actual_known_estimated_nano_yuan': snapshot['actual_known_estimated_nano_yuan'],
-        **({'continuation_sha256': hashlib.sha256(json.dumps(manifest['continuation_contract'],
+        **({'continuation_sha256': hashlib.sha256(json.dumps(active_contract(manifest),
                 sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest(),
             'retained_observations': retained_count,
             'new_created_count': sum(bool(row.get('root_id')) for row in rows[retained_count:]),
             'new_attempted_count': len(rows) - retained_count,
             'new_confirmed_root_count': sum(bool(row.get('root_id')) for row in rows[retained_count:]),
-            'new_roots_planned': len(scheduled), 'excluded_technical_attempts': [continuation['failed_attempt']],
-            'total_root_attempts': len(rows) + 1,
+            'new_roots_planned': len(scheduled), 'excluded_technical_attempts': technical,
+            'total_root_attempts': len(rows) + len(technical),
             'primary_measurement_cells': len(order),
             'same_original_clock': True} if continuation else {})})
     print(json.dumps({'event': 'batch_end', 'created': len(rows), 'not_created': len(uncreated), 'stop_reason': stop,

@@ -63,12 +63,51 @@ def initialize_scope_session(manifest, started_at, *, clock=time.time):
     return session
 
 
+def _active_contract(manifest):
+    """保持旧grant字段格式，但绑定当前唯一的续跑合同。"""
+    if 'completion_contract' in manifest:
+        if 'continuation_contract' in manifest:
+            raise PermissionError('PAIR_TWO_CONTINUATION_CONTRACTS_FORBIDDEN')
+        return manifest['completion_contract']
+    return manifest['continuation_contract']
+
+
+def _financial_only(continuation):
+    return bool(continuation and continuation['clock'].get('policy') == 'financial_only')
+
+
+def _retained_cell(manifest, case_id, variant):
+    """旧格只读原目录；不得复制到本批冒充新执行。"""
+    if 'completion_contract' not in manifest:
+        return None
+    from agent_final_completion import retained_cell
+    return retained_cell(manifest, case_id, variant)
+
+
+def _prior_pair_manifest(manifest, offset, continuation):
+    if 'completion_contract' not in manifest:
+        return continuation['anchor_manifest']
+    from agent_final_completion import prior_pair_manifest
+    original = prior_pair_manifest(manifest, offset)
+    if original is None:
+        raise PermissionError('PAIR_RETAINED_REVIEW_OWNER_REQUIRED')
+    return original
+
+
+def _cell_origin(manifest, case_id, variant):
+    retained = _retained_cell(manifest, case_id, variant)
+    if retained:
+        return Path(retained['cell_root']), retained['source_manifest'], retained
+    return Path(manifest['runtime_root']) / 'cells' / (case_id + '-' + variant), manifest, None
+
+
 def _prior_reviews(manifest, position, continuation, clock):
-    """旧两对仍按原manifest核验，新配对只接受当前控制目录的真实审阅。"""
+    """保留配对按各自原manifest核验，混合与新配对使用当前真实审阅。"""
     order = manifest['execution_order']
     retained = continuation['retained_count'] if continuation else 0
     for offset in range(0, position // 2 * 2, 2):
-        active = continuation['anchor_manifest'] if offset < retained else manifest
+        active = (_prior_pair_manifest(manifest, offset, continuation)
+                  if offset + 1 < retained else manifest)
         prior = order[offset][0]
         directory = Path(active['semantic_gate_root']) / prior
         challenge = read_json(directory / 'challenge-private.json')
@@ -88,7 +127,7 @@ def _preceding_cell(manifest, position, continuation):
     if not (position % 2 or (continuation and position > first_new)):
         return
     case, variant = manifest['execution_order'][position - 1]
-    cell = Path(manifest['runtime_root']) / 'cells' / (case + '-' + variant)
+    cell, _source, retained = _cell_origin(manifest, case, variant)
     result, view = read_json(cell / 'result.json'), read_json(cell / 'task-view.json')
     if (result.get('status') != 'executed' or not result.get('root_id')
             or view.get('task_id') != result['root_id'] or view.get('status') not in {'completed', 'partial'}):
@@ -97,6 +136,10 @@ def _preceding_cell(manifest, position, continuation):
         native = read_json(cell / 'model-calls.json')
         if any(row.get('status') != 'succeeded' for row in native):
             raise PermissionError('preceding new cell contains a technical model failure')
+        if retained and (retained.get('physical_receipts_verified') is not True
+                or retained.get('native_status_counts') != {'succeeded': len(native)}
+                or retained.get('physical_status_counts') != {'settled': len(native)}):
+            raise PermissionError('preceding retained cell receipts are not reconciled')
 
 
 def issue_cell_grant(manifest, case_id, variant, deadline):
@@ -127,11 +170,17 @@ def issue_cell_grant(manifest, case_id, variant, deadline):
         'source_contract_sha256': sha256(canonical(paired_source_contract(manifest))),
         'cell_absolute_deadline': deadline, 'grant_nonce': secrets.token_hex(32)}
     if continuation:
-        if not time.time() < deadline <= continuation['clock']['model_absolute_deadline']:
-            raise PermissionError('continuation grant outside original model deadline')
+        now = time.time()
+        if (type(deadline) not in (int, float) or not math.isfinite(deadline)
+                or not now < deadline
+                or (_financial_only(continuation)
+                    and deadline > now + manifest['ledger_limits']['root_seconds'])
+                or (not _financial_only(continuation)
+                    and deadline > continuation['clock']['model_absolute_deadline'])):
+            raise PermissionError('continuation grant outside authorized finite root deadline')
         value.update(attempt_id=secrets.token_hex(32),
             attempt_kind='technical_retry' if position == continuation['retained_count'] else 'first_attempt',
-            continuation_sha256=sha256(canonical(manifest['continuation_contract'])))
+            continuation_sha256=sha256(canonical(_active_contract(manifest))))
     write_new(grants / (str(position) + '.json'), value)
     return value
 
@@ -162,10 +211,15 @@ def validate_prior_pair_gates(manifest, case_id, variant, *, clock=time.time):
         if continuation:
             extras |= {'attempt_id'}
             expected.update(attempt_kind='technical_retry' if position == continuation['retained_count'] else 'first_attempt',
-                continuation_sha256=sha256(canonical(manifest['continuation_contract'])))
+                continuation_sha256=sha256(canonical(_active_contract(manifest))))
             if (not isinstance(grant.get('attempt_id'), str) or len(grant['attempt_id']) != 64
                     or any(c not in '0123456789abcdef' for c in grant['attempt_id'])
-                    or grant['cell_absolute_deadline'] > continuation['clock']['model_absolute_deadline']):
+                    or type(grant.get('cell_absolute_deadline')) not in (int, float)
+                    or not math.isfinite(grant['cell_absolute_deadline'])
+                    or (_financial_only(continuation)
+                        and grant['cell_absolute_deadline'] > clock() + manifest['ledger_limits']['root_seconds'])
+                    or (not _financial_only(continuation)
+                        and grant['cell_absolute_deadline'] > continuation['clock']['model_absolute_deadline'])):
                 raise PermissionError('continuation attempt identity or deadline invalid')
         if (set(grant) != set(expected) | extras
                 or any(grant.get(k) != v for k, v in expected.items())
@@ -232,10 +286,9 @@ def pair_identity(manifest, case_id, rows):
     else:
         identity['material'] = materials[0]
     answers = {}
-    runtime = Path(manifest['runtime_root'])
     for row in matching:
         variant = row['variant']
-        cell = runtime / 'cells' / (case_id + '-' + variant)
+        cell, source_manifest, retained = _cell_origin(manifest, case_id, variant)
         result = read_json(cell / 'result.json')
         view = read_json(cell / 'task-view.json')
         if (not row.get('root_id') or result.get('root_id') != row['root_id']
@@ -250,6 +303,18 @@ def pair_identity(manifest, case_id, rows):
         hashes = {name: sha256((cell / name).read_bytes()) for name in filenames}
         identity['answers'][variant] = {'root_id': row['root_id'], 'answer_sha256': sha256(answer),
             'backend_status': view['status'], 'files': hashes}
+        if 'completion_contract' in manifest:
+            expected_loaded = source_manifest['loaded_prompt_contract'][variant]
+            if result.get('loaded_supervisor') != expected_loaded:
+                raise PermissionError('PAIR_CELL_LOADED_SOURCE_IDENTITY_MISMATCH')
+            if retained and retained.get('physical_receipts_verified') is not True:
+                raise PermissionError('PAIR_RETAINED_PHYSICAL_RECEIPTS_REQUIRED')
+            identity['answers'][variant]['source_provenance'] = {
+                'cell_root': str(cell), 'manifest_sha256': manifest_identity(source_manifest),
+                'source_contract_sha256': sha256(canonical(paired_source_contract(source_manifest))),
+                'loaded_prompt_contract_sha256': sha256(canonical(expected_loaded)),
+                'retained': retained is not None,
+            }
         answers[variant] = answer
     return identity, answers, case
 
@@ -269,7 +334,8 @@ def prepare_pair_gate(manifest, case_id, rows, manifest_sha256, *, clock=time.ti
     write_new(directory / 'challenge-private.json', challenge)
     packet_answers = []
     for v in ('A', 'B'):
-        actions_path = Path(manifest['runtime_root']) / 'cells' / (case_id + '-' + v) / 'actions.json'
+        cell, _source, _retained = _cell_origin(manifest, case_id, v)
+        actions_path = cell / 'actions.json'
         materials = identity.get('materials', [identity.get('material')])
         fallback_source = materials[0]['pdf_sha256'] if len(materials) == 1 and materials[0] else None
         packet_answers.append({'anonymous_id': ids[v], 'answer_sha256': sha256(answers[v]),
@@ -397,17 +463,22 @@ def evaluate_pair_review(manifest, case_id, rows, manifest_sha256, challenge, re
 
 
 def wait_pair_review(manifest, case_id, rows, manifest_sha256, deadline, *, clock=time.time, sleep=time.sleep):
-    """计时不暂停；缺审阅到截止即停，不重新创建任务或账本。"""
+    """保留逐对真实审阅；仅显式财务封顶合同允许无全局等待截止。"""
+    if deadline is None:
+        from agent_final_continuation import validate_continuation
+        if not _financial_only(validate_continuation(manifest)):
+            raise PermissionError('PAIR_UNBOUNDED_WAIT_REQUIRES_FINANCIAL_ONLY_COMPLETION')
     challenge = prepare_pair_gate(manifest, case_id, rows, manifest_sha256, clock=clock)
     directory = Path(manifest['semantic_gate_root']) / case_id
     review_path = directory / 'review.json'
-    while clock() < deadline:
+    while deadline is None or clock() < deadline:
         if review_path.exists() or review_path.is_symlink():
             review = read_json(review_path)
             decision = evaluate_pair_review(manifest, case_id, rows, manifest_sha256, challenge, review, clock=clock)
             write_new(directory / 'decision.json', decision)
             return decision
-        sleep(min(manifest['pair_review_policy']['poll_seconds'], max(0, deadline - clock())))
+        pause = manifest['pair_review_policy']['poll_seconds']
+        sleep(pause if deadline is None else min(pause, max(0, deadline - clock())))
     decision = {'status': 'stopped', 'stop_reasons': ['semantic_review_deadline'],
         'challenge_sha256': sha256(canonical(challenge)), 'quality_equivalent': False}
     write_new(directory / 'decision.json', decision)

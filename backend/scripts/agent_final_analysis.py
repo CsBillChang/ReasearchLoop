@@ -21,6 +21,8 @@ CATEGORIES = {'QA':'单篇问答','NUM':'表格与实验分析','CROSS':'跨论�
               'REV':'定向核验修订','MEM':'Memory接续','DEEP':'完整精读保存'}
 TERMINAL = {'completed','partial','failed','cancelled','needs_input'}
 FINAL_CONTROLLER = {'exited','model_hard_deadline','cancelled','controller_error','refused_model_deadline_already_passed'}
+COMPLETION_EVALUATION_POLICY = {'version':'agent_completion_descriptive_v1',
+    'minimum_B_full':None,'retain_quality_comparison':True}
 
 
 def canonical(obj):
@@ -113,15 +115,36 @@ def closure_status(reader,root,manifest):
             'execute_authorization_closed':bool(auth and auth.get('status')=='closed' and current
                 and current.get('approved') is False and current.get('allowed_modes')==[]),
             'owned_vector_stopped':bool(vector and (vector.get('identity') or {}).get('running') is False)}
-    closed=all(checks.values())
     ends=[stamp(x) for x in [(controller or {}).get('wrapper_finalized_at'),(controller or {}).get('finished_at'),
                              (auth or {}).get('at'),(vector or {}).get('at')]]
     end=max((v for v in ends if v is not None),default=None)
+    financial_only='completion_contract' in manifest
+    if financial_only:
+        stopped=stamp((controller or {}).get('model_processes_stopped_at'))
+        cleanup_started=stamp((controller or {}).get('cleanup_started_at'))
+        cleanup_deadline=stamp((controller or {}).get('cleanup_deadline_after_stop'))
+        started=stamp((controller or {}).get('started_at'))
+        checks['controller_terminal']=bool(controller and controller.get('status') in FINAL_CONTROLLER|{'financial_budget_halt'})
+        checks.update(financial_only_controller_policy=bool(controller and controller.get('policy')=='financial_only'),
+            bounded_cleanup_contract=((manifest.get('formal_controller_contract') or {}).get('policy')=='financial_only'
+                and (manifest.get('formal_controller_contract') or {}).get('cleanup_reserve_seconds')==300),
+            bounded_cleanup_observed=bool(stopped is not None and cleanup_deadline is not None
+                and cleanup_started is not None and started is not None and started<=cleanup_started<=stopped
+                and abs(cleanup_deadline-cleanup_started-300)<.000001
+                and end is not None and stopped<=end<=cleanup_deadline),
+            cleanup_steps_passed=bool(controller and controller.get('cleanup_all_passed') is True),
+            financial_only_authorization_closed=bool(auth and current and auth.get('policy')=='financial_only'
+                and auth.get('no_resume_or_resend') is True and stamp(auth.get('round_started_at')) is not None
+                and auth.get('round_started_at')==current.get('round_started_at')
+                and auth.get('round_started_at')==(manifest['completion_contract'].get('clock') or {}).get('round_started_at')))
+    closed=all(checks.values())
     return {'closed':closed,'checks':checks,'closed_at_unix':end,'controller_status':(controller or {}).get('status'),
             'cleanup_all_passed':(controller or {}).get('cleanup_all_passed'),
             'wrapper_finished_before_original_total_deadline':(controller or {}).get('wrapper_finished_before_original_total_deadline'),
             'original_absolute_total_deadline':(controller or {}).get('original_absolute_total_deadline'),
             'controller_cleanup_deadline_is_not_new_authorized_deadline':True,
+            'timing_policy':'financial_only' if financial_only else 'absolute_deadline',
+            'cleanup_deadline_after_stop':(controller or {}).get('cleanup_deadline_after_stop'),
             'controller':controller}
 
 
@@ -178,7 +201,8 @@ def latency(root,events,all_tasks,export,controller):
             'updated_at_never_substitutes_for_delivery':True,'issues':issue}
 
 
-def semantic_score(reader,root,manifest,case_id,variant,root_id,answer):
+def semantic_score(reader,root,manifest,case_id,variant,root_id,answer,*,artifact_cell=None,
+                   source_manifest=None):
     directory=Path(manifest['semantic_gate_root'])/case_id
     challenge=reader.json(directory/'challenge-private.json')
     review=reader.json(directory/'review.json');decision=reader.json(directory/'decision.json')
@@ -195,8 +219,19 @@ def semantic_score(reader,root,manifest,case_id,variant,root_id,answer):
     if decision.get('review_sha256')!=sha(canonical(review)) or decision.get('challenge_sha256')!=sha(canonical(challenge)):
         issues.append('decision_review_mismatch')
     if identity.get('root_id')!=root_id or identity.get('answer_sha256')!=expected:issues.append('review_answer_identity_mismatch')
+    cell=Path(artifact_cell) if artifact_cell is not None else Path(manifest['runtime_root'])/'cells'/(case_id+'-'+variant)
+    if 'completion_contract' in manifest:
+        # 混合配对的旧B保留原路径与原源码身份，不能借当前manifest改名为新运行。
+        owner=source_manifest or manifest
+        from harness_ab_experiment import paired_source_contract
+        origin={'cell_root':str(cell),'manifest_sha256':sha(canonical({k:v for k,v in owner.items()
+                 if k!='cell_absolute_deadline'})),
+                'source_contract_sha256':sha(canonical(paired_source_contract(owner))),
+                'loaded_prompt_contract_sha256':sha(canonical(owner['loaded_prompt_contract'][variant])),
+                'retained':artifact_cell is not None}
+        if identity.get('source_provenance')!=origin:issues.append('review_artifact_source_provenance_mismatch')
     for name,expected_file in identity.get('files',{}).items():
-        path=Path(manifest['runtime_root'])/'cells'/(case_id+'-'+variant)/name
+        path=cell/name
         if not path.exists() or sha(reader.bytes(path))!=expected_file:issues.append('review_export_file_mismatch:'+name)
     grades=[g for g in review.get('reviews',[]) if g.get('anonymous_id')==challenge.get('anonymous_ids',{}).get(variant)]
     if len(grades)!=1:return dict(empty,score_status='invalid_review_binding',issues=issues+['review_grade_missing_or_duplicate'])
@@ -215,9 +250,10 @@ def semantic_score(reader,root,manifest,case_id,variant,root_id,answer):
           'pair_quality_equivalent':decision.get('quality_equivalent') is True,'issues':[]}
 
 
-def analyze_cell(reader,root,manifest,case_id,variant,ledger,controller):
+def analyze_cell(reader,root,manifest,case_id,variant,ledger,controller,*,artifact_cell=None,
+                 score_manifest=None):
     rates=(ledger or {}).get('metadata',{}).get('config',{})
-    cell=Path(manifest['runtime_root'])/'cells'/(case_id+'-'+variant)
+    cell=Path(artifact_cell) if artifact_cell is not None else Path(manifest['runtime_root'])/'cells'/(case_id+'-'+variant)
     result=reader.json(cell/'result.json',{})
     exported_root=reader.json(cell/'root-row.json',{})
     view=reader.json(cell/'task-view.json',{})
@@ -303,7 +339,9 @@ def analyze_cell(reader,root,manifest,case_id,variant,ledger,controller):
                family_roles=dict(Counter(x.get('role','unspecified') for x in family)),
                family_task_ids=[x['task_id'] for x in family])
     answer=(decoded(task.get('result_json'),{}) or {}).get('answer_markdown')
-    row['score']=semantic_score(reader,root,manifest,case_id,variant,root_id,answer)
+    scoring=score_manifest or manifest
+    row['score']=semantic_score(reader,root,scoring,case_id,variant,root_id,answer,
+        artifact_cell=cell if artifact_cell is not None else None,source_manifest=manifest)
     row['issues']+=row['score']['issues']
     actions=reader.table(db,'actions') or []
     row['failed_actions']=[]
@@ -323,7 +361,7 @@ def delta(a,b):
     return {'A':a,'B':b,'B_minus_A':b-a,'B_minus_A_percent':100*(b-a)/a,'reduction_percent':100*(1-b/a)}
 
 
-def aggregate(rows):
+def aggregate(rows,*,require_delivery_ready=False):
     """固定题等权，不平均各题百分比；不把缺失格排除后冒充全矩阵。"""
     by_case=defaultdict(dict)
     for r in rows:
@@ -335,7 +373,9 @@ def aggregate(rows):
         record={'case_id':case,'category':next(iter(group.values()))['category']}
         for variant in ['A','B']:
             own=[group.get((round_,variant)) for round_ in [1,2]]
-            for name,get in [('latency_seconds',lambda r:r['end_to_end'].get('seconds')),('tokens',lambda r:r.get('actual_task_family_tokens'))]:
+            for name,get in [('latency_seconds',lambda r:r['end_to_end'].get('seconds')
+                    if not require_delivery_ready or r['end_to_end'].get('delivery_ready_observed') is True else None),
+                    ('tokens',lambda r:r.get('actual_task_family_tokens'))]:
                 vals=[get(x) if x else None for x in own]
                 record[variant+'_'+name]=statistics.mean(vals) if len(vals)==2 and all(v is not None for v in vals) else None
         record['latency_change']=delta(record['A_latency_seconds'],record['B_latency_seconds'])
@@ -353,7 +393,8 @@ def aggregate(rows):
     for case,group in by_case.items():
         for round_ in [1,2]:
             a,b=group.get((round_,'A')),group.get((round_,'B'))
-            if a and b and all(x['score'].get('whole_answer_quality')=='full' and x.get('usage_reconciled') for x in [a,b]):
+            if a and b and all(x['score'].get('whole_answer_quality')=='full' and x.get('usage_reconciled')
+                 and (not require_delivery_ready or x['end_to_end'].get('delivery_ready_observed') is True) for x in [a,b]):
                 matched.append({'case_id':case,'round':round_,'latency_change':delta(a['end_to_end'].get('seconds'),b['end_to_end'].get('seconds')),
                                 'token_change':delta(a.get('actual_task_family_tokens'),b.get('actual_task_family_tokens'))})
     sensitivity={'matched_full_pairs':len(matched),'pairs':matched,'meaning':'双方full的共同题轮敏感性，不能替换固定96格主分母。'}
@@ -363,6 +404,7 @@ def aggregate(rows):
     local=[{'case_id':x['case_id'],'category':x['category'],'latency_change':x['latency_change'],'token_change':x['token_change']} for x in means
            if any(x[k] and x[k]['B_minus_A']>0 for k in ['latency_change','token_change'])]
     return {'overall':overall,'categories':categories,'case_means':means,'matched_full_sensitivity':sensitivity,
+            'latency_population':'observed_complete_delivery_only' if require_delivery_ready else 'observed_terminal_duration',
             'comparable_case_count':sum(x['latency_change'] is not None and x['token_change'] is not None for x in means),
             'local_regressions':local}
 
@@ -416,7 +458,8 @@ def ledger_totals(ledger):
     """已结算与未知预留分别汇总；账本不存在时保持null。"""
     if ledger is None:
         return {'known':dict.fromkeys(('tokens','requests','nano_yuan'),None),
-                'held':dict.fromkeys(('tokens','requests','nano_yuan'),None),'pending':None,'status_counts':None}
+                'held':dict.fromkeys(('tokens','requests','nano_yuan'),None),'pending':None,'status_counts':None,
+                'settled_request_count':None,'physical_sent_request_count':None}
     raw=ledger['reservations'];settled=[r for r in raw if r['status']=='settled']
     valid=all(all(nonnegative(r.get(k)) for k in ('actual_input','actual_output','actual_tokens','actual_nano'))
               and r['actual_input']+r['actual_output']==r['actual_tokens'] for r in settled)
@@ -428,7 +471,72 @@ def ledger_totals(ledger):
             'held':{'tokens':sum(r['actual_tokens'] if r['status']=='settled' else r['reserved_tokens'] for r in raw if r['status']!='not_sent') if held_valid else None,
                     'requests':sum(r['status']!='not_sent' for r in raw),
                     'nano_yuan':sum(r['actual_nano'] if r['status']=='settled' else r['reserved_nano'] for r in raw if r['status']!='not_sent') if held_valid else None},
-            'pending':pending,'status_counts':dict(Counter(r['status'] for r in raw))}
+            'pending':pending,'status_counts':dict(Counter(r['status'] for r in raw)),
+            'settled_request_count':len(settled),'physical_sent_request_count':sum(r.get('sent_at') is not None for r in raw)}
+
+
+def combined_ledger_totals(ledgers):
+    """只合并各批自身reservations；不重复叠加其metadata中的历史carry。"""
+    items=[ledger_totals(value) for value in ledgers]
+    def total(group,key):
+        values=[row[group][key] for row in items]
+        return sum(values) if all(value is not None for value in values) else None
+    known={key:total('known',key) for key in ('tokens','requests','nano_yuan')}
+    settled=[row['settled_request_count'] for row in items]
+    known['requests']=sum(settled) if all(value is not None for value in settled) else None
+    counts=Counter()
+    for row in items:counts.update(row['status_counts'] or {})
+    return {'known':known,'held':{key:total('held',key) for key in ('tokens','requests','nano_yuan')},
+            'pending':[reservation for row in items for reservation in row['pending'] or []]
+                       if all(row['pending'] is not None for row in items) else None,
+            'status_counts':dict(counts),'settled_request_count':known['requests'],
+            'physical_sent_request_count':sum(row['physical_sent_request_count'] for row in items)
+                if all(row['physical_sent_request_count'] is not None for row in items) else None}
+
+
+def completion_artifacts(reader,manifest,context):
+    """按每条旧格的原manifest/SQLite/账本读取，未评分旧B才使用新混合配对审核。"""
+    owners={};ledgers={};closures={}
+    for value in context['closed_ledger_roots']:
+        root=Path(value)
+        owner=reader.json(root/'manifest.formal.json')
+        if not isinstance(owner,dict) or Path(owner['experiment_root'])!=root:
+            raise ValueError('completion source manifest geometry mismatch')
+        owners[str(root)]=owner
+        ledgers[str(root)]=read_ledger(reader,Path(owner['runtime_root'])/'budget.sqlite3')
+        closures[str(root)]=closure_status(reader,root,owner)
+    def artifact(item,technical=False):
+        provenance=item['provenance'];root=Path(provenance['anchor_root'])
+        owner=owners[str(root)];cell=Path(provenance['cell_root']);key=(item['case_id'],item['variant'])
+        if cell!=Path(owner['runtime_root'])/'cells'/(key[0]+'-'+key[1]):
+            raise ValueError('completion cell source geometry mismatch')
+        source_path=item.get('source_manifest_path',provenance.get('source_manifest_path'))
+        source_sha=item.get('source_manifest_sha256',provenance.get('source_manifest_sha256'))
+        if source_path is not None and (Path(source_path)!=root/'manifest.formal.json'
+                or source_sha is None or sha(reader.bytes(source_path))!=source_sha):
+            raise ValueError('completion source manifest identity mismatch')
+        score_owner=owner
+        if not technical and item.get('quality') is None:
+            score_owner=manifest
+        row=analyze_cell(reader,root,owner,*key,ledgers[str(root)],closures[str(root)]['controller'],
+                         artifact_cell=cell,score_manifest=score_owner)
+        row['continuation_provenance']={'retained':not technical,**provenance}
+        row['original_batch_record']=item
+        if not technical and item.get('quality') is not None and row['score'].get('whole_answer_quality')!=item['quality']:
+            raise ValueError('retained original grade changed')
+        if technical:
+            row.update(attempt_kind='technical_attempt',observed_attempt_outcome=item.get('attempt_outcome',item.get('status')),
+                       native_status_preserved=row['status'])
+        return row
+    retained={(item['case_id'],item['variant']):artifact(item) for item in context['retained_rows']}
+    technical=[artifact(item,True) for item in context['technical_attempts']]
+    prior=combined_ledger_totals(list(ledgers.values()))
+    pending=[]
+    for root,ledger in ledgers.items():
+        for item in ledger_totals(ledger)['pending'] or []:
+            pending.append({'anchor_root':root,**item,'outcome':'unconfirmed_no_resend'})
+    prior['pending']=pending if prior['pending'] is not None else None
+    return retained,technical,prior,closures
 
 
 def new_allowance(limits,history):
@@ -460,13 +568,20 @@ def attempt_reliability(primary,technical):
             'all_attempts_created':sum(r.get('root_id') is not None for r in primary+technical),
             'first_attempts':counts(first),'first_attempts_by_variant':{v:counts([r for r in first if r['variant']==v]) for v in ('A','B')},
             'technical_attempts':len(technical),'retry_does_not_erase_first_attempt':True,
+            'technical_attempt_outcomes':dict(Counter(r.get('observed_attempt_outcome') or r['status'] for r in technical)),
             'delivery_ready_is_not_quality_full':True}
 
 
 def summarize(reader,root,manifest,progress=False):
     """统一汇总原完整矩阵和显式续跑，金融累计与主指标来源分别核对。"""
     from agent_final_continuation import validate_continuation
-    context=validate_continuation(manifest)
+    completion='completion_contract' in manifest
+    if completion:
+        from agent_final_completion import validate_completion
+        context=validate_completion(manifest)
+        if manifest.get('evaluation_policy')!=COMPLETION_EVALUATION_POLICY:
+            raise PermissionError('completion evaluation policy must explicitly remove the fixed full-count floor')
+    else:context=validate_continuation(manifest)
     root=Path(root)
     closure=closure_status(reader,root,manifest)
     if not progress and not closure['closed']:raise RuntimeError('formal batch not independently closed; final metrics forbidden')
@@ -480,9 +595,13 @@ def summarize(reader,root,manifest,progress=False):
     issues=[]
     if ledger is None:issues.append('generation_ledger_not_created')
     elif config.get('carried_usage',dict.fromkeys(history,0))!=expected_carry:issues.append('historical_carry_mismatch')
+    if completion and ledger is not None and config.get('enforce_batch_seconds') is not False:
+        issues.append('financial_only_ledger_policy_mismatch')
     if manifest['ledger_limits'].get('carried_usage',dict.fromkeys(history,0))!=expected_carry:issues.append('manifest_carry_mismatch')
-    old_ledger=None;technical=[];retained={}
-    if context:
+    old_ledger=None;technical=[];retained={};prior_closures={}
+    if completion:
+        retained,technical,old_totals,prior_closures=completion_artifacts(reader,manifest,context)
+    elif context:
         old_root=Path(context['anchor_root'])
         old_ledger=read_ledger(reader,Path(anchor['runtime_root'])/'budget.sqlite3')
         old_closure=closure_status(reader,old_root,anchor)
@@ -497,6 +616,7 @@ def summarize(reader,root,manifest,progress=False):
         failed=analyze_cell(reader,old_root,anchor,*key,old_ledger,old_closure['controller'])
         failed.update(attempt_kind='technical_attempt',original_batch_record=item,continuation_provenance={'retained':False,**item['provenance']})
         technical.append(failed)
+    if context:
         expected_new={tuple(x) for x in context['new_execution_order']}
         if set(retained)&expected_new or set(retained)|expected_new!={tuple(x) for x in order}:
             raise ValueError('retained/new primary matrix does not partition frozen96')
@@ -518,15 +638,18 @@ def summarize(reader,root,manifest,progress=False):
         if r['score'].get('whole_answer_quality')=='full' and r['end_to_end'].get('delivery_ready_observed') is not True:
             issues.append(r['expanded_case_id']+'-'+r['variant']+':full_grade_without_observed_complete_delivery')
     new_rows_complete=all(r['root_id'] is not None and r.get('usage_reconciled') is True for r in current_rows)
-    totals=ledger_totals(ledger);old_totals=ledger_totals(old_ledger) if context else None
+    totals=ledger_totals(ledger)
+    if not completion:old_totals=ledger_totals(old_ledger) if context else None
     known=totals['known'].copy();charged=totals['held'].copy();pending=totals['pending']
+    if completion:known['requests']=totals['settled_request_count']
     if known['tokens'] is not None:
         settled_cells=sum(r.get('verified_settled_tokens_lower_bound') or 0 for r in current_rows if r['root_id'])
         if settled_cells!=known['tokens']:issues.append('verified_cell_sum_does_not_equal_settled_ledger_sum')
     if context:
         clock=context['clock'];origin=stamp(clock['round_started_at']);prior_seconds=clock['pre_round_carried_seconds']
-        if old_totals['pending'] is None or old_totals['pending']:issues.append('anchor_physical_usage_incomplete')
-        if old_totals['known']!= {k:expected_carry[k]-history[k] for k in ('tokens','requests','nano_yuan')}:
+        if not completion and (old_totals['pending'] is None or old_totals['pending']):issues.append('anchor_physical_usage_incomplete')
+        financial_basis=old_totals['held'] if completion else old_totals['known']
+        if financial_basis!= {k:expected_carry[k]-history[k] for k in ('tokens','requests','nano_yuan')}:
             issues.append('anchor_financial_carry_mismatch')
     else:
         origin=stamp((ledger or {}).get('metadata',{}).get('started_at'))
@@ -536,7 +659,10 @@ def summarize(reader,root,manifest,progress=False):
     if origin is None:issues.append('original_round_clock_origin_missing')
     if closure['closed'] and elapsed is None:issues.append('closed_round_wall_clock_unmeasurable')
     known['seconds']=elapsed;charged['seconds']=elapsed
-    cumulative={k:expected_carry[k]+v if v is not None else None for k,v in known.items() if k!='seconds'}
+    known_basis={k:history[k]+old_totals['known'][k] if old_totals['known'][k] is not None else None
+                 for k in ('tokens','requests','nano_yuan')} if completion else expected_carry
+    cumulative={k:known_basis[k]+v if v is not None and known_basis[k] is not None else None
+                for k,v in known.items() if k!='seconds'}
     cumulative_held={k:expected_carry[k]+v if v is not None else None for k,v in charged.items() if k!='seconds'}
     cumulative['seconds']=prior_seconds+elapsed if elapsed is not None else None
     cumulative_held['seconds']=cumulative['seconds']
@@ -544,59 +670,99 @@ def summarize(reader,root,manifest,progress=False):
                  if known[k] is not None and (not context or old_totals['known'][k] is not None) else None
                  for k in ('tokens','requests','nano_yuan')}
     round_known['seconds']=elapsed
-    limits=anchor['ledger_limits']
+    limits=manifest['ledger_limits'] if completion else anchor['ledger_limits']
+    financial_only=bool(completion and context['clock'].get('policy')=='financial_only')
     cap={'tokens':limits['batch_tokens'],'requests':limits['batch_requests'],
          'nano_yuan':int(Decimal(str(limits['batch_yuan']))*Decimal(1000000000)),
-         'seconds':limits['batch_seconds']}
-    cap_checks={k:None if cumulative_held[k] is None else cumulative_held[k]<=cap[k] for k in cap}
+         'seconds':None if financial_only else limits['batch_seconds']}
+    cap_checks={k:None if cumulative_held[k] is None or cap[k] is None else cumulative_held[k]<=cap[k] for k in cap}
     if any(value is False for value in cap_checks.values()):issues.append('original_cumulative_budget_exceeded')
     counts={v:{'planned':48,'created':sum(r['root_id'] is not None for r in rows if r['variant']==v),
               'execution_status':dict(Counter(r['status'] for r in rows if r['variant']==v)),
               'quality':dict(Counter(r['score'].get('whole_answer_quality') or ('not_created' if not r['root_id'] else 'not_scored') for r in rows if r['variant']==v))} for v in ('A','B')}
-    stats=aggregate(rows);complete=all(r['root_id'] is not None and r['status'] in TERMINAL for r in rows)
+    stats=aggregate(rows,require_delivery_ready=completion)
+    terminal_stats=aggregate(rows) if completion else None
+    complete=all(r['root_id'] is not None and r['status'] in TERMINAL for r in rows)
     full={v:counts[v]['quality'].get('full',0) for v in ('A','B')}
     scores_complete=all(r['score'].get('whole_answer_quality') in {'full','partial_usable','unusable','failed'} for r in rows)
     severe=[r['expanded_case_id']+'-'+r['variant'] for r in rows if any(r['score'].get(k) is True for k in ('unauthorized_delivery_write','forged_success'))]
-    quality_ok=bool(complete and scores_complete and full['B']>=max(44,full['A']) and not severe)
+    required_full=full['A'] if completion else max(44,full['A'])
+    relative_quality=bool(scores_complete and full['B']>=full['A'])
+    quality_ok=bool(complete and scores_complete and full['B']>=required_full and not severe)
     changes={k:stats['overall'][k]['change'] for k in ('latency_seconds','tokens')}
     both_lower=all(changes[k] and changes[k]['B_minus_A']<0 for k in changes)
     sensitivity=stats['matched_full_sensitivity']
     sensitivity_lower=bool(sensitivity['matched_full_pairs'] and all(sensitivity[k] and sensitivity[k]['B_minus_A']<0 for k in ('latency_seconds','tokens')))
-    success=bool(not progress and closure['closed'] and closure['cleanup_all_passed'] and complete and quality_ok
+    carried_pending=old_totals['pending'] if completion else []
+    primary_supported=bool(not progress and closure['closed'] and closure['cleanup_all_passed'] and complete and quality_ok
                  and not issues and pending==[] and both_lower and sensitivity_lower)
+    all_attempt_actual_complete=bool(pending==[] and (carried_pending==[] and new_rows_complete
+        and all(r.get('usage_reconciled') is True for r in technical)
+        and all(known[key] is not None for key in ('tokens','requests','nano_yuan')) if completion else True))
+    success=bool(primary_supported and all_attempt_actual_complete)
+    primary_token_complete=bool(complete and all(r.get('usage_reconciled') is True for r in rows))
+    primary_terminal_complete=bool(complete and all(type(r['end_to_end'].get('seconds')) in (int,float)
+        and math.isfinite(r['end_to_end']['seconds']) and r['end_to_end']['seconds']>=0 for r in rows))
+    primary_measurement_complete=bool(primary_token_complete and primary_terminal_complete)
+    allowance=new_allowance(limits,history)
+    if financial_only:allowance['seconds']=None
+    pending_all=None if pending is None or carried_pending is None else carried_pending+pending
     return {'status':'progress_only' if progress else 'closed_complete_matrix' if complete else 'closed_incomplete_matrix',
             'analysis_at':datetime.now(timezone.utc).isoformat(),'formal_roots_planned':96,'base_cases':24,'rounds':2,
             'baseline':'frozen deployment-equivalent source under common controlled conditions',
             'candidate':'frozen prompt candidate under the same controlled conditions',
             'counts':counts,'created_roots':sum(r['root_id'] is not None for r in rows),
+            'primary_measurement_complete':primary_measurement_complete,
+            'primary_token_measurement_complete':primary_token_complete,
+            'primary_terminal_duration_measurement_complete':primary_terminal_complete,
+            'evaluation_policy':manifest.get('evaluation_policy') if completion else None,
             'batch_status':(reader.json(Path(manifest['runtime_root'])/'batch-results.json',{}) or {}).get('status'),
             'batch_stop_reason':(reader.json(Path(manifest['runtime_root'])/'batch-results.json',{}) or {}).get('stop_reason'),
             'closure':{k:v for k,v in closure.items() if k!='controller'},
             'accounting':{'history_carried_once':history,'current_ledger_carried_once':expected_carry,
                 'prior_round_known_settled_usage':old_totals['known'] if context else None,
+                'prior_round_charged_or_reserved':old_totals['held'] if context else None,
                 'new_known_settled_record_usage':known,'new_charged_or_reserved':charged,
                 'round_all_attempt_known_usage':round_known,
                 'cumulative_known_settled_record_usage':cumulative,'cumulative_charged_or_reserved':cumulative_held,
-                'unknown_or_pending_count':len(pending) if pending is not None else None,
+                'unknown_or_pending_count':len(pending_all) if pending_all is not None else None,
+                'new_unknown_or_pending_count':len(pending) if pending is not None else None,
+                'prior_unknown_or_pending_count':len(carried_pending) if carried_pending is not None else None,
+                'prior_unknown_or_pending_reservations':carried_pending,
                 'physical_status_counts':totals['status_counts'],
+                'prior_physical_status_counts':old_totals['status_counts'] if context else None,
+                'new_physical_sent_requests':totals['physical_sent_request_count'],
+                'prior_physical_sent_requests':old_totals['physical_sent_request_count'] if context else None,
+                'all_attempt_actual_cost_complete':all_attempt_actual_complete,
                 'all_new_actual_usage_known':bool(raw is not None and new_rows_complete and not pending and not issues),
                 'new_actual_tokens_complete':known['tokens'] if raw is not None and new_rows_complete and not pending and not issues else None,
                 'origin_qualification_start':origin,'closure_at':close,'elapsed_ceil_includes_qualification_wait_scoring_cleanup':elapsed,
                 'cumulative_seconds_formula':'pre_round_carried_seconds + ceil(final_close - original_round_T0)',
                 'cost_kind':'configured_frozen_rate_estimate_not_supplier_invoice','unassigned_reservations':unassigned,
                 'ledger_halt_reason':(ledger or {}).get('metadata',{}).get('halt_reason'),
-                'new_allowance':new_allowance(anchor['ledger_limits'],history),
+                'new_allowance':allowance,
                 'original_cumulative_limits':cap,'within_original_cumulative_limits':cap_checks,
+                'timing_policy':'financial_only' if financial_only else 'absolute_deadline',
+                'global_time_limit_applicable':not financial_only,
+                'historical_batch_seconds_not_a_current_cap':limits['batch_seconds'] if financial_only else None,
+                'known_usage_excludes_unresolved_prior_reservations':completion,
                 'old_balance_does_not_authorize_replay':True},
-            'quality':{'A_full':full['A'],'B_full':full['B'],'required_B_full':max(44,full['A']),
+            'quality':{'A_full':full['A'],'B_full':full['B'],'required_B_full':required_full,
+                       'fixed_minimum_B_full':None if completion else 44,
+                       'relative_quality_non_regression':relative_quality,
                        'scores_complete':scores_complete,'quality_gate_passed':quality_ok,'severe_violation_cells':severe,
                        'completed_status_does_not_imply_full':True},
-            'statistics':stats,'efficiency_conclusion':{'authorized_by_complete_evidence':success,
+            'statistics':stats,'terminal_outcome_statistics':terminal_stats,
+            'efficiency_conclusion':{'authorized_by_complete_evidence':success,
+                'primary_comparison_supported':primary_supported,
+                'primary_comparison_scope':'fixed96_primary_observations_excluding_extra_technical_attempt_costs',
+                'all_attempt_actual_cost_complete':all_attempt_actual_complete,
                 'whole_set_both_lower':bool(both_lower),'matched_full_pair_direction_supports_both_lower':sensitivity_lower,
                 'no_success_claim_on_incomplete_matrix_or_quality_failure':True,'no_population_or_P95_claim':True},
             'rows':rows,'technical_attempts':technical,'attempt_reliability':attempt_reliability(rows,technical),
             'failure_costs':[{'case_id':r['expanded_case_id'],'variant':r['variant'],
                 'attempt_kind':r.get('attempt_kind','primary'),'status':r['status'],
+                'observed_attempt_outcome':r.get('observed_attempt_outcome'),
                 'actual_task_family_tokens':r.get('actual_task_family_tokens'),
                 'verified_settled_tokens_lower_bound':r.get('verified_settled_tokens_lower_bound'),
                 'verified_settled_nano_yuan_lower_bound':r.get('verified_settled_nano_yuan_lower_bound'),
@@ -605,6 +771,9 @@ def summarize(reader,root,manifest,progress=False):
                      or r.get('score',{}).get('whole_answer_quality')!='full')],
             'continuation':{'enabled':bool(context),'retained_roots':len(retained),
                             'new_roots_planned':len(current_rows),'primary_denominator':96,
+                            'multiple_immutable_anchors':completion,
+                            'prior_closures_preserved':{name:{k:v for k,v in old.items() if k!='controller'}
+                                                       for name,old in prior_closures.items()},
                             'technical_failure_kept_separately':bool(technical)},
             'issues':sorted(set(issues)),'input_sha256':dict(reader.hashes),'read_only_sqlite_connections':reader.connections,
             'model_calls':0,'network_calls':0,'service_operations':0,'business_source_modified':False}
@@ -620,17 +789,31 @@ def report_text(summary):
     for v in ('A','B'):
         c=summary['counts'][v]
         lines.append('|'+v+'|'+str(c['created'])+'|'+str(c['quality'].get('full',0))+'|'+json.dumps(c['quality'],ensure_ascii=False)+'|')
-    lines+=['','B full门槛 '+str(q['required_B_full'])+'/48；质量门 '+str(q['quality_gate_passed'])+'。',
+    quality_line=('本轮不设B full固定下限；A/B完整质量标签均披露。相对质量未退化 '+str(q['relative_quality_non_regression'])+
+                  '；用于等质效率结论的质量条件 '+str(q['quality_gate_passed'])+'。') if summary.get('evaluation_policy') else (
+                  'B full门槛 '+str(q['required_B_full'])+'/48；质量门 '+str(q['quality_gate_passed'])+'。')
+    lines+=['',quality_line,
              '', '|指标|A每题等权均值|B每题等权均值|B相对A变化|','|---|---:|---:|---:|']
-    for key,label in [('latency_seconds','后端端到端秒'),('tokens','任务族总Token')]:
+    for key,label in [('latency_seconds','成功交付端到端秒' if summary.get('evaluation_policy') else '后端端到端秒'),('tokens','主96格任务族总Token')]:
         obj=s['overall'][key];means=obj['equal_case_weight_mean'];d=obj['change']
         show=lambda x:'N/A' if x is None else f'{x:.3f}'
         lines.append('|'+label+'|'+show(means['A'])+'|'+show(means['B'])+'|'+('N/A' if d is None else f"{d['B_minus_A_percent']:+.2f}%")+'|')
+    if summary.get('terminal_outcome_statistics') is not None:
+        terminal=summary['terminal_outcome_statistics']['overall']['latency_seconds']
+        means=terminal['equal_case_weight_mean'];d=terminal['change']
+        lines+=['','主96格任务创建→终态耗时（包含partial/failed，非成功交付时延）：A '+show(means['A'])+
+                ' 秒；B '+show(means['B'])+' 秒；变化 '+('N/A' if d is None else f"{d['B_minus_A_percent']:+.2f}%")+'。',
+                '主96格测量完整 '+str(summary['primary_measurement_complete'])+'；全部attempt实际成本完整 '+
+                str(a['all_attempt_actual_cost_complete'])+'。旧技术attempt未决不改变主96格分母。',
+                '主96格等质效率对比得到支持 '+str(summary['efficiency_conclusion']['primary_comparison_supported'])+
+                '。该判断只覆盖主96格，额外技术attempt费用和未知预留单独披露。']
     lines+=['','效率结论：'+('完整证据满足质量门，两个整体资源指标均下降，full配对方向一致。' if summary['efficiency_conclusion']['authorized_by_complete_evidence'] else '现有完整性、质量、收据或方向条件不足，不能宣称同等质量下两个整体资源指标均下降。'),
         '', '原历史仅计一次：'+json.dumps(a['history_carried_once'],ensure_ascii=False)+'。',
         '新运行已结算：'+json.dumps(a['new_known_settled_record_usage'],ensure_ascii=False)+'；含未决预留：'+json.dumps(a['new_charged_or_reserved'],ensure_ascii=False)+'。',
-        '同轮全部attempt（含旧失败）：'+json.dumps(a['round_all_attempt_known_usage'],ensure_ascii=False)+'。',
-        '累计（续跑carry不再加旧4/旧失败）：'+json.dumps(a['cumulative_known_settled_record_usage'],ensure_ascii=False)+'。费用为冻结费率估算。',
+        '同轮全部attempt已知结算下限（含旧失败；未知不补零）：'+json.dumps(a['round_all_attempt_known_usage'],ensure_ascii=False)+'。',
+        '累计已知结算下限（各源仅计一次）：'+json.dumps(a['cumulative_known_settled_record_usage'],ensure_ascii=False)+'。费用为冻结费率估算。',
+        '未决请求：本轮 '+str(a['new_unknown_or_pending_count'])+'；历史 '+str(a['prior_unknown_or_pending_count'])+
+            '。保守累计占用：'+json.dumps(a['cumulative_charged_or_reserved'],ensure_ascii=False)+'。',
         '首次attempt可靠性：'+json.dumps(rel,ensure_ascii=False)+'。技术失败保留于technical_attempts，不改写旧记录、不作新的语义评分。',
         '失败或非full运行的成本与未知下限：'+json.dumps(summary['failure_costs'],ensure_ascii=False)+'。',
         '', '唯一时延口径为根task_created→task_finished；updated_at不能代替，失败终止耗时不代表成功交付。完整任务族计入全部角色和缓存输入Token，reasoning明细不重复叠加。',
@@ -638,6 +821,8 @@ def report_text(summary):
         '局部退化：'+json.dumps(s['local_regressions'],ensure_ascii=False)+'。',
         '证据问题：'+json.dumps(summary['issues'],ensure_ascii=False)+'。',
         '不外推P95或真实外部流量；只读已关闭本地工件和SQLite，真实模型/网络/服务操作0。']
+    if a.get('timing_policy')=='financial_only':
+        lines+=['本轮按财务上限或全部任务终态停止；全局时间上限不适用。累计耗时仍从原T0计算，历史时间配置不构成新时间授权。每根任务与收尾的边界仍由独立控制器证据核验。']
     return '\n'.join(lines)+'\n'
 
 

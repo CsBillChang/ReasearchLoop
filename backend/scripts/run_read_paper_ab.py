@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -35,6 +36,21 @@ def write(path, value):
     Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2, default=str) + '\n')
 
 
+def bounded_deadline(root_deadline, *optional_deadlines):
+    """全局截止可以显式取消，单根有限截止始终存在。"""
+    if (type(root_deadline) not in (int, float) or not math.isfinite(root_deadline)
+            or root_deadline <= 0):
+        raise ValueError('finite positive root deadline required')
+    deadlines = [root_deadline]
+    for value in optional_deadlines:
+        if value is None:
+            continue
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError('invalid optional deadline')
+        deadlines.append(value)
+    return min(deadlines)
+
+
 def qualification_configuration(manifest):
     """资格收据绑定本批源码、材料入口、资源、参数与允许矩阵。"""
     from harness_ab_experiment import PAIRED_KINDS, source_contract_key
@@ -53,6 +69,9 @@ def qualification_configuration(manifest):
             'prepared_input_root','material_snapshot_sha256','final_cases_sha256','final_plan_sha256')})
     if 'continuation_contract' in manifest:
         result['continuation_contract'] = manifest['continuation_contract']
+    if 'completion_contract' in manifest:
+        result['completion_contract'] = manifest['completion_contract']
+        result['evaluation_policy'] = manifest.get('evaluation_policy')
     return result
 
 def select_variant_source(manifest, variant):
@@ -111,7 +130,7 @@ def validate_active_variant(manifest, variant):
 
 def validate_carried_budget_source(manifest):
     """从不可变的旧批次收据计算carry，防止初始冻结时漏填或归零。"""
-    if 'continuation_contract' in manifest:
+    if 'continuation_contract' in manifest or 'completion_contract' in manifest:
         from agent_final_continuation import validate_shared_clock_carry
         return validate_shared_clock_carry(manifest)
     source = manifest.get('carried_budget_source')
@@ -197,6 +216,14 @@ def validate_matrix_delivery_witness(db, root_id, payload, model):
 def validate_manifest(manifest, case_id, variant, mode):
     """在创建目录或任务前检查冻结范围，拒绝借配置更换第二个实验变量。"""
     from harness_ab_transport import validate_request_contracts
+    if manifest.get('ledger_limits', {}).get('enforce_batch_seconds', True) is not True:
+        if 'completion_contract' not in manifest:
+            raise PermissionError('GLOBAL_TIME_CANCELLATION_REQUIRES_COMPLETION_AUTHORIZATION')
+        from agent_final_continuation import validate_continuation
+        context = validate_continuation(manifest)
+        if (not context or context['clock'].get('policy') != 'financial_only'
+                or manifest['ledger_limits'].get('enforce_batch_seconds') is not False):
+            raise PermissionError('GLOBAL_TIME_CANCELLATION_CONTRACT_INVALID')
     if 'final_suite_policy' in manifest:
         from agent_final_runtime import validate_suite_manifest
         validate_suite_manifest(manifest)
@@ -564,7 +591,7 @@ def run_cell(manifest, case_id, variant, mode, credential=None):
                     ledger = Ledger(runtime / 'budget.sqlite3', **manifest.get('ledger_limits', {}))
                     begun = ledger.begin_root(root_id, case_id, variant)
                     snap = ledger.snapshot()
-                    deadline = min(begun['started_at'] + ledger.config['root_seconds'],
+                    deadline = bounded_deadline(begun['started_at'] + ledger.config['root_seconds'],
                         snap['batch_absolute_deadline'], manifest['cell_absolute_deadline'])
 
                     class SourceBoundTransport(BudgetTransport):
@@ -683,7 +710,8 @@ def main():
         from launch_read_paper_ab import run_guarded
         auth = validate_activation(manifest, 'qualify')
         validate_manifest(manifest, args.case, args.variant, 'qualify')
-        deadline = min(auth['round_absolute_deadline'], time.time() + manifest['ledger_limits']['root_seconds'])
+        deadline = bounded_deadline(time.time() + manifest['ledger_limits']['root_seconds'],
+                                    auth['round_absolute_deadline'])
         runtime = Path(manifest['runtime_root'])
         runtime.mkdir(parents=True, exist_ok=True)
         log_path = runtime / ('qualification-' + args.case + '-' + args.variant + '.log')

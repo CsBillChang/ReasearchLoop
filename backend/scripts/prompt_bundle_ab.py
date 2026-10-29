@@ -292,9 +292,11 @@ def validate_activation(manifest, mode, *, clock=time.time):
             or auth.get('manifest_sha256') != manifest_identity(manifest)
             or auth.get('ledger_limits') != manifest.get('ledger_limits')
             or auth.get('execution_order') != manifest.get('execution_order')
-            or mode not in auth.get('allowed_modes', [])
-            or type(auth.get('expires_at')) not in (int, float) or not math.isfinite(auth['expires_at'])
-            or clock() >= auth['expires_at']):
+            or mode not in auth.get('allowed_modes', [])):
+        raise PermissionError('PROMPT_BUNDLE_AUTHORIZATION_MISMATCH')
+    if 'completion_contract' not in manifest and (
+            type(auth.get('expires_at')) not in (int, float)
+            or not math.isfinite(auth['expires_at']) or clock() >= auth['expires_at']):
         raise PermissionError('PROMPT_BUNDLE_AUTHORIZATION_MISMATCH')
     validate_round_clock(manifest, auth, clock=clock)
     return auth
@@ -303,6 +305,21 @@ def validate_activation(manifest, mode, *, clock=time.time):
 def validate_round_clock(manifest, auth, *, clock=time.time):
     """资格开始、评分等待及执行共用授权起点，payload不能重置总时钟。"""
     started, deadline = auth.get('round_started_at'), auth.get('round_absolute_deadline')
+    if 'completion_contract' in manifest:
+        from agent_final_continuation import validate_continuation
+        context = validate_continuation(manifest)
+        contract = context['clock']
+        if (contract.get('policy') != 'financial_only' or auth.get('policy') != 'financial_only'
+                or auth.get('human_approved') is not True
+                or 'expires_at' not in auth or auth['expires_at'] is not None
+                or 'round_absolute_deadline' not in auth or deadline is not None
+                or contract.get('model_absolute_deadline') is not None
+                or contract.get('round_absolute_deadline') is not None
+                or manifest.get('ledger_limits', {}).get('enforce_batch_seconds') is not False
+                or type(started) not in (int, float) or not math.isfinite(started)
+                or not 0 < started <= clock() or started != contract['round_started_at']):
+            raise PermissionError('PROMPT_BUNDLE_COMPLETION_CLOCK_MISMATCH')
+        return started, None
     if any(type(value) not in (int, float) or not math.isfinite(value) for value in (started, deadline)):
         raise PermissionError('PROMPT_BUNDLE_ROUND_CLOCK_REQUIRED')
     limits = manifest.get('ledger_limits', {})
