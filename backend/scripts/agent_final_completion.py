@@ -3,18 +3,141 @@ from __future__ import annotations
 
 from collections import Counter
 from contextlib import closing
+from contextvars import ContextVar
 from copy import deepcopy
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
+import sys
+from threading import RLock
 
 
 VERSION = 'agent_final_completion_v2'
 EVALUATION_POLICY = {'version': 'agent_completion_descriptive_v1',
                      'minimum_B_full': None, 'retain_quality_comparison': True}
 _ANCHOR_CACHE = {}
+
+
+
+# 只保存已完整验证的封存历史；当前授权和当前模型发送身份不进入本缓存。
+_IMMUTABLE_CONTEXTS = {}
+_CAPTURE_STACK = ContextVar('immutable_anchor_capture', default=())
+_VALIDATION_CACHE_COUNTS = Counter()
+_ANCHOR_VALIDATION_LOCK = RLock()
+
+
+def _stamp(path):
+    value = os.lstat(path)
+    return tuple(getattr(value, name) for name in
+                 ('st_dev', 'st_ino', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))
+
+
+def _observe(path):
+    if not _CAPTURE_STACK.get():
+        return
+    path = Path(path); value = _stamp(path)
+    _require(not stat.S_ISLNK(value[2]), 'CACHE_DEPENDENCY_SYMLINK')
+    for capture in _CAPTURE_STACK.get():
+        previous = capture['paths'].get(str(path))
+        _require(previous in (None, value), 'CACHE_DEPENDENCY_CHANGED_DURING_VALIDATION')
+        capture['paths'][str(path)] = value
+
+
+def _verified_hash(path):
+    """把已核过字节的外部补充证明也登记为依赖，不能只绑定锚根。"""
+    value = _helpers()._hash(path)
+    if _CAPTURE_STACK.get():
+        path = Path(path); _observe(path)
+        identity = _helpers()._HASH_CACHE.get(str(path))
+        current = _stamp(path)
+        _require(identity is not None and identity[0] == (current[0], current[1], current[3], current[4], current[5])
+                 and identity[1] == value, 'CACHE_HASH_IDENTITY_CHANGED')
+        roots = {Path(root) for capture in _CAPTURE_STACK.get() for root in capture['canonical']
+                 if path.is_relative_to(Path(root))}
+        boundary = max(roots, key=lambda root: len(root.parts)) if roots else path.parent
+        for parent in path.parents:
+            _observe(parent)
+            if parent == boundary:break
+        # 锚内每文件和目录均有lstat；只对根做canonical解析，防止全局/tmp变化误伤。
+        for capture in _CAPTURE_STACK.get():capture['canonical'].add(str(boundary))
+    return value
+
+
+def _capture_seal(root, digest):
+    for capture in _CAPTURE_STACK.get():
+        capture['seals'][str(root)] = digest
+        capture['canonical'].add(str(root))
+
+
+def _unchanged(capture):
+    try:
+        for path, expected in capture['paths'].items():
+            if _stamp(path) != expected:
+                return False
+        return all(Path(path).resolve(strict=True) == Path(path) for path in capture['canonical'])
+    except OSError:
+        return False
+
+
+def _merge_capture(capture):
+    for active in _CAPTURE_STACK.get():
+        for path, identity in capture['paths'].items():
+            previous = active['paths'].get(path)
+            _require(previous in (None, identity), 'CACHE_DEPENDENCY_CHANGED_DURING_VALIDATION')
+            active['paths'][path] = identity
+        active['canonical'].update(capture['canonical']); active['seals'].update(capture['seals'])
+
+
+def _cached_anchor(kind, anchor_root, seen, validate):
+    """同进程并发只发布一个完整结果；递归父锚使用同一可重入锁。"""
+    with _ANCHOR_VALIDATION_LOCK:
+        return _cached_anchor_locked(kind, anchor_root, seen, validate)
+
+
+def _cached_anchor_locked(kind, anchor_root, seen, validate):
+    """历史派生只在完整依赖未变时复用；变化必须回到原校验而非续认新stamp。"""
+    root = Path(anchor_root); key = (kind, str(root)); seen = set(seen)
+    _require(str(root) not in seen, 'ANCHOR_CYCLE')
+    item = _IMMUTABLE_CONTEXTS.get(key)
+    if item is not None:
+        # 旧SQL解析缓存被清空也表示调用方要冷重验，不能被新context缓存遮蔽。
+        if all(key in cache for cache, key in item['sql_entries']) and _unchanged(item['capture']):
+            _require(not seen.intersection(item['value']['anchor_seals']), 'ANCHOR_CYCLE')
+            _VALIDATION_CACHE_COUNTS['hits'] += 1; _merge_capture(item['capture'])
+            return deepcopy(item['value'])
+        _IMMUTABLE_CONTEXTS.pop(key, None); _VALIDATION_CACHE_COUNTS['invalidations'] += 1
+    _VALIDATION_CACHE_COUNTS['misses'] += 1
+    capture = {'paths': {}, 'canonical': set(), 'seals': {}}
+    token = _CAPTURE_STACK.set((*_CAPTURE_STACK.get(), capture))
+    try:
+        value = validate()
+        _require(_unchanged(capture), 'CACHE_DEPENDENCY_CHANGED_DURING_VALIDATION')
+        expected = value.get('anchor_seals', {}) if isinstance(value, dict) else {}
+        # 不完整mock父context或未核验依赖不产生权威缓存；保留原校验路径。
+        if expected and str(root) in expected and all(capture['seals'].get(path) == digest for path, digest in expected.items()):
+            entries = []
+            for cache in (_ANCHOR_CACHE, *[getattr(sys.modules.get(name), '_PARSED_ANCHORS', {}) for name in
+                    ('agent_final_completion_chain', 'agent_final_observation_recovery')]):
+                entries.extend((cache, cache_key) for cache_key in cache)
+            _IMMUTABLE_CONTEXTS[key] = {'capture': capture, 'value': deepcopy(value), 'sql_entries': entries}
+            _VALIDATION_CACHE_COUNTS['published'] += 1
+        return value
+    finally:
+        _CAPTURE_STACK.reset(token)
+
+
+def clear_validation_caches():
+    """统一清空历史context、SQL解析及字节缓存；不碰任何数据库或授权。"""
+    with _ANCHOR_VALIDATION_LOCK:
+        _IMMUTABLE_CONTEXTS.clear(); _ANCHOR_CACHE.clear(); _VALIDATION_CACHE_COUNTS.clear()
+        _helpers()._HASH_CACHE.clear()
+        for name in ('agent_final_completion_chain', 'agent_final_observation_recovery'):
+            module = sys.modules.get(name)
+            if module is not None:module._PARSED_ANCHORS.clear()
 
 
 def _require(value, reason):
@@ -39,12 +162,16 @@ def _equal(a, b):
 def _sealed(root):
     """核对完整密封清单；相同inode/stat的重复检查复用既有字节hash缓存。"""
     h = _helpers()
+    _VALIDATION_CACHE_COUNTS['full_seal_checks'] += 1
     root = Path(root)
     _require(root.is_absolute() and root.resolve() == root and root.is_dir(), 'ANCHOR_ROOT_REQUIRED')
+    _observe(root)
+    for capture in _CAPTURE_STACK.get():capture['canonical'].add(str(root))
     seal_path = root / 'SEAL.json'
+    for control in ('SEAL.json', 'SEAL.sha256', 'SEAL-READBACK.json'):_observe(root / control)
     seal = h._read(seal_path)
     _require(isinstance(seal.get('files'), dict) and seal['files'], 'SEALED_FILES_REQUIRED')
-    digest = h._hash(seal_path)
+    digest = _verified_hash(seal_path)
     _require((root / 'SEAL.sha256').read_text().split()[0] == digest, 'SEAL_DIGEST_CHANGED')
     readback = h._read(root / 'SEAL-READBACK.json')
     _require(readback.get('status') == 'passed' and readback.get('seal_sha256') == digest,
@@ -52,6 +179,7 @@ def _sealed(root):
     excluded = {'SEAL.json', 'SEAL.sha256', 'SEAL-READBACK.json'}
     actual = set()
     for path in root.rglob('*'):
+        _observe(path)
         _require(not path.is_symlink(), 'ANCHOR_SYMLINK')
         if path.is_file() and str(path.relative_to(root)) not in excluded:
             actual.add(str(path.relative_to(root)))
@@ -59,7 +187,9 @@ def _sealed(root):
     for relative, item in seal['files'].items():
         path = h._inside(root, relative)
         _require(isinstance(item, dict) and path.stat().st_size == item.get('bytes')
-                 and h._hash(path) == item.get('sha256'), 'SEALED_FILE_BYTES_CHANGED')
+                 and _verified_hash(path) == item.get('sha256'), 'SEALED_FILE_BYTES_CHANGED')
+    _verified_hash(root / 'SEAL.sha256'); _verified_hash(root / 'SEAL-READBACK.json')
+    _capture_seal(root, digest)
     return root, seal, digest
 
 
@@ -68,7 +198,7 @@ def _loader(root, seal, anchors):
 
     def load(relative, parse=True):
         path = h._inside(root, relative)
-        digest = h._hash(path)
+        digest = _verified_hash(path)
         _require(seal['files'].get(relative, {}).get('sha256') == digest, 'ANCHOR_ENTRY_CHANGED')
         anchors[relative] = digest
         return h._read(path) if parse else None
@@ -143,7 +273,7 @@ def _old_grade(root, manifest, case, load):
         path = Path(proof['path'])
         _require(path.is_relative_to(root), 'OLD_REVIEW_PATH_OUTSIDE_ANCHOR')
         value = load(str(path.relative_to(root)))
-        _require(_helpers()._hash(path) == proof['sha256'] and value.get('paid_model_calls') == 0
+        _require(_verified_hash(path) == proof['sha256'] and value.get('paid_model_calls') == 0
                  and value.get('challenge_sha256') == review['challenge_sha256'], 'OLD_REVIEW_PROOF_CHANGED')
     # 同一冻结评价器重新核对，保持旧语义门的原始字段及质量标签。
     from harness_ab_pair_gate import evaluate_pair_review, manifest_identity
@@ -180,10 +310,10 @@ def _row(root, manifest, position, ledger, load, *, graded, allow_observation_st
     row = {'case_id': case, 'variant': variant, 'root_id': result['root_id'], 'status': view['status'],
            'issues': [], 'returncode': 0, 'original_position': position, 'retained': True,
            'source_manifest_path': str(root / 'manifest.formal.json'),
-           'source_manifest_sha256': _helpers()._hash(root / 'manifest.formal.json'), **proofs,
+           'source_manifest_sha256': _verified_hash(root / 'manifest.formal.json'), **proofs,
            'ledger_root': str(root), 'ledger_path': str(root / 'runtime/budget.sqlite3'),
            'provenance': {'anchor_root': str(root), 'cell_root': str(cell),
-               'files': {name: _helpers()._hash(cell / name) for name in _helpers()._CELL_FILES}}}
+               'files': {name: _verified_hash(cell / name) for name in _helpers()._CELL_FILES}}}
     if allow_observation_stops:
         from agent_final_observation_recovery import exported_stop
         events = load(relative + '/events.json')
@@ -203,13 +333,13 @@ def _row(root, manifest, position, ledger, load, *, graded, allow_observation_st
                  and stored[0][4] is None and _equal(json.loads(stored[0][3]), view.get('result')),
                  'RETAINED_OBSERVATION_SQL_STATE_CHANGED')
         row.update(observed_status=view['status'], observation_stop=observation)
-        row['provenance']['files'].update({name: _helpers()._hash(cell / name) for name in
+        row['provenance']['files'].update({name: _verified_hash(cell / name) for name in
             ('events.json', 'task.sqlite3', 'root-row.json', 'ledger-snapshot.json')})
     if graded:
         decision = _old_grade(root, manifest, case, load)
         row['quality'] = decision['quality'][variant]
         row['provenance'].update(grade_decision_path=str(root / 'semantic-gates' / case / 'decision.json'),
-                                grade_decision_sha256=_helpers()._hash(root / 'semantic-gates' / case / 'decision.json'))
+                                grade_decision_sha256=_verified_hash(root / 'semantic-gates' / case / 'decision.json'))
     else:
         row['quality'] = None
         _require(not (root / 'semantic-gates' / case / 'decision.json').exists(), 'UNEXPECTED_OLD_BRIDGE_GRADE')
@@ -263,11 +393,15 @@ def _safety(root, load, controller):
         'scoring/metadata-watch-closed.json'}, 'COMPLETE_SAFETY_SOURCES_REQUIRED')
     for relative, digest in supplement['sources'].items():
         load(relative, False)
-        _require(_helpers()._hash(root / relative) == digest, 'SAFETY_SOURCE_CHANGED')
+        _require(_verified_hash(root / relative) == digest, 'SAFETY_SOURCE_CHANGED')
     return supplement
 
 
 def _anchor(anchor_root):
+    return _cached_anchor(VERSION, anchor_root, frozenset(), lambda: _anchor_uncached(anchor_root))
+
+
+def _anchor_uncached(anchor_root):
     h = _helpers()
     root, seal, seal_sha = _sealed(anchor_root)
     manifest = h._read(root / 'manifest.formal.json')
@@ -360,6 +494,7 @@ def _anchor(anchor_root):
     db_path = cell / 'task.sqlite3'
     load(str(db_path.relative_to(root)), False)
     with closing(sqlite3.connect(db_path.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+        db.execute('PRAGMA query_only=ON')
         stored = db.execute('SELECT status FROM tasks WHERE task_id=?', (last['root_id'],)).fetchone()
     _require(stored == ('running',) and not (cell / 'result.json').exists(), 'OLD_INTERRUPTED_ROOT_CHANGED')
     failed = deepcopy(n_contract['failed_attempt'])
@@ -399,7 +534,7 @@ def _timing(value, base):
              and value.get('authorized_by_user') is True, 'FINANCIAL_ONLY_USER_AUTH_REQUIRED')
     path = Path(value['scope_receipt_path'])
     _require(path.is_absolute() and path.resolve() == path
-             and _helpers()._hash(path) == value['scope_receipt_sha256'], 'TIMING_SCOPE_HASH_CHANGED')
+             and _verified_hash(path) == value['scope_receipt_sha256'], 'TIMING_SCOPE_HASH_CHANGED')
     scope = _helpers()._read(path)
     _require(scope.get('authorized_by_user') is True and scope.get('cancel_global_time_limit') is True
              and isinstance(scope.get('user_request'), str) and scope['user_request'].strip(), 'TIME_CANCELLATION_NOT_EXPLICIT')
@@ -523,7 +658,11 @@ def validate_completion(manifest):
 
 def retained_cell(manifest, case_id, variant):
     """返回严格核验的旧格来源，允许新配对桥接旧B与新A。"""
-    context = validate_completion(manifest)
+    return _retained_cell_from_context(manifest, validate_completion(manifest), case_id, variant)
+
+
+def _retained_cell_from_context(manifest, context, case_id, variant):
+    """仅选择调用方已验证的同一manifest上下文；本函数不授予执行权限。"""
     if context is None:
         return None
     for row in context['retained_rows']:
@@ -536,7 +675,11 @@ def retained_cell(manifest, case_id, variant):
 
 def prior_pair_manifest(manifest, offset):
     """仅完整的旧五对使用其旧manifest；桥接对及后续对属于新合同。"""
-    context = validate_completion(manifest)
+    return _prior_pair_manifest_from_context(manifest, validate_completion(manifest), offset)
+
+
+def _prior_pair_manifest_from_context(manifest, context, offset):
+    """仅解析已验证上下文的评分归属，不重验或重签旧评分。"""
     if context is None:
         return None
     _require(type(offset) is int and offset >= 0 and offset % 2 == 0, 'PAIR_OFFSET_INVALID')

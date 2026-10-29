@@ -114,7 +114,7 @@ def _protection(root, load):
              'SAFETY_CORRECTION_SCOPE_CHANGED')
     for item in [*bindings.values(),corrected_binding]:
         path = Path(item['path'])
-        _require(path.is_absolute() and path.resolve() == path and c._helpers()._hash(path) == item['sha256'],
+        _require(path.is_absolute() and path.resolve() == path and c._verified_hash(path) == item['sha256'],
                  'SAFETY_BINDING_CHANGED')
         if path.is_relative_to(root):
             load(str(path.relative_to(root)), False)
@@ -169,9 +169,9 @@ def _technical(root, manifest, row, ledger, load):
     proofs = c._receipts(row['root_id'],native,physical)
     return {**deepcopy(row),'retained':False,'status':view['status'],'stored_status':view['status'],
         'attempt_outcome':'cell_receipt_or_isolation_gate','result_status':result['status'],**proofs,
-        'source_manifest_path':str(root/'manifest.formal.json'),'source_manifest_sha256':c._helpers()._hash(root/'manifest.formal.json'),
+        'source_manifest_path':str(root/'manifest.formal.json'),'source_manifest_sha256':c._verified_hash(root/'manifest.formal.json'),
         'provenance':{'anchor_root':str(root),'cell_root':str(cell),
-            'files':{name:c._helpers()._hash(cell/name) for name in (*c._helpers()._CELL_FILES,'task.sqlite3')}}}
+            'files':{name:c._verified_hash(cell/name) for name in (*c._helpers()._CELL_FILES,'task.sqlite3')}}}
 
 
 def _bind_deferred_reviews(root, manifest, parent, retained, load):
@@ -187,11 +187,15 @@ def _bind_deferred_reviews(root, manifest, parent, retained, load):
             path = root / 'semantic-gates' / case / 'decision.json'
             row.update(quality=decision['quality'][row['variant']], score_owner='sealed_score_manifest',
                        deferred_review=False, score_manifest_path=str(root / 'manifest.formal.json'),
-                       score_manifest_sha256=c._helpers()._hash(root / 'manifest.formal.json'))
-            row['provenance'].update(grade_decision_path=str(path), grade_decision_sha256=c._helpers()._hash(path))
+                       score_manifest_sha256=c._verified_hash(root / 'manifest.formal.json'))
+            row['provenance'].update(grade_decision_path=str(path), grade_decision_sha256=c._verified_hash(path))
 
 
 def _anchor(anchor_root, seen):
+    return _c()._cached_anchor(VERSION, anchor_root, seen, lambda: _anchor_uncached(anchor_root, seen))
+
+
+def _anchor_uncached(anchor_root, seen):
     c = _c(); root = Path(anchor_root)
     _require((root/'SEAL.json').is_file(), 'ANCHOR_PENDING_SEAL')
     _require(str(root) not in seen, 'ANCHOR_CYCLE')
@@ -258,9 +262,9 @@ def _anchor(anchor_root, seen):
         for item in pair:
             _require(item.get('quality') in (None,decision['quality'][item['variant']]), 'OLD_GRADE_REWRITE_FORBIDDEN')
             item.update(quality=decision['quality'][item['variant']],score_manifest_path=str(root/'manifest.formal.json'),
-                        score_manifest_sha256=c._helpers()._hash(root/'manifest.formal.json'))
+                        score_manifest_sha256=c._verified_hash(root/'manifest.formal.json'))
             path = root/'semantic-gates'/item['case_id']/'decision.json'
-            item['provenance'].update(grade_decision_path=str(path),grade_decision_sha256=c._helpers()._hash(path))
+            item['provenance'].update(grade_decision_path=str(path),grade_decision_sha256=c._verified_hash(path))
     charge,pending = _charged(ledger)
     _require(not pending, 'LEAF_UNRESOLVED_RECEIPTS_REQUIRE_EXPLICIT_RECOVERY_CONTRACT')
     old_pending = deepcopy(parent['pending_reservations']);all_pending = old_pending+pending

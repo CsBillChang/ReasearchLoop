@@ -120,7 +120,7 @@ def _proof(root, manifest, parent, load):
         _require(isinstance(relative, str) and isinstance(digest, str)
                  and re.fullmatch('[0-9a-f]{64}', digest), 'REPLAY_BINDING_INVALID')
         load(relative, False)
-        _require(c._helpers()._hash(c._helpers()._inside(root, relative)) == digest, 'REPLAY_BINDING_CHANGED')
+        _require(c._verified_hash(c._helpers()._inside(root, relative)) == digest, 'REPLAY_BINDING_CHANGED')
     _require(not (root / 'semantic-gates' / case).exists(), 'ORIGINAL_PACKET_OR_GRADE_MUST_REMAIN_ABSENT')
     return proof, case
 
@@ -154,6 +154,10 @@ def _archives(root, case, variant, physical, load):
 
 
 def _anchor(anchor_root, seen):
+    return _c()._cached_anchor(VERSION, anchor_root, seen, lambda: _anchor_uncached(anchor_root, seen))
+
+
+def _anchor_uncached(anchor_root, seen):
     c = _c(); chain = _chain(); root = Path(anchor_root)
     _require((root / 'SEAL.json').is_file(), 'ANCHOR_PENDING_SEAL')
     _require(str(root) not in seen, 'ANCHOR_CYCLE')
@@ -248,7 +252,7 @@ def _anchor(anchor_root, seen):
              and final.get('halt_reason') == STOP_REASON, 'ORIGINAL_LEDGER_EXPORT_CHANGED')
     original = parent['anchor_manifest']
     lineage = {'anchor_root': str(root), 'proof_path': str(root / PROOF_PATH),
-               'proof_sha256': c._helpers()._hash(root / PROOF_PATH), 'case_id': case}
+               'proof_sha256': c._verified_hash(root / PROOF_PATH), 'case_id': case}
     value = {**deepcopy(parent), 'anchor_root': str(root), 'anchors': anchors,
         'anchor_seals': {**parent['anchor_seals'], str(root): seal_sha}, 'retained_rows': retained,
         'retained_count': len(retained), 'new_execution_order': deepcopy(order[len(retained):]),

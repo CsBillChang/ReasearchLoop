@@ -1,6 +1,9 @@
 """配对终稿的外部语义门；子任务只能写runtime，不能批准本控制目录。"""
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 import json
 import math
 import os
@@ -14,6 +17,49 @@ from harness_ab_experiment import canonical, paired_source_contract, sha256
 
 
 FINAL_SUITE_POLICY = {'version': 'agent_final_v1', 'semantic_failures': 'record_and_continue'}
+
+
+_ACTIVE_GATE_CONTEXTS = ContextVar('active_pair_gate_contexts', default=None)
+_GATE_CAPSULE_AUTH = object()
+
+
+class _GateContexts:
+    """单次准入内按manifest身份复用验真结果；不能用当前owner解释旧评分。"""
+
+    def __init__(self, manifest, continuation, *, _proof=None):
+        if _proof is not _GATE_CAPSULE_AUTH:
+            raise PermissionError('PAIR_PRIVATE_CONTEXT_CAPSULE_REQUIRED')
+        self._values = {manifest_identity(manifest): continuation}
+
+    def context(self, manifest):
+        identity = manifest_identity(manifest)
+        if identity not in self._values:
+            from agent_final_continuation import validate_continuation
+            # 历史owner必须独立验真；其递归读取不能借外层owner的capsule。
+            token = _ACTIVE_GATE_CONTEXTS.set(None)
+            try:
+                verified = validate_continuation(manifest)
+            finally:
+                _ACTIVE_GATE_CONTEXTS.reset(token)
+            self._values[identity] = verified
+        return self._values[identity]
+
+
+def _gate_contexts():
+    value = _ACTIVE_GATE_CONTEXTS.get()
+    if value is not None and type(value) is not _GateContexts:
+        raise PermissionError('PAIR_PRIVATE_CONTEXT_CAPSULE_REQUIRED')
+    return value
+
+
+@contextmanager
+def _gate_context_scope(manifest, continuation):
+    contexts = _GateContexts(manifest, continuation, _proof=_GATE_CAPSULE_AUTH)
+    token = _ACTIVE_GATE_CONTEXTS.set(contexts)
+    try:
+        yield contexts
+    finally:
+        _ACTIVE_GATE_CONTEXTS.reset(token)
 
 
 def validate_final_suite_policy(manifest):
@@ -213,6 +259,10 @@ def _retained_cell(manifest, case_id, variant):
     """旧格只读原目录；不得复制到本批冒充新执行。"""
     if 'completion_contract' not in manifest:
         return None
+    contexts = _gate_contexts()
+    if contexts is not None:
+        from agent_final_completion import _retained_cell_from_context
+        return _retained_cell_from_context(manifest, contexts.context(manifest), case_id, variant)
     from agent_final_completion import retained_cell
     return retained_cell(manifest, case_id, variant)
 
@@ -220,8 +270,13 @@ def _retained_cell(manifest, case_id, variant):
 def _prior_pair_manifest(manifest, offset, continuation):
     if 'completion_contract' not in manifest:
         return continuation['anchor_manifest']
-    from agent_final_completion import prior_pair_manifest
-    original = prior_pair_manifest(manifest, offset)
+    contexts = _gate_contexts()
+    if contexts is not None:
+        from agent_final_completion import _prior_pair_manifest_from_context
+        original = _prior_pair_manifest_from_context(manifest, contexts.context(manifest), offset)
+    else:
+        from agent_final_completion import prior_pair_manifest
+        original = prior_pair_manifest(manifest, offset)
     if original is None:
         raise PermissionError('PAIR_RETAINED_REVIEW_OWNER_REQUIRED')
     return original
@@ -243,6 +298,9 @@ def _prior_reviews(manifest, position, continuation, clock):
         deferred = continuation.get('deferred_review_cases', []) if continuation else []
         active = (manifest if _observation_policy(manifest) and prior in deferred else
                   _prior_pair_manifest(manifest, offset, continuation) if offset + 1 < retained else manifest)
+        contexts = _gate_contexts()
+        if contexts is not None:
+            contexts.context(active)
         directory = Path(active['semantic_gate_root']) / prior
         challenge = read_json(directory / 'challenge-private.json')
         review = read_json(directory / 'review.json')
@@ -305,8 +363,9 @@ def issue_cell_grant(manifest, case_id, variant, deadline):
                 existing.add(int(path.stem))
         if position < first or existing != set(range(first, position)):
             raise PermissionError('continuation scheduler cannot skip or replay an ordinal')
-        _prior_reviews(manifest, position, continuation, time.time)
-        _preceding_cell(manifest, position, continuation)
+        with _gate_context_scope(manifest, continuation):
+            _prior_reviews(manifest, position, continuation, time.time)
+            _preceding_cell(manifest, position, continuation)
     grants.mkdir(exist_ok=True)
     value = {'version': 1, 'case_id': case_id, 'variant': variant, 'position': position,
         'manifest_sha256': manifest_identity(manifest), 'session_nonce': session['nonce'],
@@ -369,8 +428,9 @@ def validate_prior_pair_gates(manifest, case_id, variant, *, clock=time.time):
                 or not isinstance(grant['grant_nonce'], str) or len(grant['grant_nonce']) != 64
                 or not clock() < grant['cell_absolute_deadline']):
             raise PermissionError('scheduler grant does not match active cell or deadline')
-        _prior_reviews(manifest, position, continuation, clock)
-        _preceding_cell(manifest, position, continuation)
+        with _gate_context_scope(manifest, continuation):
+            _prior_reviews(manifest, position, continuation, clock)
+            _preceding_cell(manifest, position, continuation)
     except (OSError, KeyError, TypeError, ValueError) as exc:
         raise PermissionError('PAIR_PRIOR_REVIEW_REQUIRED') from exc
     return {**session, 'active_grant': grant} if continuation else session
