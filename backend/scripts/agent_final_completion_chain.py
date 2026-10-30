@@ -24,6 +24,9 @@ def _require(value, reason):
 def _parent(manifest, seen):
     value = manifest.get('completion_contract')
     _require(isinstance(value, dict), 'EXPLICIT_PARENT_REQUIRED')
+    if value.get('version') == 'agent_final_completion_v5':
+        from agent_final_root_budget_recovery import validate_root_budget_recovery
+        return validate_root_budget_recovery(manifest, _seen=seen)
     if value.get('version') == 'agent_final_completion_v4':
         from agent_final_observation_recovery import validate_observation_recovery
         return validate_observation_recovery(manifest, _seen=seen)
@@ -81,6 +84,10 @@ def _protection(root, load):
         return
     corrected = load('audit/post-run-protection-corrected.json')
     proof = load('audit/post-run-safety-supplement.json')
+    if proof.get('status') == 'passed_final_safety_with_original_missing_post_readback':
+        from agent_final_root_budget_recovery import _safety
+        _safety(root, load)
+        return
     _require(original.get('status') == 'failed' and original.get('safety_closed') is False
              and original.get('errors') == [{'check':'full cold loaded identity unchanged','details':None}] * 2,
              'ORIGINAL_FAILURE_NOT_EXACT_CROSS_ROOT_GATE')

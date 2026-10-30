@@ -128,7 +128,7 @@ def _observation_policy(manifest):
     contract = manifest.get('completion_contract')
     contract = contract if isinstance(contract, dict) else {}
     if ('observation_policy' not in manifest
-            and contract.get('version') != 'agent_final_completion_v4'
+            and contract.get('version') not in {'agent_final_completion_v4', 'agent_final_completion_v5'}
             and 'observation_recovery_lineage' not in contract):
         return False
     from agent_final_observation_recovery import validate_observation_policy
@@ -138,6 +138,18 @@ def _observation_policy(manifest):
     return enabled
 
 
+def _retained_budget_stop_receipts(manifest, cell, result, view, retained):
+    """例外只来自V5已封存旧预算停点；当前格不能凭同名标记放行。"""
+    contract = manifest.get('completion_contract') or {}
+    if (contract.get('version') != 'agent_final_completion_v5' or retained is None
+            or (retained.get('root_budget_stop_verified') is not True and result.get('ledger_halt') is None)):
+        return None
+    from agent_final_root_budget_recovery import retained_budget_stop_receipts
+    contexts = _gate_contexts()
+    context = contexts.context(manifest) if contexts is not None else None
+    return retained_budget_stop_receipts(manifest, cell, result, view, retained, context=context)
+
+
 def observation_stop(manifest, cell, result, view, retained=None):
     """绑定一次实际停止的事件和收据；等待输入不是成功交付或后台终态。"""
     if not _observation_policy(manifest):
@@ -145,9 +157,11 @@ def observation_stop(manifest, cell, result, view, retained=None):
     cell = Path(cell)
     policy = manifest['observation_policy']
     root, status = result.get('root_id'), view.get('status')
+    budget_proofs = _retained_budget_stop_receipts(manifest, cell, result, view, retained)
+    budget_stop = bool(budget_proofs and budget_proofs.get('root_budget_stop_verified') is True)
     if (not root or result.get('status') != 'executed' or view.get('task_id') != root
             or result.get('task_status') != status or status not in policy['statuses']
-            or result.get('ledger_halt') is not None):
+            or (result.get('ledger_halt') is not None and not budget_stop)):
         raise PermissionError('PAIR_OBSERVATION_STOP_IDENTITY_INVALID')
     isolation, live = result.get('isolation'), result.get('live_isolation_guard')
     if (not isinstance(isolation, dict) or not isinstance(isolation.get('denials'), list)
@@ -187,9 +201,10 @@ def observation_stop(manifest, cell, result, view, retained=None):
     from agent_final_completion import _receipts
     if not native and not physical and status not in policy['non_delivery_statuses']:
         raise PermissionError('PAIR_DELIVERY_OBSERVATION_RECEIPTS_REQUIRED')
-    proofs = (_receipts(root, native, physical) if native or physical else
+    proofs = (budget_proofs if budget_stop else _receipts(root, native, physical) if native or physical else
               {'physical_receipts_verified': True, 'native_status_counts': {}, 'physical_status_counts': {}})
-    if retained and any(retained.get(k) != proofs[k] for k in proofs):
+    if retained and any(retained.get(k) != proofs[k] for k in
+                        ('physical_receipts_verified', 'native_status_counts', 'physical_status_counts')):
         raise PermissionError('PAIR_OBSERVATION_RETAINED_RECEIPTS_CHANGED')
     body = view.get('result') or {}
     answer = body.get('answer_markdown')
@@ -267,6 +282,37 @@ def _retained_cell(manifest, case_id, variant):
     return retained_cell(manifest, case_id, variant)
 
 
+def _review_identity_rows(manifest, case_id, answers):
+    """旧挑战不携带issues；仅从V5权威保留记录重建预算停点原问题。"""
+    contract = manifest.get('completion_contract') or {}
+    context = None
+    if contract.get('version') == 'agent_final_completion_v5':
+        contexts = _gate_contexts()
+        if contexts is not None:
+            context = contexts.context(manifest)
+        else:
+            from agent_final_completion import validate_completion
+            context = validate_completion(manifest)
+    rows = []
+    for variant, answer in answers.items():
+        issues = []
+        if context is not None:
+            matches = [r for r in context['retained_rows'] if (r['case_id'], r['variant'], r['root_id'])
+                       == (case_id, variant, answer['root_id'])]
+            if len(matches) > 1:
+                raise PermissionError('PAIR_REVIEW_RETAINED_ROW_AMBIGUOUS')
+            if matches and matches[0].get('root_budget_stop_verified') is True:
+                retained = matches[0]; cell = Path(retained['provenance']['cell_root'])
+                from agent_final_root_budget_recovery import retained_budget_stop_receipts
+                proofs = retained_budget_stop_receipts(manifest, cell, read_json(cell / 'result.json'),
+                    read_json(cell / 'task-view.json'), retained, context=context)
+                if not proofs or proofs.get('root_budget_stop_verified') is not True:
+                    raise PermissionError('PAIR_REVIEW_RETAINED_BUDGET_PROOF_REQUIRED')
+                issues = list(retained['issues'])
+        rows.append({'case_id': case_id, 'variant': variant, 'root_id': answer['root_id'], 'issues': issues})
+    return rows
+
+
 def _prior_pair_manifest(manifest, offset, continuation):
     if 'completion_contract' not in manifest:
         return continuation['anchor_manifest']
@@ -305,8 +351,7 @@ def _prior_reviews(manifest, position, continuation, clock):
         challenge = read_json(directory / 'challenge-private.json')
         review = read_json(directory / 'review.json')
         decision = read_json(directory / 'decision.json')
-        rows = [{'case_id': prior, 'variant': variant, 'root_id': answer['root_id'], 'issues': []}
-            for variant, answer in challenge['identity']['answers'].items()]
+        rows = _review_identity_rows(active, prior, challenge['identity']['answers'])
         expected = evaluate_pair_review(active, prior, rows, manifest_identity(active),
             challenge, review, clock=clock)
         if decision != expected or decision.get('status') != 'passed':
@@ -496,12 +541,16 @@ def pair_identity(manifest, case_id, rows):
         cell, source_manifest, retained = _cell_origin(manifest, case_id, variant)
         result = read_json(cell / 'result.json')
         view = read_json(cell / 'task-view.json')
+        budget_proofs = _retained_budget_stop_receipts(manifest, cell, result, view, retained)
+        budget_stop = bool(budget_proofs and budget_proofs.get('root_budget_stop_verified') is True)
+        preserved_issues = bool(budget_stop and row.get('issues') == retained.get('issues'))
         if (not row.get('root_id') or result.get('root_id') != row['root_id']
                 or view.get('task_id') != row['root_id'] or view.get('prompt') != case['prompt']
-                or result.get('status') != 'executed' or row.get('issues')
+                or result.get('status') != 'executed' or (budget_stop and not preserved_issues)
+                or (row.get('issues') and not preserved_issues)
                 or view.get('status') not in statuses):
             raise PermissionError('PAIR_ENDED_CELL_IDENTITY_INVALID')
-        if observed and row.get('issues') != []:
+        if observed and row.get('issues') != [] and not preserved_issues:
             raise PermissionError('PAIR_OBSERVATION_RECONCILIATION_REQUIRED')
         answer = (view.get('result') or {}).get('answer_markdown')
         stop = observation_stop(manifest, cell, result, view, retained) if observed else None

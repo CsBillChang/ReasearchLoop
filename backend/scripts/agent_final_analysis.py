@@ -138,6 +138,22 @@ def closure_status(reader,root,manifest):
                 and auth.get('no_resume_or_resend') is True and stamp(auth.get('round_started_at')) is not None
                 and auth.get('round_started_at')==current.get('round_started_at')
                 and auth.get('round_started_at')==(manifest['completion_contract'].get('clock') or {}).get('round_started_at')))
+    supplement=reader.json(root/'audit/post-run-safety-supplement.json',{}) or {}
+    v5=(manifest.get('completion_contract') or {}).get('version')=='agent_final_completion_v5'
+    corrected_stop=supplement.get('status')=='passed_final_safety_with_original_missing_post_readback'
+    if v5 or corrected_stop:
+        def load(relative,parse=True):
+            path=root/relative
+            return reader.json(path) if parse else reader.bytes(path)
+        if corrected_stop:
+            from agent_final_root_budget_recovery import _safety
+            _safety(root,load)
+            checks['post_run_protection_verified']=True
+        else:
+            report=load('audit/post-run-protection.json')
+            checks['post_run_protection_verified']=bool(report and report.get('status')=='passed'
+                and report.get('safety_closed') is True and report.get('errors')==[]
+                and report.get('data_integrity_errors',[])==[])
     closed=all(checks.values())
     return {'closed':closed,'checks':checks,'closed_at_unix':end,'controller_status':(controller or {}).get('status'),
             'cleanup_all_passed':(controller or {}).get('cleanup_all_passed'),
@@ -338,6 +354,10 @@ def analyze_cell(reader,root,manifest,case_id,variant,ledger,controller,*,artifa
                                                  'native_usage_match','archive_usage_match','peak_cost_match'])
         checks['passed']=passed;receipt_checks.append(checks)
         if passed:valid.append((reservation,usage))
+    if (manifest.get('completion_contract') or {}).get('version')=='agent_final_completion_v5':
+        if result.get('ledger_halt') is not None:row['issues'].append('ledger_halted')
+        if any(x.get('status')=='not_sent' for x in native or []):
+            row['issues'].append('native_not_sent_requires_retained_root_budget_proof')
     native_success=[x for x in native or [] if x.get('status')=='succeeded']
     native_pending=[x for x in native or [] if x.get('status') not in {'succeeded','not_sent'}]
     reconciled=bool(own is not None and native is not None and len(valid)==len(settled)
@@ -551,6 +571,18 @@ def completion_artifacts(reader,manifest,context):
                          artifact_cell=cell,score_manifest=score_owner)
         row['continuation_provenance']={'retained':not technical,**provenance}
         row['original_batch_record']=item
+        if (not technical and context.get('version')=='agent_final_completion_v5'
+                and (item.get('root_budget_stop_verified') is True or item.get('issues'))):
+            from agent_final_root_budget_recovery import retained_budget_stop_receipts
+            proofs=retained_budget_stop_receipts(manifest,cell,reader.json(cell/'result.json'),
+                reader.json(cell/'task-view.json'),item,context=context)
+            if proofs is not None:
+                if proofs.get('root_budget_stop_verified') is not True:
+                    raise PermissionError('retained budget stop requires verified physical proof')
+                row['root_budget_stop_verified']=True
+                row['original_reconciliation_issues']=list(item['issues'])
+                row['original_reconciliation_passed']=False
+                row['budget_stop_outcome']='partial_root_token_reservation_budget_stop'
         if not technical and item.get('quality') is not None and row['score'].get('whole_answer_quality')!=item['quality']:
             raise ValueError('retained original grade changed')
         if technical:
@@ -610,6 +642,35 @@ def attempt_reliability(primary,technical):
             'multiple_technical_attempt_cells':sum(len(items)>1 for items in replacements.values()),
             'technical_attempt_outcomes':dict(Counter(r.get('observed_attempt_outcome') or r['status'] for r in technical)),
             'delivery_ready_is_not_quality_full':True}
+
+
+def _execution_gate_failures(rows,context):
+    """原执行门失败另列；财务可对账不撤销partial或改变主观测归属。"""
+    failures=[]
+    lineage=(context or {}).get('root_budget_recovery_lineage',[])
+    for row in rows:
+        if row.get('original_reconciliation_passed') is not False:
+            continue
+        verified=row.get('root_budget_stop_verified') is True
+        matches=[item for item in lineage if item.get('root_id')==row['root_id']]
+        if verified and (len(matches)!=1 or not isinstance(matches[0].get('proof_ref'),dict)):
+            raise ValueError('verified retained budget stop requires its unique proof reference')
+        original=row.get('original_batch_record') or {}
+        provenance=row.get('continuation_provenance') or original.get('provenance') or {}
+        failures.append({'case_id':row['expanded_case_id'],'variant':row['variant'],'root_id':row['root_id'],
+            'status':row['status'],'source':{'anchor_root':provenance.get('anchor_root'),
+                'cell_root':provenance.get('cell_root'),'manifest_path':original.get('source_manifest_path'),
+                'manifest_sha256':original.get('source_manifest_sha256')},
+            'original_reconciliation_issues':list(row.get('original_reconciliation_issues',original.get('issues',[]))),
+            'original_reconciliation_passed':False,'root_budget_stop_verified':verified,
+            'verified_explanation':row.get('budget_stop_outcome') if verified else None,
+            'proof_ref':dict(matches[0]['proof_ref']) if verified else None,
+            'actual_usage_known':row.get('usage_reconciled') is True and nonnegative(row.get('actual_task_family_tokens')),
+            'actual_task_family_tokens':row.get('actual_task_family_tokens'),
+            'retained_primary_observation':True,'technical_retry':False})
+    expected=[dict(item) for item in failures if item['root_budget_stop_verified']]
+    return {'preserved_execution_gate_failures':failures,'preserved_execution_gate_failure_count':len(failures),
+            'expected_budget_stop_observations':expected,'expected_budget_stop_observation_count':len(expected)}
 
 
 def summarize(reader,root,manifest,progress=False):
@@ -800,6 +861,7 @@ def summarize(reader,root,manifest,progress=False):
                 'whole_set_both_lower':bool(both_lower),'matched_full_pair_direction_supports_both_lower':sensitivity_lower,
                 'no_success_claim_on_incomplete_matrix_or_quality_failure':True,'no_population_or_P95_claim':True},
             'rows':rows,'technical_attempts':technical,'attempt_reliability':attempt_reliability(rows,technical),
+            **_execution_gate_failures(rows,context),
             'failure_costs':[{'case_id':r['expanded_case_id'],'variant':r['variant'],
                 'attempt_kind':r.get('attempt_kind','primary'),'status':r['status'],
                 'observed_attempt_outcome':r.get('observed_attempt_outcome'),
@@ -829,6 +891,15 @@ def report_text(summary):
     for v in ('A','B'):
         c=summary['counts'][v]
         lines.append('|'+v+'|'+str(c['created'])+'|'+str(c['quality'].get('full',0))+'|'+json.dumps(c['quality'],ensure_ascii=False)+'|')
+    preserved=summary.get('preserved_execution_gate_failures',[])
+    if preserved:
+        lines+=['','原执行门失败保留 '+str(summary['preserved_execution_gate_failure_count'])+' 个；其中已验证预算停点 '+
+            str(summary['expected_budget_stop_observation_count'])+' 个。预算停点未改判clean或成功；保留为原主观测，主分母不变，未归入technical_attempts或重跑。']
+        for item in preserved:
+            lines.append('保留停点 '+item['case_id']+'-'+item['variant']+'；状态 '+item['status']+
+                '；原reconciliation_passed=False；原issues '+json.dumps(item['original_reconciliation_issues'],ensure_ascii=False)+
+                '；解释已验证 '+str(item['root_budget_stop_verified'])+'；实际用量可知 '+str(item['actual_usage_known'])+
+                '；来源 '+json.dumps(item['source'],ensure_ascii=False)+'；证明 '+json.dumps(item['proof_ref'],ensure_ascii=False)+'。')
     quality_line=('本轮不设B full固定下限；A/B完整质量标签均披露。相对质量未退化 '+str(q['relative_quality_non_regression'])+
                   '；用于等质效率结论的质量条件 '+str(q['quality_gate_passed'])+'。') if summary.get('evaluation_policy') else (
                   'B full门槛 '+str(q['required_B_full'])+'/48；质量门 '+str(q['quality_gate_passed'])+'。')
@@ -859,7 +930,7 @@ def report_text(summary):
         '', '唯一时延口径为根task_created→task_finished；updated_at不能代替，失败终止耗时不代表成功交付。完整任务族计入全部角色和缓存输入Token，reasoning明细不重复叠加。',
         '每题R1/R2均值后24题等权；缺格不按0填充、不通过删格宣称全矩阵。双方full的共同配对仅供敏感性检查。',
         '局部退化：'+json.dumps(s['local_regressions'],ensure_ascii=False)+'。',
-        '证据问题：'+json.dumps(summary['issues'],ensure_ascii=False)+'。',
+        '当前证据完整性问题（原执行门失败另列）：'+json.dumps(summary['issues'],ensure_ascii=False)+'。',
         '不外推P95或真实外部流量；只读已关闭本地工件和SQLite，真实模型/网络/服务操作0。']
     if a.get('timing_policy')=='financial_only':
         lines+=['本轮按财务上限或全部任务终态停止；全局时间上限不适用。累计耗时仍从原T0计算，历史时间配置不构成新时间授权。每根任务与收尾的边界仍由独立控制器证据核验。']
