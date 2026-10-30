@@ -27,7 +27,7 @@ def validate_source_acquisition_contract(manifest):
     value = manifest.get('source_acquisition_contract')
     version = (manifest.get('completion_contract') or {}).get('version')
     if value is None:
-        if version in {'agent_final_completion_v3', 'agent_final_completion_v4'}:
+        if version in {'agent_final_completion_v3', 'agent_final_completion_v4', 'agent_final_completion_v6'}:
             raise PermissionError('FINAL_SOURCE_ACQUISITION_CONTRACT_REQUIRED')
         return False
     try:

@@ -39,8 +39,9 @@ def validate_observation_policy(manifest):
     contract = manifest.get('completion_contract')
     v4 = isinstance(contract, dict) and contract.get('version') == VERSION
     v5 = isinstance(contract, dict) and contract.get('version') == 'agent_final_completion_v5'
+    v6 = isinstance(contract, dict) and contract.get('version') == 'agent_final_completion_v6'
     lineage_present = isinstance(contract, dict) and 'observation_recovery_lineage' in contract
-    if 'observation_policy' not in manifest and not v4 and not v5 and not lineage_present:
+    if 'observation_policy' not in manifest and not v4 and not v5 and not v6 and not lineage_present:
         return False
     inherited = lineage_present and contract.get('version') == 'agent_final_completion_v3'
     if lineage_present:
@@ -57,7 +58,7 @@ def validate_observation_policy(manifest):
                      and re.fullmatch('[0-9a-f]{64}', item['proof_sha256'])
                      and item['anchor_root'] not in roots, 'RECOVERY_LINEAGE_IDENTITY_REQUIRED')
             roots.add(item['anchor_root'])
-    if v5:
+    if v5 or v6:
         proof = contract.get('root_budget_recovery_proof')
         _require(lineage_present and isinstance(contract.get('root_budget_recovery_lineage'), list)
                  and contract['root_budget_recovery_lineage'] and isinstance(proof, dict)
@@ -66,7 +67,27 @@ def validate_observation_policy(manifest):
                  and isinstance(proof['path'], str) and Path(proof['path']).is_absolute()
                  and isinstance(proof['sha256'], str) and re.fullmatch('[0-9a-f]{64}', proof['sha256']),
                  'EXPLICIT_V5_ROOT_BUDGET_PROOF_REQUIRED')
-    _require((v4 or inherited or v5) and _c()._equal(manifest.get('observation_policy'), OBSERVATION_POLICY),
+    if v6:
+        proof = contract.get('provider_unknown_recovery_proof')
+        lineage = contract.get('provider_unknown_recovery_lineage')
+        _require(isinstance(proof, dict) and set(proof) == {'version','path','sha256'}
+            and proof['version'] == 'provider_unknown_stop_proof_v1'
+            and isinstance(proof['path'], str) and Path(proof['path']).is_absolute()
+            and isinstance(proof['sha256'], str) and re.fullmatch('[0-9a-f]{64}', proof['sha256'])
+            and isinstance(lineage,list) and bool(lineage), 'EXPLICIT_V6_PROVIDER_UNKNOWN_PROOF_REQUIRED')
+        roots = set()
+        for item in lineage:
+            _require(isinstance(item,dict) and set(item) == {'anchor_root','proof_ref','root_id','position'}
+                and isinstance(item['anchor_root'],str) and Path(item['anchor_root']).is_absolute()
+                and item['anchor_root'] not in roots and isinstance(item['root_id'],str) and bool(item['root_id'])
+                and type(item['position']) is int and 0 <= item['position'] < 96
+                and isinstance(item['proof_ref'],dict) and set(item['proof_ref']) == {'version','path','sha256'}
+                and item['proof_ref']['version'] == 'provider_unknown_stop_proof_v1'
+                and isinstance(item['proof_ref']['path'],str) and Path(item['proof_ref']['path']).is_absolute()
+                and isinstance(item['proof_ref']['sha256'],str) and re.fullmatch('[0-9a-f]{64}',item['proof_ref']['sha256']),
+                'PROVIDER_UNKNOWN_LINEAGE_CHANGED')
+            roots.add(item['anchor_root'])
+    _require((v4 or inherited or v5 or v6) and _c()._equal(manifest.get('observation_policy'), OBSERVATION_POLICY),
              'EXACT_V4_OBSERVATION_POLICY_REQUIRED')
     return True
 

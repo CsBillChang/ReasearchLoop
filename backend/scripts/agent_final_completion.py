@@ -121,7 +121,7 @@ def _cached_anchor_locked(kind, anchor_root, seen, validate):
         if expected and str(root) in expected and all(capture['seals'].get(path) == digest for path, digest in expected.items()):
             entries = []
             for cache in (_ANCHOR_CACHE, *[getattr(sys.modules.get(name), '_PARSED_ANCHORS', {}) for name in
-                    ('agent_final_completion_chain', 'agent_final_observation_recovery', 'agent_final_root_budget_recovery')]):
+                    ('agent_final_completion_chain', 'agent_final_observation_recovery', 'agent_final_root_budget_recovery', 'agent_final_provider_unknown_recovery')]):
                 entries.extend((cache, cache_key) for cache_key in cache)
             _IMMUTABLE_CONTEXTS[key] = {'capture': capture, 'value': deepcopy(value), 'sql_entries': entries}
             _VALIDATION_CACHE_COUNTS['published'] += 1
@@ -135,7 +135,7 @@ def clear_validation_caches():
     with _ANCHOR_VALIDATION_LOCK:
         _IMMUTABLE_CONTEXTS.clear(); _ANCHOR_CACHE.clear(); _VALIDATION_CACHE_COUNTS.clear()
         _helpers()._HASH_CACHE.clear()
-        for name in ('agent_final_completion_chain', 'agent_final_observation_recovery', 'agent_final_root_budget_recovery'):
+        for name in ('agent_final_completion_chain', 'agent_final_observation_recovery', 'agent_final_root_budget_recovery', 'agent_final_provider_unknown_recovery'):
             module = sys.modules.get(name)
             if module is not None:module._PARSED_ANCHORS.clear()
 
@@ -566,11 +566,13 @@ def _sources(manifest, original):
         'backend/scripts/harness_ab_budget.py', 'backend/scripts/harness_financial_process.py',
         'backend/scripts/agent_final_completion_chain.py', 'backend/scripts/agent_final_pdf_acquisition.py'}
     contract = manifest.get('completion_contract') or {}
-    if (contract.get('version') in {'agent_final_completion_v4', 'agent_final_completion_v5'}
+    if (contract.get('version') in {'agent_final_completion_v4', 'agent_final_completion_v5', 'agent_final_completion_v6'}
             or contract.get('observation_recovery_lineage')):
         allowed |= {'backend/scripts/agent_final_observation_recovery.py'}
-    if contract.get('version') == 'agent_final_completion_v5':
+    if contract.get('version') in {'agent_final_completion_v5', 'agent_final_completion_v6'}:
         allowed |= {'backend/scripts/agent_final_root_budget_recovery.py'}
+    if contract.get('version') == 'agent_final_completion_v6':
+        allowed |= {'backend/scripts/agent_final_provider_unknown_recovery.py'}
     for key in ('settings', 'variant_settings', 'pair_review_policy', 'final_suite_policy'):
         _require(_equal(manifest.get(key), original.get(key)), 'EXPERIMENT_CONDITIONS_CHANGED')
     _require(_equal(h._read(manifest['model_manifest_path']), h._read(original['model_manifest_path'])),
@@ -579,13 +581,16 @@ def _sources(manifest, original):
     for variant in ('A', 'B'):
         expected = original['prompt_bundle_source_contract']['variants'][variant]['source_files']
         actual = h._runtime_files(Path(manifest['source_roots'][variant]))
-        if (contract.get('version') in {'agent_final_completion_v4', 'agent_final_completion_v5'}
+        if (contract.get('version') in {'agent_final_completion_v4', 'agent_final_completion_v5', 'agent_final_completion_v6'}
                 or contract.get('observation_recovery_lineage')):
             _require('backend/scripts/agent_final_observation_recovery.py' in actual,
                      'RECOVERY_RUNTIME_HELPER_REQUIRED')
-        if contract.get('version') == 'agent_final_completion_v5':
+        if contract.get('version') in {'agent_final_completion_v5', 'agent_final_completion_v6'}:
             _require('backend/scripts/agent_final_root_budget_recovery.py' in actual,
                      'ROOT_BUDGET_RECOVERY_RUNTIME_HELPER_REQUIRED')
+        if contract.get('version') == 'agent_final_completion_v6':
+            _require('backend/scripts/agent_final_provider_unknown_recovery.py' in actual,
+                     'PROVIDER_UNKNOWN_RUNTIME_HELPER_REQUIRED')
         _require(set(expected) <= set(actual) and set(actual) - set(expected) <= allowed, 'RUNTIME_FILE_SET_CHANGED')
         hashes = {rel: h._hash(path) for rel, path in actual.items()}
         _require(all(hashes[rel] == digest for rel, digest in expected.items() if rel not in allowed),
@@ -609,6 +614,9 @@ def validate_completion(manifest):
     try:
         _require('continuation_contract' not in manifest, 'TWO_CONTRACT_KEYS_FORBIDDEN')
         supplied = manifest['completion_contract']
+        if isinstance(supplied, dict) and supplied.get('version') == 'agent_final_completion_v6':
+            from agent_final_provider_unknown_recovery import validate_provider_unknown_recovery
+            return validate_provider_unknown_recovery(manifest)
         if isinstance(supplied, dict) and supplied.get('version') == 'agent_final_completion_v5':
             from agent_final_root_budget_recovery import validate_root_budget_recovery
             return validate_root_budget_recovery(manifest)

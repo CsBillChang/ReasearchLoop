@@ -24,6 +24,9 @@ def _require(value, reason):
 def _parent(manifest, seen):
     value = manifest.get('completion_contract')
     _require(isinstance(value, dict), 'EXPLICIT_PARENT_REQUIRED')
+    if value.get('version') == 'agent_final_completion_v6':
+        from agent_final_provider_unknown_recovery import validate_provider_unknown_recovery
+        return validate_provider_unknown_recovery(manifest, _seen=seen)
     if value.get('version') == 'agent_final_completion_v5':
         from agent_final_root_budget_recovery import validate_root_budget_recovery
         return validate_root_budget_recovery(manifest, _seen=seen)

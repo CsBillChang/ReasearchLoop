@@ -139,7 +139,7 @@ def closure_status(reader,root,manifest):
                 and auth.get('round_started_at')==current.get('round_started_at')
                 and auth.get('round_started_at')==(manifest['completion_contract'].get('clock') or {}).get('round_started_at')))
     supplement=reader.json(root/'audit/post-run-safety-supplement.json',{}) or {}
-    v5=(manifest.get('completion_contract') or {}).get('version')=='agent_final_completion_v5'
+    v5=(manifest.get('completion_contract') or {}).get('version') in {'agent_final_completion_v5','agent_final_completion_v6'}
     corrected_stop=supplement.get('status')=='passed_final_safety_with_original_missing_post_readback'
     if v5 or corrected_stop:
         def load(relative,parse=True):
@@ -354,7 +354,7 @@ def analyze_cell(reader,root,manifest,case_id,variant,ledger,controller,*,artifa
                                                  'native_usage_match','archive_usage_match','peak_cost_match'])
         checks['passed']=passed;receipt_checks.append(checks)
         if passed:valid.append((reservation,usage))
-    if (manifest.get('completion_contract') or {}).get('version')=='agent_final_completion_v5':
+    if (manifest.get('completion_contract') or {}).get('version') in {'agent_final_completion_v5','agent_final_completion_v6'}:
         if result.get('ledger_halt') is not None:row['issues'].append('ledger_halted')
         if any(x.get('status')=='not_sent' for x in native or []):
             row['issues'].append('native_not_sent_requires_retained_root_budget_proof')
@@ -571,12 +571,22 @@ def completion_artifacts(reader,manifest,context):
                          artifact_cell=cell,score_manifest=score_owner)
         row['continuation_provenance']={'retained':not technical,**provenance}
         row['original_batch_record']=item
-        if (not technical and context.get('version')=='agent_final_completion_v5'
-                and (item.get('root_budget_stop_verified') is True or item.get('issues'))):
-            from agent_final_root_budget_recovery import retained_budget_stop_receipts
-            proofs=retained_budget_stop_receipts(manifest,cell,reader.json(cell/'result.json'),
+        if (not technical and context.get('version') in {'agent_final_completion_v5','agent_final_completion_v6'}
+                and (item.get('root_budget_stop_verified') is True or item.get('provider_unknown_stop_verified') is True or item.get('issues'))):
+            if context.get('version') == 'agent_final_completion_v6':
+                from agent_final_provider_unknown_recovery import retained_provider_unknown_receipts as retained_receipts
+            else:
+                from agent_final_root_budget_recovery import retained_budget_stop_receipts as retained_receipts
+            proofs=retained_receipts(manifest,cell,reader.json(cell/'result.json'),
                 reader.json(cell/'task-view.json'),item,context=context)
-            if proofs is not None:
+            if proofs is not None and proofs.get('provider_unknown_stop_verified') is True:
+                row.update(provider_unknown_stop_verified=True, receipt_state_verified=True, actual_usage_known=False,
+                    original_reconciliation_issues=list(item['issues']), original_reconciliation_passed=False,
+                    provider_unknown_stop_outcome='failed_with_sent_unknown_provider_receipt')
+                row['issues']=[issue for issue in row['issues'] if issue != 'ledger_halted']
+                row['actual_task_family_tokens']=row['actual_task_family_nano_yuan']=None
+                row['usage_reconciled']=False
+            elif proofs is not None:
                 if proofs.get('root_budget_stop_verified') is not True:
                     raise PermissionError('retained budget stop requires verified physical proof')
                 row['root_budget_stop_verified']=True
@@ -648,12 +658,15 @@ def _execution_gate_failures(rows,context):
     """原执行门失败另列；财务可对账不撤销partial或改变主观测归属。"""
     failures=[]
     lineage=(context or {}).get('root_budget_recovery_lineage',[])
+    provider_lineage=(context or {}).get('provider_unknown_recovery_lineage',[])
     for row in rows:
         if row.get('original_reconciliation_passed') is not False:
             continue
         verified=row.get('root_budget_stop_verified') is True
-        matches=[item for item in lineage if item.get('root_id')==row['root_id']]
-        if verified and (len(matches)!=1 or not isinstance(matches[0].get('proof_ref'),dict)):
+        provider=row.get('provider_unknown_stop_verified') is True
+        if verified and provider: raise ValueError('stop explanation kind ambiguous')
+        matches=[item for item in (provider_lineage if provider else lineage) if item.get('root_id')==row['root_id']]
+        if (verified or provider) and (len(matches)!=1 or not isinstance(matches[0].get('proof_ref'),dict)):
             raise ValueError('verified retained budget stop requires its unique proof reference')
         original=row.get('original_batch_record') or {}
         provenance=row.get('continuation_provenance') or original.get('provenance') or {}
@@ -663,14 +676,19 @@ def _execution_gate_failures(rows,context):
                 'manifest_sha256':original.get('source_manifest_sha256')},
             'original_reconciliation_issues':list(row.get('original_reconciliation_issues',original.get('issues',[]))),
             'original_reconciliation_passed':False,'root_budget_stop_verified':verified,
-            'verified_explanation':row.get('budget_stop_outcome') if verified else None,
-            'proof_ref':dict(matches[0]['proof_ref']) if verified else None,
+            'provider_unknown_stop_verified':provider,'stop_explanation_verified':verified or provider,
+            'verified_explanation':row.get('budget_stop_outcome') if verified else row.get('provider_unknown_stop_outcome') if provider else None,
+            'proof_ref':dict(matches[0]['proof_ref']) if verified or provider else None,
             'actual_usage_known':row.get('usage_reconciled') is True and nonnegative(row.get('actual_task_family_tokens')),
             'actual_task_family_tokens':row.get('actual_task_family_tokens'),
+            'verified_settled_tokens_lower_bound':row.get('verified_settled_tokens_lower_bound'),
+            'verified_settled_nano_yuan_lower_bound':row.get('verified_settled_nano_yuan_lower_bound'),
             'retained_primary_observation':True,'technical_retry':False})
     expected=[dict(item) for item in failures if item['root_budget_stop_verified']]
     return {'preserved_execution_gate_failures':failures,'preserved_execution_gate_failure_count':len(failures),
-            'expected_budget_stop_observations':expected,'expected_budget_stop_observation_count':len(expected)}
+            'expected_budget_stop_observations':expected,'expected_budget_stop_observation_count':len(expected),
+            'expected_provider_unknown_observations':[item for item in failures if item['provider_unknown_stop_verified']],
+            'expected_provider_unknown_observation_count':sum(item['provider_unknown_stop_verified'] for item in failures)}
 
 
 def summarize(reader,root,manifest,progress=False):
@@ -734,7 +752,8 @@ def summarize(reader,root,manifest,progress=False):
     unassigned=[r['reservation_id'] for r in raw or [] if r['root_id'] not in root_ids]
     if unassigned:issues.append('physical_reservation_root_unassigned')
     for r in rows:
-        if r['root_id'] and (r['issues'] or not r.get('usage_reconciled')):
+        if r['root_id'] and (r['issues'] or (not r.get('usage_reconciled')
+                and r.get('provider_unknown_stop_verified') is not True)):
             issues.append(r['expanded_case_id']+'-'+r['variant']+':incomplete_or_inconsistent_evidence')
         if r['score'].get('whole_answer_quality')=='full' and r['end_to_end'].get('delivery_ready_observed') is not True:
             issues.append(r['expanded_case_id']+'-'+r['variant']+':full_grade_without_observed_complete_delivery')
@@ -898,8 +917,11 @@ def report_text(summary):
         for item in preserved:
             lines.append('保留停点 '+item['case_id']+'-'+item['variant']+'；状态 '+item['status']+
                 '；原reconciliation_passed=False；原issues '+json.dumps(item['original_reconciliation_issues'],ensure_ascii=False)+
-                '；解释已验证 '+str(item['root_budget_stop_verified'])+'；实际用量可知 '+str(item['actual_usage_known'])+
+                '；解释已验证 '+str(item.get('stop_explanation_verified',item['root_budget_stop_verified']))+'；实际用量可知 '+str(item['actual_usage_known'])+
                 '；来源 '+json.dumps(item['source'],ensure_ascii=False)+'；证明 '+json.dumps(item['proof_ref'],ensure_ascii=False)+'。')
+    if summary.get('expected_provider_unknown_observation_count',0):
+        lines+=['','已验证Provider未知收据失败主观测 '+str(summary['expected_provider_unknown_observation_count'])+
+            ' 个；原failed与issues保留，不转technical、不重跑；实际Token/费用为N/A，已知结算仅为下限，完整预留继续占用。']
     quality_line=('本轮不设B full固定下限；A/B完整质量标签均披露。相对质量未退化 '+str(q['relative_quality_non_regression'])+
                   '；用于等质效率结论的质量条件 '+str(q['quality_gate_passed'])+'。') if summary.get('evaluation_policy') else (
                   'B full门槛 '+str(q['required_B_full'])+'/48；质量门 '+str(q['quality_gate_passed'])+'。')
