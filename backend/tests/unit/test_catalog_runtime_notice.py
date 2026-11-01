@@ -114,6 +114,22 @@ class CatalogRuntimeNoticeTests(unittest.TestCase):
             self.assertNotIn('PRIVATE_SCORE_SENTINEL', text)
             self.assertNotIn('PRIVATE_TITLE_SENTINEL', text)
 
+    def test_loaded_identity_stays_cold_while_outbound_description_is_complete(self):
+        from prompt_bundle_ab import loaded_identity, verify_loaded
+        from research_loop.agents import supervisor
+        source = Path(supervisor.__file__).resolve().parents[3]
+        cold = loaded_identity(source)
+        manifest = {'source_roots': {'B': str(source)}, 'loaded_prompt_contract': {'B': cold}}
+        verify_loaded(manifest, 'B')
+        raw_spec = next(spec for spec in specs() if spec.name == 'search_papers')
+        original = raw_spec.schema()
+        with ExitStack() as stack:
+            install_catalog(stack, _Discovery, self.catalog_case(), self.bundles)
+            self.assertIn('共2条', self.description(self.schemas()))
+            verify_loaded(manifest, 'B')
+            self.assertEqual(raw_spec.schema(), original)
+        verify_loaded(manifest, 'B')
+
 
 if __name__ == '__main__':
     unittest.main()

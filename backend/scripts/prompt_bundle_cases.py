@@ -149,9 +149,9 @@ def install_catalog(stack, discovery_type, case: dict, bundles: dict) -> dict:
     stack.enter_context(patch.object(discovery_type, 'search', new=search))
     # 来源替换仅在实验进程生效；模型须在第一次调用前知道实际入口。
     # 不修改角色提示词、参数、检索排序或授权，也不将私有题录全文注入说明。
-    from research_loop.tools.base import ToolSpec
+    from research_loop.tools.registry import ToolRegistry
     from research_loop.tools.papers import _search
-    original_schema = getattr(ToolSpec.schema, '_catalog_base_schema', ToolSpec.schema)
+    original_schemas = getattr(ToolRegistry.schemas, '_catalog_base_schemas', ToolRegistry.schemas)
     source_names = sorted({candidate.source for candidate in candidates})
     source_notice = (
         f' 本轮已配置可检索的本地候选题录池，共{len(candidates)}条，仅查询该池，不访问实时互联网。'
@@ -163,15 +163,17 @@ def install_catalog(stack, discovery_type, case: dict, bundles: dict) -> dict:
            if any(candidate.metadata.get('material_id') for candidate in candidates) else '')
         + '题名、链接和摘要仅为题录信息，不表示已读正文；发布日期未经本池核实。')
 
-    def catalog_schema(spec):
-        """只装饰真实注册的搜索工具，隐藏工具仍由原注册表过滤。"""
-        result = original_schema(spec)
-        if spec.name == 'search_papers' and spec.handler is _search:
-            result['function']['description'] += source_notice
+    def catalog_schemas(registry, role=None):
+        """装饰实际出站工具；基础spec仍参与原样冷启动身份校验。"""
+        result = original_schemas(registry, role)
+        for item in result:
+            name = item['function']['name']
+            if name == 'search_papers' and registry.get(name).handler is _search:
+                item['function']['description'] += source_notice
         return result
 
-    catalog_schema._catalog_base_schema = original_schema
-    stack.enter_context(patch.object(ToolSpec, 'schema', new=catalog_schema))
+    catalog_schemas._catalog_base_schemas = original_schemas
+    stack.enter_context(patch.object(ToolRegistry, 'schemas', new=catalog_schemas))
     return {'kind': 'controlled_local_catalog', 'candidate_count': len(candidates),
             'live_search': False, 'original_evidence_grants_created': False,
             'runtime_source_notice': source_notice.strip(),

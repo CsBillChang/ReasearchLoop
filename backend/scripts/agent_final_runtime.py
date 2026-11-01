@@ -61,8 +61,13 @@ def validate_suite_manifest(manifest):
                 raise PermissionError('FINAL_SNAPSHOT_MATERIAL_PATH_CHANGED')
     cases = data['cases']
     order = manifest['execution_order']
-    if (len(cases) != 48 or len({c['case_id'] for c in cases}) != 48
-            or len(order) != 96 or len({tuple(c) for c in order}) != 96
+    supplement = (manifest.get('completion_contract') or {}).get('version') == 'agent_supplement12_v1'
+    expected_cases, expected_cells = (6, 12) if supplement else (48, 96)
+    if supplement:
+        from agent_supplement12 import validate
+        validate(manifest)
+    if (len(cases) != expected_cases or len({c['case_id'] for c in cases}) != expected_cases
+            or len(order) != expected_cells or len({tuple(c) for c in order}) != expected_cells
             or sorted(order) != sorted(manifest['ledger_limits']['allowed_cells'])
             or any(c.get('suite_kind') != 'agent_final_v1' for c in cases)
             or any(order.count([c['case_id'],v]) != 1 for c in cases for v in ('A','B'))):
@@ -91,7 +96,7 @@ def validate_suite_manifest(manifest):
                     or path.stat().st_nlink != 1 or digest(path) != material['pdf_sha256']
                     or copy_hashes.get(str(path.resolve())) != material['pdf_sha256']):
                 raise PermissionError('FINAL_PDF_COPY_REQUIRED')
-    return {'cases':48,'cells':96,'input_root':str(root)}
+    return {'cases':expected_cases,'cells':expected_cells,'input_root':str(root)}
 
 
 def cell_directory(manifest,case_id,variant,mode):

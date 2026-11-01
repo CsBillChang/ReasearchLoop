@@ -614,6 +614,9 @@ def validate_completion(manifest):
     try:
         _require('continuation_contract' not in manifest, 'TWO_CONTRACT_KEYS_FORBIDDEN')
         supplied = manifest['completion_contract']
+        if isinstance(supplied, dict) and supplied.get('version') == 'agent_supplement12_v1':
+            from agent_supplement12 import validate
+            return validate(manifest)
         if isinstance(supplied, dict) and supplied.get('version') == 'agent_final_completion_v6':
             from agent_final_provider_unknown_recovery import validate_provider_unknown_recovery
             return validate_provider_unknown_recovery(manifest)

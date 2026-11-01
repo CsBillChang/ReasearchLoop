@@ -39,8 +39,12 @@ class NormalScenario:
         self.requests = []
         self.handoff_request = None
         self.selected = None
+        self.identity_manifest = None
 
     def send(self, messages, tools, **kwargs):
+        if self.identity_manifest is not None:
+            from prompt_bundle_ab import verify_loaded
+            verify_loaded(self.identity_manifest, 'B')
         self.requests.append(copy.deepcopy({'messages': messages, 'tools': tools}))
         names = {item['function']['name'] for item in tools}
         respond = ProgressScenario.response
@@ -103,7 +107,7 @@ class NormalScenario:
 class NormalDeliveryBoundaryTests(unittest.TestCase):
     """复现普通RPC检索和传输中断，检查实际HTTP任务视图与持久收据。"""
 
-    def run_case(self, mode='screen', recovery=False, catalog=False):
+    def run_case(self, mode='screen', recovery=False, catalog=False, verify_identity=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             settings = Settings(project_root=root, data_dir=root/'data', output_dir=root/'output',
@@ -113,6 +117,12 @@ class NormalDeliveryBoundaryTests(unittest.TestCase):
             db = Database(settings.database_url)
             db.ensure_schema()
             scenario = NormalScenario(mode)
+            if verify_identity:
+                from prompt_bundle_ab import loaded_identity
+                from research_loop.agents import supervisor
+                source = Path(supervisor.__file__).resolve().parents[3]
+                scenario.identity_manifest = {'source_roots': {'B': str(source)},
+                    'loaded_prompt_contract': {'B': loaded_identity(source)}}
             rpc_requests = []
             def rpc(request):
                 rpc_requests.append(json.loads(request.content))
@@ -188,7 +198,7 @@ class NormalDeliveryBoundaryTests(unittest.TestCase):
         self.assertEqual(result['parent_papers'], [PAPER_ID])
 
     def test_experiment_notice_reaches_first_root_and_child_requests(self):
-        result = self.run_case(catalog=True)
+        result = self.run_case(catalog=True, verify_identity=True)
         self.assertEqual(result['view']['status'], 'completed', result['view'])
         self.assertFalse(result['rpc_requests'])
         first_by_role = {}
