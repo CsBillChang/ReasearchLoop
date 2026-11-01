@@ -147,8 +147,34 @@ def install_catalog(stack, discovery_type, case: dict, bundles: dict) -> dict:
             query_scope=('frozen_local_candidate_pool_lexical_bm25_not_web_search' if final_suite
                          else 'frozen_local_candidate_pool_unranked_not_web_search'))
     stack.enter_context(patch.object(discovery_type, 'search', new=search))
+    # 来源替换仅在实验进程生效；模型须在第一次调用前知道实际入口。
+    # 不修改角色提示词、参数、检索排序或授权，也不将私有题录全文注入说明。
+    from research_loop.tools.base import ToolSpec
+    from research_loop.tools.papers import _search
+    original_schema = getattr(ToolSpec.schema, '_catalog_base_schema', ToolSpec.schema)
+    source_names = sorted({candidate.source for candidate in candidates})
+    source_notice = (
+        f' 本轮已配置可检索的本地候选题录池，共{len(candidates)}条，仅查询该池，不访问实时互联网。'
+        '题录池不作为附件或Memory记录出现；附件或历史为空不表示题录不可查询。'
+        '检索整个池时省略sources；sources仅筛选论文来源标签，不表示存储位置或题录池名称。'
+        f'本池实际来源标签为{source_names!r}；local不是整个池的别名。'
+        '单次limit最多20；truncated表示仍有候选未返回。'
+        + ('返回metadata.material_id是该候选在本池的材料编号，paper_id是读取/委派身份。'
+           if any(candidate.metadata.get('material_id') for candidate in candidates) else '')
+        + '题名、链接和摘要仅为题录信息，不表示已读正文；发布日期未经本池核实。')
+
+    def catalog_schema(spec):
+        """只装饰真实注册的搜索工具，隐藏工具仍由原注册表过滤。"""
+        result = original_schema(spec)
+        if spec.name == 'search_papers' and spec.handler is _search:
+            result['function']['description'] += source_notice
+        return result
+
+    catalog_schema._catalog_base_schema = original_schema
+    stack.enter_context(patch.object(ToolSpec, 'schema', new=catalog_schema))
     return {'kind': 'controlled_local_catalog', 'candidate_count': len(candidates),
             'live_search': False, 'original_evidence_grants_created': False,
+            'runtime_source_notice': source_notice.strip(),
             **({'ranking': 'lexical_bm25_all_eligible_stable_ties', 'catalog_capacity': 54}
                if final_suite else {})}
 
