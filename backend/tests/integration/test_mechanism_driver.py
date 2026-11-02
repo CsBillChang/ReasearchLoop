@@ -185,3 +185,40 @@ class DriverTests(unittest.TestCase):
 
     def test_timeout_is_clipped_to_earlier_hard_cutoff(self):
         self._timeout_probe(stream=True, clipped=True)
+
+    def test_explicit_unbounded_matrix_keeps_bounded_cleanup(self):
+        self.manifest['limits'] = {'budget_mode': 'unbounded', 'tokens': None, 'requests': None,
+            'nano_yuan': None, 'admission_seconds': None, 'total_seconds': None}
+        self.manifest_path.write_text(json.dumps(self.manifest))
+        self.freeze = RunContract(self.manifest, self.auth).freeze_sha256
+        self.deadline = Deadline.without_global_limit(time.time() - 3000, time.monotonic() - 3000)
+        payload = self.payload('B')
+        record = launch_case(payload, self.batch/'B', deadline=self.deadline, interpreter=sys.executable)
+        self.assertEqual(record['returncode'], 0,
+            (record, (self.batch/'B/process.log').read_text()))
+        self.assertTrue(record['cleanup_complete'], record)
+        self.assertFalse(record['enforce_global_deadline'])
+        self.assertIsNone(record['admission_deadline_wall'])
+        self.assertIsNone(record['total_deadline_wall'])
+        self.assertLessEqual(record['cleanup_deadline_wall'] - record['cleanup_started_wall'], 300)
+        result = json.loads((Path(payload['settings']['project_root'])/'qualified-result.json').read_text())
+        self.assertEqual(result['budget']['physical_sent_requests'], 3)
+        self.assertEqual(result['budget']['actual_known_tokens'], 45)
+        self.assertIsNone(result['budget']['batch_absolute_deadline'])
+        self.assertEqual(result['real_model_calls'], 0)
+
+    def test_unbounded_mode_still_uses_frozen_request_timeout(self):
+        self.manifest['limits'] = {'budget_mode': 'unbounded', 'tokens': None, 'requests': None,
+            'nano_yuan': None, 'admission_seconds': None, 'total_seconds': None}
+        self.deadline = Deadline.without_global_limit(time.time() - 3000, time.monotonic() - 3000)
+        self._timeout_probe(stream=True)
+
+    def test_unbounded_manifest_rejects_a_bounded_supervisor(self):
+        self.manifest['limits'] = {'budget_mode': 'unbounded', 'tokens': None, 'requests': None,
+            'nano_yuan': None, 'admission_seconds': None, 'total_seconds': None}
+        self.manifest_path.write_text(json.dumps(self.manifest))
+        self.freeze = RunContract(self.manifest, self.auth).freeze_sha256
+        payload = self.payload('B')
+        with self.assertRaisesRegex(PermissionError, 'DEADLINE_MISMATCH'):
+            launch_case(payload, self.batch/'B', deadline=self.deadline)
+        self.assertFalse((self.batch/'B').exists())

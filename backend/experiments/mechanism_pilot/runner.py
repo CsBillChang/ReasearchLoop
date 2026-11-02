@@ -90,7 +90,8 @@ def execute_prepared_case(payload, *, inner_factory=None):
     ledger_path = Path(payload['ledger_path']).resolve()
     if ledger_path.parent != runtime_root or ledger_path.name != 'budget.sqlite3':
         raise PermissionError('MECHANISM_LEDGER_OUTSIDE_BATCH')
-    ledger = pilot_ledger(ledger_path, allowed_cells=manifest['cells'], start_time=payload['started_at'])
+    ledger = pilot_ledger(ledger_path, allowed_cells=manifest['cells'], start_time=payload['started_at'],
+                          limits=manifest['limits'])
     if ledger.snapshot()['started_at'] != payload['started_at']:
         raise PermissionError('MECHANISM_LEDGER_CLOCK_MISMATCH')
     box = {}
@@ -123,7 +124,7 @@ def execute_prepared_case(payload, *, inner_factory=None):
         execution_kind=mode, authorize=authorize, freeze_sha256=contract.freeze_sha256,
         on_task_created=created)
     if phase == 'R':
-        factory = FrozenResourcesFactory(payload['resources_manifest'], payload['resources_sha256'])
+        factory = FrozenResourcesFactory(payload['resources_manifest'], payload['resources_sha256'], prepare_lexical=True)
         result = execute_case(payload['input_path'], root, resource_factory=factory, **common)
     elif phase == 'M':
         result = execute_memory_case(payload['input_path'], root, **common)
@@ -156,7 +157,9 @@ def launch_case(payload, runtime_root, *, deadline, interpreter=sys.executable):
                               real=payload.get('execution_kind', 'substitute') == 'real')
     if grant.get('allow_real_model') and grant['started_at'] != deadline.started_wall:
         raise PermissionError('MECHANISM_APPROVAL_CLOCK_MISMATCH')
-    if (deadline.admission_seconds != manifest['limits']['admission_seconds']
+    unbounded = manifest['limits'].get('budget_mode') == 'unbounded'
+    if (deadline.enforce_global_deadline == unbounded
+            or deadline.admission_seconds != manifest['limits']['admission_seconds']
             or deadline.total_seconds != manifest['limits']['total_seconds']):
         raise PermissionError('MECHANISM_SUPERVISOR_DEADLINE_MISMATCH')
     batch_root = Path(manifest['runtime_root']).resolve()
@@ -165,7 +168,8 @@ def launch_case(payload, runtime_root, *, deadline, interpreter=sys.executable):
             or Path(runtime_root).resolve().parent != batch_root
             or Path(settings.project_root).resolve().parent != Path(runtime_root).resolve()):
         raise PermissionError('MECHANISM_SUPERVISOR_PATH_MISMATCH')
-    ledger = pilot_ledger(ledger_path, allowed_cells=manifest['cells'], start_time=payload['started_at'])
+    ledger = pilot_ledger(ledger_path, allowed_cells=manifest['cells'], start_time=payload['started_at'],
+                          limits=manifest['limits'])
     if ledger.snapshot()['started_at'] != payload['started_at'] or payload['started_at'] != deadline.started_wall:
         raise PermissionError('MECHANISM_FIXED_START_MISMATCH')
 

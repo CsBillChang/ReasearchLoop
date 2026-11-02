@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import json
+import threading
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -12,6 +13,7 @@ import httpx
 from research_loop.domain.evidence import Document
 from research_loop.domain.retrieval import fingerprint, split_page
 from research_loop.providers.pdf import PDFProvider
+from research_loop.providers.embeddings import LocalEmbedding
 from research_loop.services.indexing import IndexingService
 from research_loop.services.papers import PaperService
 from research_loop.storage.evidence_index import EvidenceIndexStore
@@ -132,7 +134,12 @@ class FrozenPagePDF(PDFProvider):
 class FrozenPageResources:
     """把冻结原件复制进实验根，并通过PaperService建立真实任务级授权。"""
 
-    def __init__(self, root, settings, case, entry):
+    def __init__(self, root, settings, case, entry, *, prepare_lexical=False):
+        if type(prepare_lexical) is not bool:
+            raise ValueError('FROZEN_EXPLICIT_LEXICAL_FLAG_REQUIRED')
+        self.prepare_lexical = prepare_lexical
+        self._lexical_embedding = None
+        self._lexical_lock = threading.RLock()
         self.root = validate_runtime(root, settings)
         self.settings, self.case = settings, case
         doc = case['model_input']['documents'][0]
@@ -230,9 +237,29 @@ class FrozenPageResources:
         finally:
             mock.close()
 
+    def _validate_and_prepare(self, task_id, db, document_ids):
+        """每次核对本任务权限，正式路线在首次查询前准备无神经调用的词项索引。"""
+        if db.kind != 'sqlite' or not Path(db.sqlite_path).resolve().is_relative_to(self.root):
+            raise ValueError('FROZEN_DATABASE_OUTSIDE_RUNTIME')
+        self.validate_scope(task_id, db, document_ids)
+        if not self.prepare_lexical:
+            return
+        with self._lexical_lock:
+            if self.lexical_report is not None:
+                existing = EvidenceIndexStore(db).get(self.lexical_report['index_id'])
+                if existing['bm25_status'] != 'ready':
+                    raise ValueError('FROZEN_PREPARED_LEXICAL_NOT_READY')
+                return
+            manifest = self.settings.retrieval_model_manifest
+            if manifest is None or not Path(manifest).is_file():
+                raise ValueError('FROZEN_MODEL_MANIFEST_REQUIRED_FOR_LEXICAL')
+            # 这里只验证固定模型/tokenizer并计算offset；不调用encode或重排。
+            self._lexical_embedding = self._lexical_embedding or LocalEmbedding(manifest)
+            self.prepare_lexical_index(task_id, db, self._lexical_embedding)
+
     def retrieval_factory(self, db, settings):
         validate_runtime(self.root, settings)
-        return ScopedRetrievalRuntime(db, settings, self.validate_scope)
+        return ScopedRetrievalRuntime(db, settings, self._validate_and_prepare)
 
     def report(self):
         return {'frozen_page_ready': True, 'source_pdf_copied_and_verified': True,
@@ -241,6 +268,7 @@ class FrozenPageResources:
             'retrieval_route': self.settings.retrieval_route,
             'reranker_backend': self.settings.retrieval_reranker_backend,
             'namespace': self.settings.retrieval_namespace, 'lexical': self.lexical_report,
+            'lexical_preparation_enabled': self.prepare_lexical,
             'neural_retrieval_qualified': False,
             'pending': ['live isolated vector endpoint and local model/runtime qualification before real execution']}
 
@@ -248,7 +276,10 @@ class FrozenPageResources:
 class FrozenResourcesFactory:
     """只消费外部冻结资格manifest，私有来源路径不写入公共源码。"""
 
-    def __init__(self, manifest_path, expected_sha256):
+    def __init__(self, manifest_path, expected_sha256, *, prepare_lexical=False):
+        if type(prepare_lexical) is not bool:
+            raise ValueError('FROZEN_EXPLICIT_LEXICAL_FLAG_REQUIRED')
+        self.prepare_lexical = prepare_lexical
         path = Path(manifest_path).resolve()
         if file_sha256(path) != expected_sha256:
             raise ValueError('FROZEN_MANIFEST_HASH_MISMATCH')
@@ -266,4 +297,4 @@ class FrozenResourcesFactory:
         entry = self.entries.get(case['case_id'])
         if entry is None:
             raise ValueError('FROZEN_CASE_NOT_IN_MANIFEST')
-        return FrozenPageResources(root, settings, case, entry)
+        return FrozenPageResources(root, settings, case, entry, prepare_lexical=self.prepare_lexical)

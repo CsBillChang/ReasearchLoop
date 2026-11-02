@@ -65,6 +65,11 @@ class QualificationTransport(httpx.BaseTransport):
                               ('max_output_tokens', self.max_output_tokens)):
             if key in grant and (type(grant[key]) is not int or grant[key] != expected):
                 raise PermissionError('QUALIFICATION_REQUEST_CAPACITY_GRANT_MISMATCH')
+        if ('budget_mode' in grant and grant['budget_mode']
+                != self.ledger.config.get('budget_mode', 'bounded')):
+            raise PermissionError('QUALIFICATION_LEDGER_MODE_GRANT_MISMATCH')
+        if grant.get('budget_mode') == 'unbounded' and grant.get('hard_deadline') is not None:
+            raise PermissionError('QUALIFICATION_UNBOUNDED_DEADLINE_MISMATCH')
         if hasattr(self, '_grant') and grant != self._grant:
             raise PermissionError('QUALIFICATION_AUTHORIZATION_CHANGED')
         return grant

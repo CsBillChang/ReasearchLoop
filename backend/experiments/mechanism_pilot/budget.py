@@ -26,7 +26,7 @@ class Ledger:
                  batch_seconds=5400, root_tokens=4_000_000, root_requests=32,
                  root_seconds=900, max_output_tokens=65_536, carried_usage=None,
                  enforce_batch_seconds=True, pricing=None, phase_limits=None,
-                 stop_new_after_seconds=None):
+                 stop_new_after_seconds=None, budget_mode=None):
         """创建专用账本；已有不完整发送记录的账本重新打开时保持冻结。"""
         self.path = Path(path).resolve()
         # 父驱动已准备共享目录时，不再触发逐格隔离所禁止的目录写入审计。
@@ -37,23 +37,33 @@ class Ledger:
             raise ValueError('global time enforcement must be an explicit boolean')
         self.enforce_batch_seconds = enforce_batch_seconds
         allowed_cells = allowed_cells or [(f'H1-Q{i}', variant) for i in range(1, 5) for variant in ('A', 'B')]
+        unbounded = budget_mode == 'unbounded'
+        if budget_mode not in {None, 'bounded', 'unbounded'}:
+            raise ValueError('unknown budget mode')
+        if unbounded and any(value is not None for value in (batch_tokens, batch_requests,
+                batch_yuan, batch_seconds, root_tokens, root_requests, root_seconds, stop_new_after_seconds)):
+            raise ValueError('unbounded mode requires explicit null aggregate limits')
         try:
-            amount = Decimal(str(batch_yuan))
+            amount = None if batch_yuan is None else Decimal(str(batch_yuan))
         except InvalidOperation as exc:
             raise ValueError('money budget must be a finite positive decimal') from exc
-        if not amount.is_finite() or amount <= 0:
+        if amount is None and not unbounded:
+            raise ValueError('null money budget requires explicit unbounded mode')
+        if amount is not None and (not amount.is_finite() or amount <= 0):
             raise ValueError('money budget must be a finite positive decimal')
-        nano_yuan = amount * Decimal(1_000_000_000)
-        if nano_yuan != nano_yuan.to_integral_value():
+        nano_yuan = None if amount is None else amount * Decimal(1_000_000_000)
+        if nano_yuan is not None and nano_yuan != nano_yuan.to_integral_value():
             raise ValueError('money budget must be exactly representable in nano yuan')
         self.config = {'allowed_cells': sorted([list(cell) for cell in allowed_cells]),
             'first_error_policy_version': 1,
             'batch_tokens': batch_tokens, 'batch_requests': batch_requests,
-            'batch_nano_yuan': int(nano_yuan), 'batch_seconds': batch_seconds,
+            'batch_nano_yuan': None if nano_yuan is None else int(nano_yuan), 'batch_seconds': batch_seconds,
             'root_tokens': root_tokens, 'root_requests': root_requests,
             'root_seconds': root_seconds, 'max_output_tokens': max_output_tokens,
             'input_nano_per_token': 2000, 'cached_input_nano_per_token': 40,
             'output_nano_per_token': 8000}
+        if budget_mode is not None:
+            self.config['budget_mode'] = budget_mode
         if pricing is not None:
             keys = {'input_nano_per_token', 'cached_input_nano_per_token', 'output_nano_per_token'}
             if (not isinstance(pricing, dict) or set(pricing) != keys
@@ -62,7 +72,7 @@ class Ledger:
                 raise ValueError('pricing must contain positive integer nano-yuan rates')
             self.config.update(pricing)
         if stop_new_after_seconds is not None:
-            if type(stop_new_after_seconds) is not int or not 0 < stop_new_after_seconds < batch_seconds:
+            if type(stop_new_after_seconds) is not int or not (stop_new_after_seconds > 0 and (batch_seconds is None or stop_new_after_seconds < batch_seconds)):
                 raise ValueError('new-send cutoff must precede hard deadline')
             self.config['stop_new_after_seconds'] = stop_new_after_seconds
         if phase_limits is not None:
@@ -72,9 +82,13 @@ class Ledger:
             for name, phase in phase_limits.items():
                 if (not isinstance(name, str) or not isinstance(phase, dict)
                         or set(phase) != {'cells', 'tokens', 'requests', 'seconds', 'max_output_tokens'}
-                        or any(type(phase[k]) is not int or phase[k] <= 0 for k in
-                               ('tokens', 'requests', 'seconds', 'max_output_tokens'))):
+                        or any(not (unbounded and phase[k] is None) and
+                               (type(phase[k]) is not int or phase[k] <= 0) for k in
+                               ('tokens', 'requests', 'seconds'))
+                        or type(phase['max_output_tokens']) is not int or phase['max_output_tokens'] <= 0):
                     raise ValueError('invalid phase limits')
+                if unbounded and any(phase[k] is not None for k in ('tokens', 'requests', 'seconds')):
+                    raise ValueError('unbounded phase aggregate limits must be explicit null')
                 cells = sorted([list(cell) for cell in phase['cells']])
                 if (not cells or any(len(cell) != 2 or cell not in self.config['allowed_cells']
                         or cell in seen for cell in cells) or len({tuple(c) for c in cells}) != len(cells)):
@@ -87,13 +101,16 @@ class Ledger:
         # 默认配置字节保持旧账本兼容；只有新显式合同可取消整批时限。
         if not enforce_batch_seconds:
             self.config['enforce_batch_seconds'] = False
-        if any(self.config[key] <= 0 for key in ('batch_tokens', 'batch_requests', 'batch_nano_yuan',
-                'batch_seconds', 'root_tokens', 'root_requests', 'root_seconds', 'max_output_tokens')):
-            raise ValueError('budget limits must be positive')
+        if (type(max_output_tokens) is not int or max_output_tokens <= 0
+                or any(not (unbounded and self.config[key] is None) and
+                       (type(self.config[key]) is not int or self.config[key] <= 0)
+                       for key in ('batch_tokens', 'batch_requests', 'batch_nano_yuan',
+                                   'batch_seconds', 'root_tokens', 'root_requests', 'root_seconds'))):
+            raise ValueError('budget limits must be positive or explicit unbounded null')
         self.carried_usage = self._validate_carried_usage(carried_usage)
         for usage_key, limit_key in (('tokens', 'batch_tokens'), ('requests', 'batch_requests'),
                 ('nano_yuan', 'batch_nano_yuan'), ('seconds', 'batch_seconds')):
-            if self.carried_usage[usage_key] > self.config[limit_key]:
+            if self.config[limit_key] is not None and self.carried_usage[usage_key] > self.config[limit_key]:
                 raise ValueError('carried usage exceeds original batch allowance: ' + usage_key)
         if any(self.carried_usage.values()):
             # 零扣减保持旧配置兼容；非零扣减属于新账本不可变合同，遗漏时不能重开。
@@ -205,13 +222,13 @@ class Ledger:
         if now < self._meta(db, 'last_clock'):
             raise BudgetHalt('clock moved backwards')
         self._put(db, 'last_clock', now)
-        if (self.enforce_batch_seconds and self.carried_usage['seconds'] + now - self._meta(db, 'started_at')
+        if (self.enforce_batch_seconds and self.config['batch_seconds'] is not None and self.carried_usage['seconds'] + now - self._meta(db, 'started_at')
                 >= self.config['batch_seconds']):
             raise BudgetHalt('batch time exhausted')
         cutoff = self.config.get('stop_new_after_seconds')
         if cutoff is not None and now - self._meta(db, 'started_at') >= cutoff:
             raise BudgetHalt('new-send cutoff reached; cleanup time reserved')
-        if root is not None and now - root['started_at'] >= self.config['root_seconds']:
+        if root is not None and self.config['root_seconds'] is not None and now - root['started_at'] >= self.config['root_seconds']:
             raise BudgetHalt('root time exhausted')
         return now
 
@@ -262,14 +279,14 @@ class Ledger:
         start = self._meta(db, 'phase_started:' + name)
         if start is None:
             self._put(db, 'phase_started:' + name, now)
-        elif now - start >= phase['seconds']:
+        elif phase['seconds'] is not None and now - start >= phase['seconds']:
             raise BudgetHalt('phase time exhausted: ' + name)
         roots = [row['root_id'] for row in db.execute('SELECT * FROM roots')
                  if self._phase(row['case_id'], row['variant'])[0] == name]
         totals = [self._totals(db, identity) for identity in roots]
-        if tokens and sum(row['tokens'] for row in totals) + tokens > phase['tokens']:
+        if tokens and phase['tokens'] is not None and sum(row['tokens'] for row in totals) + tokens > phase['tokens']:
             raise BudgetHalt('phase token budget exhausted: ' + name)
-        if tokens and sum(row['requests'] for row in totals) + 1 > phase['requests']:
+        if tokens and phase['requests'] is not None and sum(row['requests'] for row in totals) + 1 > phase['requests']:
             raise BudgetHalt('phase request budget exhausted: ' + name)
         if maximum > phase['max_output_tokens']:
             raise BudgetHalt('phase output maximum exceeded: ' + name)
@@ -308,11 +325,13 @@ class Ledger:
             now = self._time_check(db, root)
             self._phase_check(db, root, now, tokens, max_output_tokens)
             total, family = self._batch_totals(db), self._totals(db, root_id)
-            if total['requests'] + 1 > self.config['batch_requests'] or family['requests'] + 1 > self.config['root_requests']:
+            if ((self.config['batch_requests'] is not None and total['requests'] + 1 > self.config['batch_requests'])
+                    or (self.config['root_requests'] is not None and family['requests'] + 1 > self.config['root_requests'])):
                 raise BudgetHalt('request budget exhausted')
-            if total['tokens'] + tokens > self.config['batch_tokens'] or family['tokens'] + tokens > self.config['root_tokens']:
+            if ((self.config['batch_tokens'] is not None and total['tokens'] + tokens > self.config['batch_tokens'])
+                    or (self.config['root_tokens'] is not None and family['tokens'] + tokens > self.config['root_tokens'])):
                 raise BudgetHalt('token reservation budget exhausted')
-            if total['nano'] + nano > self.config['batch_nano_yuan']:
+            if self.config['batch_nano_yuan'] is not None and total['nano'] + nano > self.config['batch_nano_yuan']:
                 raise BudgetHalt('money reservation budget exhausted')
             identity = uuid4().hex
             db.execute('''INSERT INTO reservations(reservation_id,root_id,status,created_at,
@@ -452,7 +471,7 @@ class Ledger:
                 'current_charged_or_reserved': self._totals(db),
                 'batch_absolute_deadline': ((self._meta(db, 'started_at')
                     + self.config['batch_seconds'] - self.carried_usage['seconds'])
-                    if self.enforce_batch_seconds else None),
+                    if self.enforce_batch_seconds and self.config['batch_seconds'] is not None else None),
                 'actual_known_tokens': sum(r['actual_tokens'] for r in known),
                 'actual_known_input': sum(r['actual_input'] for r in known),
                 'actual_known_output': sum(r['actual_output'] for r in known),
@@ -462,24 +481,47 @@ class Ledger:
                 'reservations': reservations}
 
 
-def pilot_ledger(path, *, allowed_cells, clock=None, start_time=None):
-    """返回待审核的14任务共享硬总门；阶段Token仅受共同3M约束。
+BOUNDED_LIMITS = {'tokens': 3_000_000, 'requests': 96, 'nano_yuan': 12_000_000_000,
+                  'admission_seconds': 2400, 'total_seconds': 2700}
+UNBOUNDED_LIMITS = {'budget_mode': 'unbounded', 'tokens': None, 'requests': None,
+                    'nano_yuan': None, 'admission_seconds': None, 'total_seconds': None}
 
-    原2M/1M阶段软分配不当作独立硬门，因保守单请求上下文预留为1,048,576。
-    阶段各保留48请求与输出上限，3M总Token不可相加扩为6M。
+
+def validate_limits(limits):
+    """只接受旧有限合同或显式无总上限合同，缺字段不能默认为无限。"""
+    if limits == BOUNDED_LIMITS:
+        return 'bounded'
+    if limits == UNBOUNDED_LIMITS:
+        return 'unbounded'
+    raise ValueError('unsupported or incomplete aggregate limit contract')
+
+
+def pilot_ledger(path, *, allowed_cells, clock=None, start_time=None, limits=None):
+    """为冻结14格建新账本；无总上限仍记录全部使用量及首错。
+
+    limits=None保持旧3M/96/12元/45分钟合同。取消总限制必须显式传入
+    UNBOUNDED_LIMITS；不能通过缺字段、超大数值或修改旧账本获得。
     """
+    mode = validate_limits(BOUNDED_LIMITS if limits is None else limits)
     reflection = [list(cell) for cell in allowed_cells if cell[0] in {f'R{i:02}' for i in range(1, 7)}]
     memory = [list(cell) for cell in allowed_cells if cell[0] in {f'M{i}' for i in range(1, 5)}]
     if len(reflection) + len(memory) != len(allowed_cells) or not reflection or not memory:
         raise ValueError('pilot ledger requires the frozen Reflection and Memory cells')
+    unlimited = mode == 'unbounded'
     return Ledger(path, allowed_cells=allowed_cells, clock=clock, start_time=start_time,
-        batch_tokens=3_000_000, batch_requests=96, batch_yuan=12, batch_seconds=2700,
-        root_tokens=3_000_000, root_requests=48, root_seconds=1500,
-        max_output_tokens=8192, stop_new_after_seconds=2400,
+        batch_tokens=None if unlimited else 3_000_000,
+        batch_requests=None if unlimited else 96, batch_yuan=None if unlimited else 12,
+        batch_seconds=None if unlimited else 2700,
+        root_tokens=None if unlimited else 3_000_000,
+        root_requests=None if unlimited else 48, root_seconds=None if unlimited else 1500,
+        max_output_tokens=8192, stop_new_after_seconds=None if unlimited else 2400,
+        budget_mode='unbounded' if unlimited else None,
         pricing={'input_nano_per_token': 2400, 'cached_input_nano_per_token': 48,
                  'output_nano_per_token': 9600},
         phase_limits={
-            'reflection': {'cells': reflection, 'tokens': 3_000_000, 'requests': 48,
-                           'seconds': 1500, 'max_output_tokens': 8192},
-            'memory': {'cells': memory, 'tokens': 3_000_000, 'requests': 48,
-                       'seconds': 900, 'max_output_tokens': 4096}})
+            'reflection': {'cells': reflection, 'tokens': None if unlimited else 3_000_000,
+                           'requests': None if unlimited else 48,
+                           'seconds': None if unlimited else 1500, 'max_output_tokens': 8192},
+            'memory': {'cells': memory, 'tokens': None if unlimited else 3_000_000,
+                       'requests': None if unlimited else 48,
+                       'seconds': None if unlimited else 900, 'max_output_tokens': 4096}})

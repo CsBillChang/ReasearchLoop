@@ -4,6 +4,7 @@ import sys
 import tempfile
 import time
 import unittest
+import math
 
 from experiments.mechanism_pilot.lifecycle import Deadline, run_process
 
@@ -121,6 +122,39 @@ class LifecycleTests(unittest.TestCase):
         checkout.mkdir(); (checkout / '.git').write_text('synthetic worktree')
         with self.assertRaisesRegex(ValueError, 'OUTSIDE_CHECKOUT'):
             run_process([sys.executable, '-c', 'print("never")'], checkout / 'run', deadline=self.deadline())
+
+    def test_explicit_unbounded_mode_keeps_original_start_and_no_fake_deadline(self):
+        started_wall, started_monotonic = time.time() - 3000, time.monotonic() - 3000
+        deadline = Deadline.without_global_limit(started_wall, started_monotonic)
+        self.assertTrue(math.isinf(deadline.remaining()))
+        self.assertTrue(math.isinf(deadline.admission_remaining()))
+        result = self.run_child('print("no global deadline")', deadline=deadline)
+        self.assertEqual(result['original_started_wall'], started_wall)
+        self.assertEqual(result['original_started_monotonic'], started_monotonic)
+        self.assertIsNone(result['admission_deadline_wall'])
+        self.assertIsNone(result['total_deadline_wall'])
+        self.assertIsNone(result['finished_before_total_deadline'])
+        self.assertFalse(result['enforce_global_deadline'])
+        self.assertTrue(result['cleanup_complete'])
+        self.assertTrue(result['finished_before_cleanup_deadline'])
+
+    def test_unbounded_cancel_still_reaps_group_with_bounded_cleanup(self):
+        begin = time.monotonic()
+        deadline = Deadline.without_global_limit(time.time() - 3000, begin - 3000)
+        result = self.run_child('import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(3)',
+            deadline=deadline, stop_requested=lambda: 'synthetic_stop' if time.monotonic() - begin > .2 else False)
+        self.assertEqual(result['stop_reason'], 'cancelled:synthetic_stop')
+        self.assertIn('SIGKILL', result['signals_sent'])
+        self.assertTrue(result['process_group_stopped'])
+        self.assertTrue(result['cleanup_complete'])
+        self.assertLessEqual(result['cleanup_deadline_wall'] - result['cleanup_started_wall'], 300)
+        self.assertLess(time.monotonic() - begin, 2)
+
+    def test_unbounded_mode_requires_explicit_none_limits(self):
+        with self.assertRaisesRegex(ValueError, 'FIXED_DEADLINE'):
+            Deadline(time.time(), time.monotonic(), None, None)
+        with self.assertRaisesRegex(ValueError, 'MUST_BE_NONE'):
+            Deadline(time.time(), time.monotonic(), .2, .8, enforce_global_deadline=False)
 
 
 if __name__ == '__main__':
