@@ -2,10 +2,12 @@
 import hashlib
 import json
 from pathlib import Path
+from copy import deepcopy
 import tempfile
 import unittest
 
 from experiments.mechanism_pilot.contract import RunContract, authorize_execution, finalize_reservations, settings_profile
+from experiments.mechanism_pilot.budget import UNBOUNDED_LIMITS
 from research_loop.config import Settings
 from experiments.mechanism_pilot.resources import runtime_namespace
 
@@ -93,6 +95,27 @@ class ContractTests(unittest.TestCase):
             self.grant(**update)
             with self.subTest(update=update), self.assertRaisesRegex(PermissionError, 'NOT_MATCHED'):
                 self.contract.validate(self.real_settings(), self.settings.project_root, phase='R', real=True)
+
+    def test_explicit_unbounded_authorization_preserves_start_without_expiry(self):
+        self.manifest['limits']=deepcopy(UNBOUNDED_LIMITS)
+        self.contract=RunContract(self.manifest,self.auth_path,clock=lambda:100_000)
+        self.grant(started_at=900,budget_mode='unbounded')
+        settings=self.real_settings()
+        result=self.contract.validate(settings,settings.project_root,phase='R',real=True)
+        self.assertEqual(result['started_at'],900)
+        self.assertIsNone(result['hard_deadline'])
+        self.assertEqual(result['budget_mode'],'unbounded')
+        for changed in ({'budget_mode':'bounded'}, {'limits':{'tokens':None}},
+                        {'started_at':float('nan')}, {'started_at':float('inf')}, {'started_at':100_001}):
+            value={'status':'approved','scope':'mechanism-14','approval_reference':'synthetic',
+                'freeze_sha256':self.contract.freeze_sha256,'started_at':900,
+                'limits':self.manifest['limits'],'egress':self.manifest['egress'],'budget_mode':'unbounded',**changed}
+            self.auth_path.write_text(json.dumps(value))
+            with self.subTest(changed=changed),self.assertRaises(PermissionError):
+                self.contract.validate(settings,settings.project_root,phase='R',real=True)
+        self.grant(started_at=900)
+        with self.assertRaisesRegex(PermissionError,'NOT_MATCHED'):
+            self.contract.validate(settings,settings.project_root,phase='R',real=True)
 
     def test_finalize_requires_confirmed_exit_and_preserves_sent_reservation(self):
         class Ledger:

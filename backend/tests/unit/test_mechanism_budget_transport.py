@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import httpx
 
-from experiments.mechanism_pilot.budget import BudgetHalt, Ledger, pilot_ledger
+from experiments.mechanism_pilot.budget import BudgetHalt, Ledger, pilot_ledger, UNBOUNDED_LIMITS
 from experiments.mechanism_pilot.transport import QualificationTransport
 from research_loop.providers.deepseek import RequestNotSent
 
@@ -198,6 +198,81 @@ class MechanismBudgetTransportTests(unittest.TestCase):
         grant['freeze_sha256']='b'*64
         with self.assertRaises(RequestNotSent):transport.handle_request(httpx.Request('POST','https://api.deepseek.com/chat/completions',json=payload))
         self.assertEqual(len(self.calls),1)
+
+    def test_explicit_unbounded_removes_all_aggregate_caps_but_records_actuals(self):
+        ledger=pilot_ledger(self.root/'unbounded.db',allowed_cells=[('R01','current'),('M1','A')],
+                            clock=lambda:self.now,start_time=10,limits=deepcopy(UNBOUNDED_LIMITS))
+        ledger.begin_root('family','R01','current')
+        for _ in range(100):
+            row=ledger.reserve('family',input_upper_bound=1_048_576,max_output_tokens=8192)
+            ledger.mark_sent(row['reservation_id'])
+            ledger.settle(row['reservation_id'],{'prompt_tokens':100_000,'completion_tokens':1000,'total_tokens':101_000})
+        self.now+=100_000
+        ledger.begin_root('memory','M1','A')
+        row=ledger.reserve('memory',input_upper_bound=1_048_576,max_output_tokens=4096)
+        ledger.mark_sent(row['reservation_id']);ledger.settle(row['reservation_id'],self.usage())
+        report=ledger.snapshot()
+        self.assertEqual(report['started_at'],10)
+        self.assertIsNone(report['batch_absolute_deadline'])
+        self.assertEqual(report['physical_sent_requests'],101)
+        self.assertGreater(report['actual_known_tokens'],3_000_000)
+        self.assertGreater(report['actual_known_estimated_nano_yuan'],12_000_000_000)
+        for key in ('batch_tokens','batch_requests','batch_nano_yuan','batch_seconds',
+                    'root_tokens','root_requests','root_seconds'):
+            self.assertIsNone(report['limits'][key])
+        for phase in report['limits']['phase_limits'].values():
+            for key in ('tokens','requests','seconds'):self.assertIsNone(phase[key])
+        self.assertIsNone(report['halt_reason'])
+        with self.assertRaisesRegex(BudgetHalt,'output maximum'):
+            ledger.reserve('memory',input_upper_bound=1_048_576,max_output_tokens=4097)
+
+    def test_unbounded_keeps_unknown_halt_and_cannot_reconfigure_old_ledger(self):
+        cells=[('R01','current'),('M1','A')]
+        ledger=pilot_ledger(self.root/'unbounded.db',allowed_cells=cells,clock=lambda:self.now,limits=deepcopy(UNBOUNDED_LIMITS))
+        ledger.begin_root('family','R01','current')
+        transport=self.transport(ledger,lambda r:httpx.Response(200,json={'usage':None}))
+        with self.assertRaises(BudgetHalt):self.send(transport)
+        report=ledger.snapshot()
+        self.assertEqual(report['reservations'][0]['status'],'unknown')
+        self.assertEqual(report['charged_or_reserved']['tokens'],110)
+        with self.assertRaises(RequestNotSent):self.send(transport)
+        reopened=pilot_ledger(ledger.path,allowed_cells=cells,clock=lambda:self.now,limits=deepcopy(UNBOUNDED_LIMITS))
+        self.assertEqual(reopened.snapshot()['charged_or_reserved']['tokens'],110)
+        with self.assertRaisesRegex(ValueError,'cannot change'):
+            pilot_ledger(ledger.path,allowed_cells=cells,clock=lambda:self.now)
+        with self.assertRaisesRegex(ValueError,'null money'):
+            Ledger(self.root/'accidental.db',batch_yuan=None)
+        old=pilot_ledger(self.root/'bounded-old.db',allowed_cells=cells,clock=lambda:self.now)
+        old.halt('synthetic old failure',operation='old_failure')
+        old_bytes=old.path.read_bytes()
+        with self.assertRaisesRegex(ValueError,'cannot change'):
+            pilot_ledger(old.path,allowed_cells=cells,clock=lambda:self.now,limits=deepcopy(UNBOUNDED_LIMITS))
+        self.assertEqual(old.path.read_bytes(),old_bytes)
+        self.assertEqual(old.snapshot()['halt_reason'],'synthetic old failure')
+        malformed={**UNBOUNDED_LIMITS,'tokens':3_000_000}
+        with self.assertRaises(ValueError):
+            pilot_ledger(self.root/'invalid.db',allowed_cells=cells,limits=malformed)
+
+    def test_unbounded_real_mock_grant_has_no_deadline_but_keeps_context_ceiling(self):
+        ledger=pilot_ledger(self.root/'unbounded.db',allowed_cells=[('R01','current'),('M1','A')],
+                            clock=lambda:self.now,limits=deepcopy(UNBOUNDED_LIMITS))
+        ledger.begin_root('family','R01','current')
+        grant={'allow_real_model':True,'freeze_sha256':'a'*64,'model':'deepseek-flash',
+               'base_url':'https://api.deepseek.com','budget_mode':'unbounded','hard_deadline':None}
+        transport=QualificationTransport(lambda:httpx.MockTransport(self.handler),ledger,'family',1_048_576,8192,
+            mode='real',freeze_sha256='a'*64,authorize=lambda:deepcopy(grant))
+        self.assertIsNone(transport.deadline)
+        self.now+=100_000
+        payload=self.payload();payload['max_tokens']=8192
+        self.send(transport,url='https://api.deepseek.com/chat/completions')
+        self.assertEqual(ledger.snapshot()['actual_known_tokens'],32)
+        with self.assertRaisesRegex(PermissionError,'CONTEXT_CEILING'):
+            QualificationTransport(lambda:self.fail('inner created'),ledger,'family',100,8192,
+                mode='real',freeze_sha256='a'*64,authorize=lambda:deepcopy(grant))
+        grant['hard_deadline']=101
+        with self.assertRaisesRegex(PermissionError,'DEADLINE_MISMATCH'):
+            QualificationTransport(lambda:self.fail('inner created'),ledger,'family',1_048_576,8192,
+                mode='real',freeze_sha256='a'*64,authorize=lambda:deepcopy(grant))
 
     def test_substitute_authorizer_drift_is_checked_before_physical_send(self):
         ledger=self.ledger();grant={'allow_real_model':False,'freeze_sha256':'a'*64,'model':'deepseek-flash','base_url':'https://fixture.invalid'}

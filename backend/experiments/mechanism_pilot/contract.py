@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 import time
 from urllib.parse import urlsplit
@@ -62,9 +63,11 @@ class RunContract:
         """检查隔离配置；真实资格还需读取匹配的新授权及固定截止。"""
         self.check_files()
         manifest = self.manifest
-        if manifest['limits'] != {'tokens': 3000000, 'requests': 96, 'nano_yuan': 12000000000,
-                                 'admission_seconds': 2400, 'total_seconds': 2700}:
-            raise PermissionError('MECHANISM_LEDGER_LIMIT_CONTRACT_MISMATCH')
+        from experiments.mechanism_pilot.budget import validate_limits
+        try:
+            budget_mode = validate_limits(manifest['limits'])
+        except ValueError as exc:
+            raise PermissionError('MECHANISM_LEDGER_LIMIT_CONTRACT_MISMATCH') from exc
         root = Path(manifest['runtime_root']).resolve()
         case_root = Path(runtime_dir).resolve()
         if case_root == root or not case_root.is_relative_to(root):
@@ -117,15 +120,22 @@ class RunContract:
                 or authorization.get('limits') != manifest['limits']
                 or authorization.get('egress') != manifest['egress']):
             raise PermissionError('MECHANISM_AUTHORIZATION_NOT_MATCHED')
+        if budget_mode == 'unbounded' and authorization.get('budget_mode') != 'unbounded':
+            raise PermissionError('MECHANISM_AUTHORIZATION_NOT_MATCHED')
         started = authorization.get('started_at')
-        if type(started) not in (int, float) or not 0 <= now - started < manifest['limits']['admission_seconds']:
+        duration = manifest['limits']['admission_seconds']
+        if (type(started) not in (int, float) or not math.isfinite(started)
+                or started < 0 or not math.isfinite(now) or now < started
+                or (duration is not None and now - started >= duration)):
             raise PermissionError('MECHANISM_AUTHORIZATION_TIME_BOUND')
         return {'allow_real_model': True, 'freeze_sha256': self.freeze_sha256,
                 'model': settings.deepseek_model, 'base_url': settings.deepseek_base_url,
                 'input_token_limit': phase_config['input_token_limit'],
                 'max_output_tokens': phase_config['max_output_tokens'],
                 'started_at': started,
-                'hard_deadline': started + manifest['limits']['total_seconds']}
+                'hard_deadline': (None if manifest['limits']['total_seconds'] is None
+                                  else started + manifest['limits']['total_seconds']),
+                'budget_mode': budget_mode}
 
     def authorizer(self, settings, runtime_dir, *, phase, real=False):
         """返回每次调用都重新检查文件、配置与授权的回调。"""

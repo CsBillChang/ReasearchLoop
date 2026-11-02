@@ -16,33 +16,51 @@ from typing import Callable
 
 @dataclass(frozen=True)
 class Deadline:
-    """共享一个固定始点；墙钟和单调时钟中较早的截止始终生效。"""
+    """共享固定始点；显式无全局截止模式仍保留停止后的有界收尾。"""
 
     started_wall: float
     started_monotonic: float
-    admission_seconds: float = 2400
-    total_seconds: float = 2700
+    admission_seconds: float | None = 2400
+    total_seconds: float | None = 2700
     wall_clock: Callable[[], float] = field(default=time.time, repr=False, compare=False)
     monotonic_clock: Callable[[], float] = field(default=time.monotonic, repr=False, compare=False)
+    enforce_global_deadline: bool = True
 
     def __post_init__(self):
-        values = (self.started_wall, self.started_monotonic,
-                  self.admission_seconds, self.total_seconds)
+        values = (self.started_wall, self.started_monotonic)
         if (any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
-                for v in values) or not 0 < self.admission_seconds < self.total_seconds):
+                for v in values) or type(self.enforce_global_deadline) is not bool):
             raise ValueError('MECHANISM_FIXED_DEADLINE_REQUIRED')
+        if self.enforce_global_deadline:
+            if (any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+                    for v in (self.admission_seconds, self.total_seconds))
+                    or not 0 < self.admission_seconds < self.total_seconds):
+                raise ValueError('MECHANISM_FIXED_DEADLINE_REQUIRED')
+        elif self.admission_seconds is not None or self.total_seconds is not None:
+            raise ValueError('MECHANISM_UNBOUNDED_DEADLINES_MUST_BE_NONE')
         if self.started_wall > self.wall_clock() or self.started_monotonic > self.monotonic_clock():
             raise ValueError('MECHANISM_DEADLINE_START_IS_IN_FUTURE')
 
     def remaining(self) -> float:
         """返回原总截止剩余秒数；重建监督器不会重置已消耗时间。"""
+        if not self.enforce_global_deadline:
+            return math.inf
         return max(0., min(self.started_wall + self.total_seconds - self.wall_clock(),
                            self.started_monotonic + self.total_seconds - self.monotonic_clock()))
 
     def admission_remaining(self) -> float:
         """返回允许新增物理请求的剩余时间，不包括预留的收尾窗口。"""
+        if not self.enforce_global_deadline:
+            return math.inf
         return max(0., min(self.started_wall + self.admission_seconds - self.wall_clock(),
                            self.started_monotonic + self.admission_seconds - self.monotonic_clock()))
+
+    @classmethod
+    def without_global_limit(cls, started_wall, started_monotonic, *,
+                             wall_clock=time.time, monotonic_clock=time.monotonic):
+        """用户明确撤销全局时限后使用；不伪造任意远期截止。"""
+        return cls(started_wall, started_monotonic, None, None,
+                   wall_clock, monotonic_clock, enforce_global_deadline=False)
 
 
 @contextmanager
@@ -80,7 +98,7 @@ def run_process(command, runtime_root, *, deadline: Deadline, env=None, payload=
     Args:
         command: 已准备的 argv；不通过 shell 执行。
         runtime_root: 尚不存在且位于源码工作树之外的本轮目录。
-        deadline: 整批固定时钟，默认第40分钟停止新增、第45分钟总截止。
+        deadline: 整批固定时钟；有界默认40/45分钟，显式无全局模式不设总截止。
         env: 已准备的子进程环境；内容不写日志。
         payload: 可选标准输入内容；内容不写监督报告。
         soft_cancel: 调用方对本格 TaskService.cancel 的有界回调。
@@ -106,8 +124,11 @@ def run_process(command, runtime_root, *, deadline: Deadline, env=None, payload=
     result = {'created': False, 'started_wall': deadline.wall_clock(), 'pid': None, 'pgid': None,
         'original_started_wall': deadline.started_wall,
         'original_started_monotonic': deadline.started_monotonic,
-        'admission_deadline_wall': deadline.started_wall + deadline.admission_seconds,
-        'total_deadline_wall': deadline.started_wall + deadline.total_seconds,
+        'enforce_global_deadline': deadline.enforce_global_deadline,
+        'admission_deadline_wall': (deadline.started_wall + deadline.admission_seconds
+                                    if deadline.enforce_global_deadline else None),
+        'total_deadline_wall': (deadline.started_wall + deadline.total_seconds
+                               if deadline.enforce_global_deadline else None),
         'stop_reason': None, 'signals_sent': [], 'observations': [], 'callbacks': [],
         'alive_group_members': None, 'leader_reaped': False, 'ledger_finalized': False}
     if deadline.admission_remaining() <= 0:
@@ -119,7 +140,8 @@ def run_process(command, runtime_root, *, deadline: Deadline, env=None, payload=
     signals = {'signal': None}
     pending_callbacks = []
     cleanup_wall = cleanup_mono = None
-    reserve = min(float(finalize_reserve_seconds), deadline.total_seconds * .1)
+    reserve = (min(float(finalize_reserve_seconds), deadline.total_seconds * .1)
+               if deadline.enforce_global_deadline else float(finalize_reserve_seconds))
 
     def remaining():
         return max(0., min(deadline.remaining(), cleanup_wall - deadline.wall_clock(),
@@ -180,10 +202,12 @@ def run_process(command, runtime_root, *, deadline: Deadline, env=None, payload=
         except BaseException as exc:
             result.update(stop_reason='controller_error', error_type=type(exc).__name__)
         finally:
-            # 第一次停止固定清理窗口；总截止不因取消、重入或后续步骤延长。
-            cleanup_wall = min(deadline.wall_clock() + 300, deadline.started_wall + deadline.total_seconds)
-            cleanup_mono = min(deadline.monotonic_clock() + 300,
-                               deadline.started_monotonic + deadline.total_seconds)
+            # 无全局模式仅取消整体时限；第一次停止后仍固定300秒清理窗口。
+            cleanup_wall = deadline.wall_clock() + 300
+            cleanup_mono = deadline.monotonic_clock() + 300
+            if deadline.enforce_global_deadline:
+                cleanup_wall = min(cleanup_wall, deadline.started_wall + deadline.total_seconds)
+                cleanup_mono = min(cleanup_mono, deadline.started_monotonic + deadline.total_seconds)
             result.update(cleanup_started_wall=deadline.wall_clock(),
                           cleanup_deadline_wall=cleanup_wall, cleanup_deadline_monotonic=cleanup_mono)
             callback('stop_admission', stop_admission, result['stop_reason'])
@@ -235,7 +259,9 @@ def run_process(command, runtime_root, *, deadline: Deadline, env=None, payload=
             result['cleanup_complete'] = bool(group_stopped and result['ledger_finalized']
                 and all(c['status'] == 'completed' for c in result['callbacks']))
     result.update(received_signal=signals['signal'], finished_wall=deadline.wall_clock(),
-                  finished_before_total_deadline=deadline.remaining() > 0)
+                  finished_before_total_deadline=(deadline.remaining() > 0
+                      if deadline.enforce_global_deadline else None),
+                  finished_before_cleanup_deadline=remaining() > 0)
     with (root / 'controller-result.json').open('x') as output:
         json.dump(result, output, ensure_ascii=False, indent=2)
     return result

@@ -118,6 +118,49 @@ class FrozenResourceTests(unittest.TestCase):
         self.assertEqual(report['qdrant_requests'],0)
         self.assertFalse(report['neural_retrieval_qualified'])
 
+    def test_common_factory_lazy_prepares_before_native_search_without_expanding_scope(self):
+        case,entry,pages=self.material();runtime=self.root/'runtime';runtime.mkdir()
+        model=self.root/'model-manifest.json';model.write_text('{}')
+        settings=settings_for(runtime).model_copy(update={'retrieval_model_manifest':model})
+        manifest=self.root/'sources.json';manifest.write_text(json.dumps({'schema':'frozen-reflection-sources-v1','cases':[entry]}))
+        resources=FrozenResourcesFactory(manifest,file_sha256(manifest),prepare_lexical=True)(runtime,settings,case)
+        db=Database(settings.database_url);db.ensure_schema()
+        def make_task():
+            with patch('research_loop.config.get_settings',return_value=settings):
+                return TaskService(db,settings).create(TaskCreate(prompt='只读取附件 frozen-R01 的物理第2页，不保存。',
+                    attachments=resources.attachments,save_policy='deny')).task_id
+        tid=make_task();resources.bind(tid,db)
+        class Embedding:
+            identity={'model_id':'synthetic-local-only','dimension':2}
+            tokenizer_id='synthetic-tokenizer'
+            @staticmethod
+            def offsets(text):return [m.span() for m in re.finditer(r'\S+',text)]
+            @staticmethod
+            def encode(*args,**kwargs):raise AssertionError('NEURAL_FORBIDDEN')
+        def native_search(_runtime,owner,request,cancelled):
+            self.assertEqual(owner,tid)
+            rows=db.fetchall('SELECT bm25_status,vector_status FROM evidence_index_builds')
+            self.assertEqual(rows,[{'bm25_status':'ready','vector_status':'pending'}])
+            self.assertEqual(db.list_task_evidence(tid),[pages[1]['evidence_id']])
+            return {'native':True}
+        wrapped=resources.retrieval_factory(db,settings)
+        request=RetrievalQuery(query='synthetic',document_ids=[resources.document.document_id])
+        self.assertIsNone(resources.lexical_report)
+        with patch('experiments.mechanism_pilot.resources.LocalEmbedding',return_value=Embedding()) as loader, \
+                patch.object(RetrievalRuntime,'search',autospec=True,side_effect=native_search) as native:
+            self.assertEqual(wrapped.search(tid,request),{'native':True})
+            self.assertEqual(wrapped.search(tid,request),{'native':True})
+            self.assertEqual(loader.call_count,1)
+            self.assertEqual(native.call_count,2)
+            unauthorized=make_task()
+            with self.assertRaisesRegex(PermissionError,'PAGE_SCOPE'):
+                wrapped.search(unauthorized,request)
+            self.assertEqual(native.call_count,2)
+            self.assertEqual(db.list_task_evidence(unauthorized),[])
+        self.assertTrue(resources.report()['lexical_preparation_enabled'])
+        self.assertEqual(resources.lexical_report['embedding_calls'],0)
+        self.assertEqual(resources.lexical_report['qdrant_requests'],0)
+
     def test_source_or_manifest_drift_rejected_before_copy(self):
         case,entry,_=self.material(); settings=settings_for(self.root/'runtime')
         Path(entry['parsed_path']).write_text('{}')
