@@ -7,12 +7,17 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
+
+import httpx
 
 from experiments.mechanism_pilot.contract import RunContract, settings_profile
 from research_loop.config import Settings
 from experiments.mechanism_pilot.lifecycle import Deadline
 from experiments.mechanism_pilot.runner import execute_prepared_case, launch_case
 from experiments.mechanism_pilot.resources import runtime_namespace
+from experiments.mechanism_pilot.transport import QualificationTransport
+from research_loop.providers.deepseek import DeepSeekProvider
 
 
 class DriverTests(unittest.TestCase):
@@ -113,3 +118,70 @@ class DriverTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             execute_prepared_case(payload, inner_factory=lambda: self.fail('transport constructed'))
         self.assertFalse(Path(payload['settings']['project_root']).exists())
+
+    def _timeout_probe(self, *, stream, clipped=False):
+        """捕获共同工厂实际发到Mock HTTP的超时扩展，不按Settings值自证。"""
+        payload = self.payload('B')
+        payload['settings']['request_timeout_seconds'] = 120
+        self.manifest['settings_profiles']['M'] = settings_profile(Settings(**payload['settings']))
+        self.manifest_path.write_text(json.dumps(self.manifest))
+        payload['freeze_sha256'] = RunContract(self.manifest, self.auth).freeze_sha256
+        responses = iter(payload.pop('substitute_responses'))
+        captured = []
+
+        def handler(request):
+            value = json.loads(request.content)
+            captured.append({'stream': value.get('stream', False),
+                             'timeout': dict(request.extensions.get('timeout') or {})})
+            raw = next(responses)
+            if value.get('stream'):
+                message = json.loads(json.dumps(raw['choices'][0]['message']))
+                for index, call in enumerate(message.get('tool_calls', [])):
+                    call['index'] = index
+                event = {'id': raw['id'], 'choices': [{'index': 0, 'delta': message,
+                    'finish_reason': 'tool_calls'}], 'usage': raw['usage']}
+                return httpx.Response(200, content='data: ' + json.dumps(event) +
+                    '\n\ndata: [DONE]\n\n', headers={'content-type': 'text/event-stream'})
+            return httpx.Response(200, json=raw)
+
+        class ShorterTransport(QualificationTransport):
+            """合成更早请求截止，只缩短窗口，不扩大批次授权。"""
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                if clipped:
+                    self.deadline = self.ledger.clock() + 2
+
+        def json_send(provider, messages, tools=None, *, on_public, **kwargs):
+            # 会话Worker默认SSE；此替身仅改为原生send以覆盖同一工厂的JSON路径。
+            return provider.send(messages, tools, **kwargs)
+
+        with patch('experiments.mechanism_pilot.runner.QualificationTransport', ShorterTransport):
+            if stream:
+                result = execute_prepared_case(payload, inner_factory=lambda: httpx.MockTransport(handler))
+            else:
+                with patch.object(DeepSeekProvider, 'send_stream', json_send):
+                    result = execute_prepared_case(payload, inner_factory=lambda: httpx.MockTransport(handler))
+        self.assertIsNone(result['global_stop'], result)
+        self.assertEqual(result['view']['status'], 'completed')
+        self.assertEqual(len(captured), 3)
+        for call in captured:
+            self.assertEqual(call['stream'], stream)
+            self.assertEqual(set(call['timeout']), {'connect', 'read', 'write', 'pool'})
+            for value in call['timeout'].values():
+                if clipped:
+                    self.assertGreater(value, 0)
+                    self.assertLessEqual(value, 2)
+                else:
+                    self.assertEqual(value, 120)
+        self.assertEqual(result['budget']['physical_sent_requests'], 3)
+        self.assertEqual(result['budget']['actual_known_tokens'], 45)
+        self.assertEqual(result['real_model_calls'], 0)
+
+    def test_frozen_timeout_reaches_actual_json_requests(self):
+        self._timeout_probe(stream=False)
+
+    def test_frozen_timeout_reaches_actual_sse_requests(self):
+        self._timeout_probe(stream=True)
+
+    def test_timeout_is_clipped_to_earlier_hard_cutoff(self):
+        self._timeout_probe(stream=True, clipped=True)

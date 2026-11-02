@@ -116,7 +116,7 @@ def execute_prepared_case(payload, *, inner_factory=None):
             freeze_sha256=contract.freeze_sha256, cancelled=cancelled, expected_model=current.deepseek_model)
         return DeepSeekProvider('synthetic-only' if mode == 'substitute' else current.deepseek_api_key,
             current.deepseek_model, current.deepseek_base_url, current.request_timeout_seconds,
-            client=httpx.Client(transport=transport))
+            client=httpx.Client(transport=transport, timeout=current.request_timeout_seconds))
 
     common = dict(expected_input_sha256=payload['input_sha256'], settings=settings,
         provider_factory=provider_factory, stop_state=lambda: ledger.snapshot()['halt_reason'],
