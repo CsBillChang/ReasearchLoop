@@ -23,7 +23,7 @@ def _revise(args: RevisionInput, ctx: ToolContext) -> Observation:
 
 def specs() -> list[ToolSpec]:
     return [
-        ToolSpec("revise_note", "Apply exact local patches bound to the latest unresolved review. Preserve all other text; then independently review the new draft. No model call inside this tool.", RevisionInput, _revise, ("supervisor",)),
-        ToolSpec("create_note", "Persist requested Markdown as-is. Evidence IDs are internal optional metadata, not required text citations.", CreateNoteInput, _create),
-        ToolSpec("save_note", "Save the current draft only within the backend-authorized project output directory.", SaveNoteInput, _save),
+        ToolSpec("revise_note", 'Apply exact local patches to the current draft_id/content_hash and latest unresolved review_id. finding_index is zero-based in that review; old_text must occur uniquely. Preserve unrelated text and evidence. Success creates an unreviewed draft version, without a model call or file save; independently review its new hash with the original neutral questions.', RevisionInput, _revise, ("supervisor",)),
+        ToolSpec("create_note", "Create a database draft when the task needs a note, using retained Markdown as-is. Evidence IDs are optional internal metadata; no mandatory Sources template or evidence_id strings in the prose. Creating a draft neither writes a file nor grants independent approval. Keep a complete deep-reading note's existing end marker and disclose incomplete results.", CreateNoteInput, _create),
+        ToolSpec("save_note", 'Write the current draft_id/content_hash only when the current user requests file saving and save_policy=allow, within the backend-authorized output directory. Historical permissions do not apply. deny permits task/answer snapshots but no file save. A successful save receipt establishes the file operation, not semantic correctness.', SaveNoteInput, _save),
     ]

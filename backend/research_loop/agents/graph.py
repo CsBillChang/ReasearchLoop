@@ -388,9 +388,9 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
             # 保留修订策略、真正新材料/范围及不同目标的工具；后续依赖检查不把
             # 新增objective、重复读取或无关发现当作旧资格问题已解决。
             messages = messages + [{'role': 'system', 'content':
-                '当前交付被明确资格条件阻断。请查看coverage_blocker及goal_achievements复用已有成果；'
-                '可修正模型自拟检索策略、补实际缺失的资格信息，或用finish_task将相应目标标unresolved交付。'
-                '改写objective、重复委派/读取相同材料不会解除该条件；新目标、新版本和未处理范围仍可继续。'
+                '当前交付被资格条件阻断：查看coverage_blocker和goal_achievements，复用已有成果。'
+                '修正自拟策略、补实际缺失信息，或finish_task将相关目标标unresolved交付。'
+                '改写objective或重复取证不解除阻断；新目标、新版本及未处理范围仍可继续。'
                 '资格诊断：' + json.dumps(qualification['coverage_blocker'], ensure_ascii=False)}]
             handoff = None
         elif previous_handoff.get('coverage_blocker') and previous_handoff.get('phase') != 'review_failed_closeout':
@@ -409,9 +409,9 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
                 schemas = [t for t in schemas if t['function']['name'] in {'finish_task', 'read_memory'}]
                 handoff_state.update(phase='review_failed_closeout', failed_review=previous_handoff['failed_review'])
                 messages = messages + [{'role': 'system', 'content':
-                    '独立核验已执行失败，没有获得语义判断。请用finish_task交付当前绑定正文，'
-                    '将具体失败和未完成事项写入processing_summary及goals[].reason；不得据此说原文缺证或自动批准。'
-                    '必要时仅读回已授权档案/回答，不再启动核验或取证。失败观察：'
+                    '独立核验执行失败，未取得语义判断。用finish_task交付当前绑定正文，'
+                    '在processing_summary/goals[].reason说明实际失败与未完成项，不称原文缺证或核验通过。'
+                    '只可按需读回授权档案/回答，不再核验或取证。失败观察：'
                     + previous_handoff['failed_review']['message']}]
             if previous_handoff.get('trigger_action_id') == handoff.get('trigger_action_id'):
                 handoff_state['navigation'] = previous_handoff.get('navigation', {})
@@ -419,17 +419,17 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
                     handoff_state['tool_error'] = previous_handoff['tool_error']
             if not failure_closeout:
                 progress_hint = (
-                    '已有证据可以形成或修订发现，无需强制新增原文；仅改写缺口/next_question不会重新开放重复取证。请用record_research_progress交接实际发现；'
+                    '依据已有证据形成或修订发现；仍需继续研究时用record_research_progress，已可交接则用本次结束工具。只改缺口/next_question不会重新开放取证；'
                     if any(t['function']['name'] == 'record_research_progress' for t in schemas) else
-                    '请用本次实际列出的核验、修订或结束工具交接已有成果，并明确说明仍需补证的缺口；')
+                    '用本次核验、修订或结束工具交接已有成果，说明具体缺口；')
                 messages = messages + [{'role':'system','content':
                     '当前进入研究进展交接：相同材料已再次读回，但没有新的阶段发现。'
-                    '请利用当前互补原文窗口调用finish_research/finish_task交付；证据或内容仍不足时标partial/unresolved并说明具体缺口。'
+                    '依据当前互补原文窗口，用本角色实际提供的结束工具交付；不足则标partial/unresolved并说明具体缺口。'
                     + progress_hint +
                     '不得捏造发现或以重写相同记录绕过交接。本步不再重复取证，不代表事实核验通过。'
-                    + ('已有回答/发现需要核验时，可使用本次实际列出的review_research或review_note交给Reviewer；'
-                       '已有核验结果则选择局部修订、明确披露或交付，不必先自行审完。'
-                       '若本次提供read_memory，可按已给身份/游标读取当前任务档案或本会话已有回答；'
+                    + ('已有回答/发现确需核验时，用本次提供的review_research或review_note交给Reviewer；'
+                       '已有判断则局部修订、披露或交付，不必自行重审。'
+                       '可用read_memory时按真实身份/游标读回当前档案或本会话回答；'
                        '保持同一来源版本并向未读区间推进，随后核验或交付。导航不是新研究成果，重复区间应结束。'
                        if role == 'supervisor' else '')}]
         terminal_names = {"finish_task", "finish_research", "finish_review"}
@@ -438,14 +438,14 @@ def build_graph(provider: Any, registry: ToolRegistry, services: dict[str, Any],
             schemas = [t for t in schemas if t['function']['name'] in
                        {'create_note', 'save_note', 'finish_task', 'report_task_gap'}]
             messages = messages + [{'role': 'system', 'content':
-                '整条父子任务链已进入收尾预留。依据已有原文与子任务成果整理答案；仅按本次权限创建/保存成果并结束。'
-                '不再检索、补读、委派或修订；未完成部分明确说明，不编造结论。'}]
+                '整条父子任务链已进入收尾预留。用已有原文与子任务成果整理答案，按当前权限创建/保存并结束。'
+                '不再检索、补读、委派或修订；如实说明未完成部分。'}]
         terminal_only = closing and bool(terminal_tools)
         force_text = closing and not terminal_tools
         if closing:
             # 收尾仍使用现有结构化交付接口；删掉工具却要求finish会使调用标记落入正文。
-            instruction = ("当前是本角色最后一次可用请求。只用提供的结束工具交付已有成果；"
-                           "未完成目标明确标为unresolved/partial并说明原因，不新增检索、委派、修订或保存。")
+            instruction = ("当前是本角色最后一次可用请求。用提供的结束工具交付已有成果；"
+                           "未完成目标标unresolved/partial并说明原因；不新增检索、委派、修订或保存。")
             if force_text:
                 instruction = "当前是最后一次可用请求。直接用自然语言交付已有成果和未完成原因，不输出或模拟工具调用。"
             messages = messages + [{"role": "system", "content": instruction}]

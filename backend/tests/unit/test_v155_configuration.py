@@ -38,7 +38,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
     def test_release_metadata_agrees(self):
         """前端、Python和OpenAPI显示同一发布版本。"""
         root = Path(__file__).resolve().parents[3]
-        self.assertEqual(__version__, '1.5.5')
+        self.assertEqual(__version__, '1.6.0')
         self.assertEqual(app.version, __version__)
         self.assertEqual(json.loads((root / 'frontend/package.json').read_text())['version'], __version__)
         lock = json.loads((root / 'frontend/package-lock.json').read_text())

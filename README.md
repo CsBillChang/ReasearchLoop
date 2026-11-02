@@ -6,7 +6,7 @@
 <p align="center"><strong>Research Intelligence &amp; Evidence Reading</strong></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-V1.5.5-446c60?style=flat-square" alt="V1.5.5" />
+  <img src="https://img.shields.io/badge/Version-V1.6.0-446c60?style=flat-square" alt="V1.6.0" />
   <img src="https://img.shields.io/badge/Python-3.14-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.14" />
   <img src="https://img.shields.io/badge/FastAPI-009688?style=flat-square&amp;logo=fastapi&amp;logoColor=white" alt="FastAPI" />
   <img src="https://img.shields.io/badge/LangGraph-Multi--Agent-446c60?style=flat-square" alt="LangGraph Multi-Agent" />
@@ -79,6 +79,8 @@
 | **Supervisor** | 理解目标、澄清需求、规划与委派，根据任务覆盖与工具观察调整路线，汇合成果并决定继续或结束 |
 | **Researcher** | 使用授权工具检索和读取论文，整理与研究目标相关的发现、原文依据和材料缺口 |
 | **Reviewer** | 按需独立核验当前结果，区分支持、反证和缺证，回传具体问题与处理依据 |
+
+角色提示词采用共享原则、角色职责和任务模式按需组合；子任务保留独立目标与材料边界，复用已取得成果，并根据具体证据缺口决定补读、核验或交付。
 
 ### Design Principles
 

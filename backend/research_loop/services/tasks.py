@@ -200,7 +200,7 @@ class TaskService:
                 # 业务恢复说明与用户原话分开；回答优先于暂定建议，已知上下文不丢弃。
                 # 是否允许重定计划由CoverageService读取真实resume记录决定，而非此提示授权。
                 state["messages"].append({"role": "system", "content":
-                    "任务已收到本次澄清的用户回答。用户回答优先于此前的建议和暂定计划；先调用set_research_plan更新相关要求，保留用户未改变的原始目标和约束，再继续执行。不要为了满足旧建议数量额外检索。"})
+                    "本次澄清的用户回答优先于旧建议和暂定计划。先set_research_plan更新相关要求，保留未改变的用户目标与约束，再继续；不为旧建议数量额外检索。"})
                 state.update(finished=False, final_answer=None, final_reason=None)
                 state.pop("worker_id", None)
                 state.pop("lease_token", None)

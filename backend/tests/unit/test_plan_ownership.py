@@ -210,8 +210,9 @@ class PlanOwnershipTests(unittest.TestCase):
         self.assertEqual(context["research_plan"]["goals"], value["goals"])
         self.assertEqual(context["research_plan"]["goals"][0]["source_quote"], self.user["source_quote"])
         self.assertEqual(context["research_plan"]["goals"][1]["status"], "withdrawn")
-        from research_loop.agents.memory import RULES
-        self.assertIn("撤回不算用户未完成，不沿旧待办重新委派", RULES)
+        self.assertEqual(context["research_plan"]["goals"][0]["origin"], "user")
+        self.assertEqual(context["research_plan"]["goals"][1]["origin"], "strategy")
+        self.assertEqual(context["research_plan"]["goals"][1]["change_reason"], "当前推荐已足够")
 
     def test_unresolved_strategy_is_not_unmet_user_requirement(self):
         """用户交付已满足时，可选全文步骤缺证保留记录而不制造partial。"""

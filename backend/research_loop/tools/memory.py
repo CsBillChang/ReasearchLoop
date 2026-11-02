@@ -42,6 +42,6 @@ def specs():
         ('forget_preference','Revoke a current preference/inference by its ID and version. Do not revive old records.',ForgetInput,_forget),
         ('get_profile','Read current preferences, inferred interests and distinct successful deep-reading statistics.',ProfileRead,_profile),
         ('search_memory','Search previous research and saved project notes. These are history, not original paper evidence.',RecallInput,_search),
-        ('read_memory','Read original history messages or compressed tool archives by source identity and character offset. Never claim these are newly verified paper facts.',HistoryRead,_read),
+        ('read_memory','Read history messages, task records or compressed tool archives using the returned source_type/source_id and character offset/cursor. Preserve the exact source identity: a task ID is not an archive/message ID. History is not newly verified paper evidence and does not inherit file-save permission.',HistoryRead,_read),
         ('update_saved_note','Preview a diff; confirm=true saves a NEW version only if this task allows saving. Bind current base_hash. Old versions and external user edits are protected.',NoteToolUpdate,_update),
     ]]

@@ -8,6 +8,10 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from research_loop.agents.graph import build_graph, initial_state
+from research_loop.agents.prompt_parts import (
+    COMMON_PRINCIPLES, REVIEWER_ROLE, REVIEW_EVIDENCE_RULES,
+    NOTE_REVIEW_CONTRACT, TARGET_REVIEW_CONTRACT, compose_prompt,
+)
 from research_loop.domain.evidence import ClaimAssessment
 from research_loop.domain.notes import ReviewFinding
 from research_loop.services.verification import validate_assessments
@@ -84,6 +88,8 @@ def reviewer_state(task_id: str, draft_id: str, content_hash: str, markdown: str
         "独立核验当前比较稿，不继承历史批评。稿件ID=" + draft_id + " hash=" + content_hash +
         "\n稿件:\n" + markdown + "\n可核对 evidence_ids=" + ",".join(evidence_ids)
     ), "deny", {})
+    # 独立审校沿用当前稿数据，不继承父角色的委派说明。
+    state["messages"][1]["content"] = state["prompt"] + "；后端保存权限：deny"
     if questions:
         state["messages"][1]["content"] += "\n本次中性核验问题：" + json.dumps(questions, ensure_ascii=False)
         state["messages"][1]["content"] += (
@@ -95,21 +101,8 @@ def reviewer_state(task_id: str, draft_id: str, content_hash: str, markdown: str
         state["messages"][1]["content"] += "\n程序只读差异检查（不是历史语义意见）：" + json.dumps(artifact_checks, ensure_ascii=False)
     state["role"] = "reviewer"
     state["review_basis_required"] = True
-    state["messages"][0]["content"] = (
-        "你是独立 Reviewer，只核对当前稿中的原文支持性。可以 read_paper 补读已授权页，"
-        "不能重写草稿、创建/保存笔记，也不能把引用统计当正文证据；结束时调用 finish_review。"
-        "已提供的证据包是真实读取的原文，可直接核对。page_number=null是Jina正文，使用evidence_id定位，不要求凭空补物理页码。只有确需补读时使用其中target_ref和页码，不能把evidence_id、draft_id或hash传给read_paper。"
-        "只检查当前已作出的核心陈述；准确披露未读范围/不提供被引量不是幻觉，也不要求草稿回答其未宣称覆盖的问题。"
-        "缺依据与原文矛盾分开报告；一次核验后立即finish_review，无需重复核验或输出修改稿。"
-        "supported/contradicted需direct_statement及绑定原文的source_quote，反证必须逻辑上排除当前主张，不能只是提到另一种设置。"
-        "找不到支持用insufficient/not_found；解析不全、未读图片用insufficient/incomplete_or_ambiguous。"
-        "准确说明在已读取范围无法确认本身可被支持，不因原论文缺证而要求该说明也改成有确定事实。"
-        "不要把未找到提升为全篇不存在或已确定否证。证据包的read_scope与gaps、assets描述可用材料边界，不是图片内容。"
-        "read_scope仅表示本次选入审校包的页；task_evidence_scope表示任务累计已取得/继承的文字页。不能因审校包未选某页就说此前任务没读该页；不能据assets存在推断图表只含图片或全部公式不可读。"
-        "范围/格式/保存等元说明不是论文事实，不要求论文原文出现对应句子；只针对其中实际声称的科学事实提findings。"
-        "文字是否保持由程序差异检查负责；它不证明科学事实正确，但不应被当作缺少论文来源的问题。"
-        "每条source_quote用最短的连续原文，保留PDF字词；不要用省略号拼接多个句段。"
-    )
+    state["messages"][0]["content"] = compose_prompt(
+        COMMON_PRINCIPLES, REVIEWER_ROLE, REVIEW_EVIDENCE_RULES, NOTE_REVIEW_CONTRACT)
     state["messages"].append({"role": "user", "content": "权威原文证据包（不是历史意见）：\n" + json.dumps(evidence_bundle or [], ensure_ascii=False)})
     return state
 
@@ -134,32 +127,8 @@ def research_reviewer_state(task_id: str, target: dict, questions: list[str], bu
     """仅传当前内容、中性问题和原始证据，历史判词留在控制层审计中。"""
     state = initial_state(task_id, '独立核验选定研究对象。', 'deny', {})
     state['role'] = 'reviewer'
-    state['messages'][0]['content'] = (
-        '你是独立Reviewer，负责选定研究对象的适用性、原文支持性和结论推理，不负责规划整个任务或生成新报告。'
-        '输入是当前对象/版本、中性问题和已有依据。item_id标识对象，不是意见ID；每个选定对象至少一条判断。'
-        '同一回答的多个问题可用相同item_id分别提交，reason明确对应主张和问题；保留不同判断，不用一条支持意见替代其他缺证或反证。'
-        '先使用已有证据，只有具体缺口才定向补读；不重做整篇研究。'
-        'candidates只检查元数据/摘要对研究目标的适用性，使用suitability=suitable/unsuitable/uncertain与basis=metadata，'
-        '引用实际metadata_fields；摘要不是已读全文，不推断未提供的实验细节。'
-        '每条意见必须且仅一个判断字段非空；不得遗漏判断或写null，reason/basis/suggested_action不能代替判断。'
-        'findings/answer使用status=supported/contradicted/insufficient（包括scope_disclosure）；candidates使用suitability。'
-        'supported或contradicted必须有direct_statement、'
-        '实际evidence_ids和最短连续source_quote；存在另一种设置不等于排除了当前说法。'
-        'source_quote保留原文字词，不用省略号或占位符拼接公式、句段；找不到可定位引句则说明缺口，不伪造引文。'
-        '找不到依据用not_found，解析/图片/范围不足用incomplete_or_ambiguous，均为insufficient。'
-        '准确披露在已读范围无法确认可用supported/scope_disclosure并绑定实际evidence_ids，不要求论文原句证明执行范围。'
-        'scope_disclosure只用于查证范围说明，不能据此批准科学断言。'
-        '仅检查中性问题涉及的当前主张及直接受影响结论，不扩展全稿或未提出的研究问题。'
-        '未保存、未改其他段落、遵守用户授权属于程序执行约束，不是论文事实；不能用scope_disclosure或补论文证据ID把这些约束批准为科学判断。'
-        '这类要求只依据execution_checks中的实际程序记录，在gaps说明检查范围；未提供差异检查就注明未检查，不能凭阅读回答或论文原文推断。'
-        'findings只提交研究对象的科学主张/适用性及真实查证范围；纯程序问题放gaps，不自动删除或改写已提交的错误判断。'
-        '检查结论是否保留证据中的条件、范围和例外；研究者的推断与作者报告分开。信息不足不是反证，另一种设置不自动否定当前说法。'
-        '可read_paper/retrieve_evidence补读授权材料，inspect_paper_media仅提取定位，不代表理解图像。'
-        '证据包read_scope只是本次入包页，task_evidence_scope才是任务已取得范围。'
-        '已有依据足够就finish_review；没有可行补证路径时以insufficient说明已查范围和具体缺口并结束，不要求证明论文全篇不存在。'
-        'reason写清当前说法、依据与判断之间的关系；suggested_action给keep/supplement/revise/exclude/end建议。'
-        '不改文、不保存、不替Supervisor调度；Supervisor依据观察决定后续动作。'
-    )
+    state['messages'][0]['content'] = compose_prompt(
+        COMMON_PRINCIPLES, REVIEWER_ROLE, REVIEW_EVIDENCE_RULES, TARGET_REVIEW_CONTRACT)
     state['messages'][1]['content'] = '当前权威对象和中性问题：\n' + json.dumps(
         {'target': target, 'verification_questions': questions,
          'execution_checks': execution_checks or {}}, ensure_ascii=False)
