@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
 from pathlib import Path
@@ -217,7 +217,7 @@ def inspect_delivery(draft: str, snapshot: dict, actions: list, result: dict | N
             'semantic_quality': 'not_evaluated_substitute'}
 
 
-def _validate_runtime(root, settings):
+def _validate_runtime(root, settings, execution_kind='substitute'):
     root = Path(root).resolve()
     if any((p/'.git').exists() for p in (root, *root.parents)):
         raise ValueError('REFLECTION_RUNTIME_INSIDE_CHECKOUT')
@@ -231,24 +231,24 @@ def _validate_runtime(root, settings):
         raise ValueError('REFLECTION_ISOLATED_DATA_OUTPUT_REQUIRED')
     if settings.web_search_enabled or settings.web_fetch_enabled:
         raise ValueError('REFLECTION_WEB_DISABLED_REQUIRED')
-    if settings.deepseek_api_key or settings.deepseek_base_url != 'https://fixture.invalid':
+    if execution_kind == 'substitute' and (settings.deepseek_api_key or settings.deepseek_base_url != 'https://fixture.invalid'):
         raise PermissionError('REFLECTION_SYNTHETIC_SETTINGS_REQUIRED')
     return root
 
 
 def execute_case(case_path, runtime_dir, *, expected_input_sha256, settings,
                  provider_factory, resource_factory, stop_state=lambda: None,
-                 execution_kind='substitute', expected_material_identity=None) -> dict:
-    """经当前 Worker 验证六稿合同，真实配置在创建目录和任务前拒绝。
+                 execution_kind='substitute', expected_material_identity=None,
+                 authorize=None, freeze_sha256=None, on_task_created=lambda task_id, db: None) -> dict:
+    """经当前Worker执行冻结稿；真实模式在创建目录前校验完整新授权。
 
-    provider_factory 只接受 MockTransport；resource_factory 提供 attachments、
-    bind、pdf_factory、retrieval_factory。stop_state 可注入共享批次停止门，
-    不是财务预算实现。所有返回 Token 均为替身用量，不能当作模型成绩。
+    资格回归使用MockTransport或包裹它的共享预算传输。真实模式必须使用
+    QualificationTransport且逐次重验冻结合同；本模块不自行创建HTTP连接。
     """
-    if execution_kind != 'substitute':
-        raise PermissionError('REFLECTION_REAL_EXECUTION_NOT_QUALIFIED')
+    from experiments.mechanism_pilot.contract import authorize_execution
+    authorize_execution(settings, execution_kind, authorize, freeze_sha256)
     case = load_case(case_path, expected_input_sha256)
-    root = _validate_runtime(runtime_dir, settings)
+    root = _validate_runtime(runtime_dir, settings, execution_kind)
     stopped = stop_state()
     if stopped:
         return {'created': False, 'case_id': case['case_id'], 'global_stop': stopped}
@@ -310,14 +310,17 @@ def execute_case(case_path, runtime_dir, *, expected_input_sha256, settings,
             self.original.client.close()
 
     def factory(current):
+        from experiments.mechanism_pilot.transport import QualificationTransport
         provider = provider_factory(current)
-        if not isinstance(getattr(getattr(provider, 'client', None), '_transport', None), httpx.MockTransport):
+        transport = getattr(getattr(provider, 'client', None), '_transport', None)
+        qualified = isinstance(transport, QualificationTransport) and transport.mode == execution_kind
+        if not qualified and not (execution_kind == 'substitute' and isinstance(transport, httpx.MockTransport)):
             provider.close()
-            raise PermissionError('REFLECTION_MOCK_TRANSPORT_REQUIRED')
+            raise PermissionError('REFLECTION_QUALIFIED_TRANSPORT_REQUIRED')
         return GuardedProvider(provider)
 
     db, task_id, origin, error, material_identity = None, None, None, None, None
-    with deny_network(), patch('research_loop.config.get_settings', return_value=settings), \
+    with (deny_network() if execution_kind == 'substitute' else nullcontext()), patch('research_loop.config.get_settings', return_value=settings), \
             patch('research_loop.config.Settings.from_env', side_effect=PermissionError('REFLECTION_DEFAULT_ENV_DENIED')):
         try:
             resources = resource_factory(root, settings, case)
@@ -331,13 +334,14 @@ def execute_case(case_path, runtime_dir, *, expected_input_sha256, settings,
                 f'的物理第{page}页。核验后保留正确内容，按需局部修订或披露缺证，最终交付当前正文。禁止保存文件或联网扩展。')
             task_id = TaskService(db, settings).create(TaskCreate(prompt=prompt,
                 save_policy='deny', attachments=attachments)).task_id
+            on_task_created(task_id, db)
             bound = resources.bind(task_id, db)
             material_identity = _validate_bound_material(db, task_id, case, attachments, bound,
                 expected_material_identity)
             origin = _seed_review(db, task_id, case, prompt, attachments, bound['evidence_ids'], settings)
             executor = TaskExecutor(settings, db, factory, resources.pdf_factory)
             executor.retrieval = resources.retrieval_factory(db, settings)
-            executor.execute(task_id, 'reflection-substitute')
+            executor.execute(task_id, 'reflection-' + execution_kind)
         except Exception as exc:
             error = {'type': type(exc).__name__, 'message': str(exc)}
         # 最后一个动作失败后可能直接 fallback，没有下一次 send；收尾也须停批。
@@ -362,14 +366,17 @@ def execute_case(case_path, runtime_dir, *, expected_input_sha256, settings,
         'total_tokens': None if unknown_count else known_tokens, 'unknown_receipts': unknown_count,
         'aggregation_source': 'strict_usage_audit_only',
         'raw_view_usage_is_not_qualified_for_billing': True}
-    report = {'execution_kind': 'substitute', 'real_model_calls': 0, 'case_id': case['case_id'],
+    report = {'execution_kind': execution_kind,
+        'real_model_calls': sum(r['sent_state'] != 'not_sent' for r in rows) if execution_kind == 'real' else 0,
+        'case_id': case['case_id'],
         'created': bool(task_id), 'task_id': task_id, 'view': view, 'actions': actions,
         'reflection_snapshot': snapshot, 'programmatic_review_origin': origin,
         'physical_receipts': rows, 'strict_usage_audit': usage_audit, 'strict_usage_summary': strict_usage_summary,
         'bound_material_identity': material_identity, 'delivery_audit': audit, 'error': error,
         'first_failed_action': gate['first_failed_action'],
         'global_stop': gate['stop'] or stop_state() or ('case_exception:' + error['type'] if error else None),
-        'qualification_scope': 'synthetic_worker_chain_only_not_real_budget_or_semantic_validation'}
+        'qualification_scope': ('synthetic_worker_chain_only_not_real_semantic_validation'
+                                if execution_kind == 'substitute' else 'frozen_authorized_execution_not_semantic_score')}
     with (root/'result.json').open('x') as output:
         json.dump(report, output, ensure_ascii=False, indent=2)
     return report
