@@ -154,7 +154,7 @@ class ClarificationHistoryTests(unittest.TestCase):
         with self.assertRaisesRegex(KeyError, 'outside task scope'):
             self.memory.read(target, HistoryRead(source_type='conversation', source_id=self.cid))
         message_id = record['answered_clarifications'][0]['answer_message_id']
-        with self.assertRaisesRegex(KeyError, 'not found in permitted scope'):
+        with self.assertRaisesRegex(KeyError, 'outside task scope or unavailable'):
             self.memory.read(target, HistoryRead(source_type='message', source_id=message_id))
         with self.assertRaisesRegex(ValueError, 'MEMORY_SOURCE'):
             self.memory.remember(target, RememberInput(slot='synthetic-save-policy',
@@ -214,7 +214,55 @@ class ClarificationHistoryTests(unittest.TestCase):
         message = self.db.fetchone("SELECT message_id FROM conversation_messages WHERE task_id=? AND role='user' ORDER BY sequence_no DESC", (old,))
         missing = execute_spec(spec, {'source_type':'message','source_id':message['message_id']},context)
         self.assertFalse(missing.ok)
-        self.assertNotIn('error_code', missing.data)
+        self.assertEqual(missing.model_dump(), denied.model_dump())
+        self.assertEqual(before, {table:self.db.fetchall('SELECT * FROM '+table) for table in tables})
+
+    def test_message_scope_denial_hides_existence_and_preserves_state(self):
+        """旧消息和不存在的消息同样拒绝，不探查其他会话或改变权限。"""
+        old = self.new_task(prompt='合成旧消息 SECRET-MESSAGE。')
+        self.finish(old)
+        old_message = self.db.fetchone("SELECT message_id FROM conversation_messages WHERE task_id=? AND role='user'", (old,))['message_id']
+        target = self.new_task(self.new_conversation(), '只读取当前范围，不保存。')
+        context = ToolContext(task_id=target, save_policy='deny', services={'memory':self.memory})
+        spec = next(s for s in memory_specs() if s.name == 'read_memory')
+        tables = ['conversation_links','conversation_messages','research_memories',
+                  'memory_entries','memory_operations','task_inputs']
+        before = {table:self.db.fetchall('SELECT * FROM '+table) for table in tables}
+        denied = [execute_spec(spec, {'source_type':'message','source_id':sid},context)
+                  for sid in [old_message, uuid4().hex]]
+        self.assertEqual(denied[0].model_dump(), denied[1].model_dump())
+        self.assertFalse(denied[0].ok)
+        self.assertFalse(denied[0].retryable)
+        self.assertEqual(denied[0].data, {'error_code':'MEMORY_SCOPE_DENIED',
+            'scope_denied':True,'data_disclosed':False,'state_changed':False,'legal_readbacks':[]})
+        self.assertNotIn('SECRET-MESSAGE', denied[0].model_dump_json())
+        self.assertNotIn(old_message, denied[0].model_dump_json())
+        # 没有会话绑定的任务也不触发全库消息查询。
+        queries = []
+        fetchone = self.db.fetchone
+        def tracked(sql, params=()):
+            queries.append(sql)
+            return fetchone(sql,params)
+        with patch.object(self.db,'fetchone',side_effect=tracked):
+            with self.assertRaisesRegex(KeyError,'outside task scope'):
+                self.memory.read(uuid4().hex,HistoryRead(source_type='message',source_id=old_message))
+        self.assertFalse(any('FROM conversation_messages' in sql for sql in queries))
+        self.assertEqual(before, {table:self.db.fetchall('SELECT * FROM '+table) for table in tables})
+        self.assertEqual(self.db.get_task(target)['save_policy'],'deny')
+
+    def test_current_conversation_message_read_preserves_pagination(self):
+        """当前会话的合法消息仍按原始内容和字符偏移分页。"""
+        text = '合法当前消息：甲乙丙丁，不保存。' * 12
+        target = self.new_task(prompt=text)
+        message = self.db.fetchone("SELECT message_id FROM conversation_messages WHERE task_id=? AND role='user'", (target,))['message_id']
+        context = ToolContext(task_id=target, save_policy='deny', services={'memory':self.memory})
+        spec = next(s for s in memory_specs() if s.name == 'read_memory')
+        observed = execute_spec(spec, {'source_type':'message','source_id':message,'offset':2,'limit':100},context)
+        self.assertTrue(observed.ok)
+        self.assertEqual(observed.data['source_id'],message)
+        self.assertEqual(observed.data['content'],text[2:102])
+        self.assertEqual(observed.data['next_offset'],102)
+        self.assertFalse(observed.data['is_original_paper_evidence'])
 
     def test_scope_denied_without_prior_success_has_no_suggested_ids(self):
         """无先前成功观察时只反馈拒绝，不扫描或透露历史记录身份。"""

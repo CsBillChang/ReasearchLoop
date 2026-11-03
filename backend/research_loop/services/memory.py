@@ -11,7 +11,7 @@ class MemoryScopeDenied(KeyError):
     """读取范围已拒绝；仅携带当前任务此前实际读回过的合法入口。"""
 
     def __init__(self, legal_readbacks):
-        super().__init__('conversation outside task scope')
+        super().__init__('memory source outside task scope or unavailable')
         self.legal_readbacks = legal_readbacks
 
 
@@ -205,7 +205,10 @@ class MemoryService:
         elif kind == 'message':
             link = self.db.fetchone('SELECT conversation_id FROM conversation_links WHERE task_id=?', (task_id,))
             row = self.db.fetchone('SELECT content FROM conversation_messages WHERE message_id=? AND conversation_id=?', (sid,link['conversation_id'])) if link else None
-            content = row['content'] if row else None
+            # 不额外查询其他会话；不存在与无权读取的消息返回相同拒绝。
+            if not row:
+                raise MemoryScopeDenied(self._history_readbacks(task_id))
+            content = row['content']
         else:
             content = dump(self.notes.get(sid)) if self.notes else None
         if content is None:

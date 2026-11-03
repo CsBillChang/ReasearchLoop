@@ -29,7 +29,7 @@ def _read(args, ctx):
             data={'error_code':'MEMORY_SCOPE_DENIED', 'scope_denied':True,
                   'data_disclosed':False, 'state_changed':False,
                   'legal_readbacks':exc.legal_readbacks},
-            message='当前conversation读取入口不在任务范围，已拒绝且未读取数据或改变状态。不要重试相同越界请求；使用此前合法读回的research_history记录，必要时按已返回的next_offset补读；没有依据就说明缺失。')
+            message='当前conversation/message入口在本任务范围内不可用，已拒绝且未披露内容或改变状态；此反馈不区分记录不存在与无权读取。不要重试该入口；使用此前合法读回的research_history记录，必要时按已返回的next_offset补读；没有依据就说明缺失。')
 
 
 def _profile(args, ctx):
