@@ -122,7 +122,7 @@ def execute_prepared_case(payload, *, inner_factory=None):
     common = dict(expected_input_sha256=payload['input_sha256'], settings=settings,
         provider_factory=provider_factory, stop_state=lambda: ledger.snapshot()['halt_reason'],
         execution_kind=mode, authorize=authorize, freeze_sha256=contract.freeze_sha256,
-        on_task_created=created)
+        on_task_created=created, recovery_policy=manifest.get('recovery_policy'))
     if phase == 'R':
         factory = FrozenResourcesFactory(payload['resources_manifest'], payload['resources_sha256'], prepare_lexical=True)
         result = execute_case(payload['input_path'], root, resource_factory=factory, **common)

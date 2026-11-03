@@ -179,16 +179,56 @@ class FrozenPageResources:
             self.case['model_input']['documents'][0]['allowed_pages'])
 
     def bind(self, task_id, db):
+        """程序发起真实读取并在模型决策前暂停，保留原生行动及观察。"""
         if db.kind != 'sqlite' or not Path(db.sqlite_path).resolve().is_relative_to(self.root):
             raise ValueError('FROZEN_DATABASE_OUTSIDE_RUNTIME')
+        from uuid import uuid4
+        from research_loop.agents.graph import build_graph, initial_state
+        from research_loop.domain.execution_policy import inherit_execution_policy
+        from research_loop.tools.papers import specs as paper_specs
+        from research_loop.tools.registry import ToolRegistry
         doc = self.case['model_input']['documents'][0]
+        task = db.get_task(task_id)
+        attachments = {item['input_ref']: item for item in self.attachments}
+        state = initial_state(task_id, task['prompt'], task['save_policy'], attachments,
+            self.settings.max_model_requests, self.settings.max_tool_actions,
+            self.settings.reserve_model_requests)
+        state.update(role=task.get('role', 'supervisor'),
+            root_task_id=task.get('root_task_id') or task_id,
+            parent_task_id=task.get('parent_task_id'))
+        inherit_execution_policy(state, db.execution_policy(task_id), db.budget_summary(task_id))
+        identity = 'programmatic-read-' + uuid4().hex
+        arguments = {'target_ref': self.attachments[0]['input_ref'],
+            'start_page': doc['allowed_pages'][0], 'page_count': 1}
+        state.update(pending_tool_scope=['read_paper'], pending_tool_calls=[{
+            'call_id': identity, 'name': 'read_paper', 'arguments': arguments}])
+        state['messages'].append({'role': 'assistant',
+            'content': '评测程序读取冻结授权原文；此动作不是模型生成。', 'reasoning_content': '',
+            'tool_calls': [{'id': identity, 'type': 'function', 'function': {
+                'name': 'read_paper', 'arguments': json.dumps(arguments, ensure_ascii=False)}}]})
+        origin = {'origin': 'evaluation_program_explicit_frozen_page_read', 'model_generated': False,
+            'model_receipt_created': False, 'tool_call_id': identity, 'arguments': arguments}
+        db.append_event(task_id, 'reflection_pilot_programmatic_read', origin)
         provider = self.pdf_factory(self.settings, self.files)
         try:
-            observation = PaperService(db, None, provider).read(task_id, self.attachments[0]['input_ref'],
-                doc['allowed_pages'][0], 1, {self.attachments[0]['input_ref']: self.attachments[0]})
+            registry = ToolRegistry(paper_specs(), allowed_names={'read_paper'})
+            graph = build_graph(None, registry, {'papers': PaperService(db, None, provider)}, db,
+                self.settings.max_model_requests, self.settings.max_tool_actions,
+                self.settings.reserve_model_requests)
+            # 同一工具节点负责权限、行动序号与真实观察；中断阻止下一轮模型请求。
+            state = graph.invoke(state, interrupt_after=['execute_tools'])
         finally:
             provider.close()
-        bound = {'evidence_ids': [p['evidence_id'] for p in observation['pages']], 'read_observation': observation}
+        actions = state.get('actions') or []
+        action = actions[-1] if actions else None
+        if (not action or action['tool_name'] != 'read_paper'
+                or action['arguments'] != arguments or action['status'] != 'succeeded'
+                or not action.get('observation', {}).get('ok')):
+            raise ValueError('FROZEN_PROGRAMMATIC_READ_FAILED: ' + json.dumps(action, ensure_ascii=False))
+        observation = action['observation']['data']
+        bound = {'evidence_ids': [p['evidence_id'] for p in observation['pages']],
+            'read_observation': observation, 'programmatic_read_state': state,
+            'programmatic_read_origin': origin}
         bound['material_identity'] = _validate_bound_material(db, task_id, self.case, self.attachments, bound)
         db.save_paper(doc['paper_id'], {'paper_id': doc['paper_id'], 'title': doc.get('title', ''),
             'source': 'frozen_local_cache', 'metadata': {'source_kind': 'frozen_page_fixture'}})

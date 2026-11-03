@@ -138,7 +138,7 @@ def programmatic_review_message(identity: str, arguments: dict) -> dict:
             'function': {'name': 'review_research', 'arguments': json.dumps(arguments, ensure_ascii=False)}}]}
 
 
-def _seed_review(db, task_id, case, prompt, attachments, evidence_ids, settings):
+def _seed_review(db, task_id, case, prompt, attachments, evidence_ids, settings, read_state=None):
     """记录显式程序来源和原稿 hash 后保存首轮待执行动作。"""
     from research_loop.agents.graph import initial_state
     from research_loop.domain.execution_policy import inherit_execution_policy
@@ -148,8 +148,12 @@ def _seed_review(db, task_id, case, prompt, attachments, evidence_ids, settings)
             'reason': '核验冻结原稿。', 'verification_questions': [value['question']],
             'evidence_ids': evidence_ids}
     identity = 'programmatic-review-' + uuid4().hex
-    state = initial_state(task_id, prompt, 'deny', {a['input_ref']: a for a in attachments},
+    state = read_state if read_state is not None else initial_state(
+        task_id, prompt, 'deny', {a['input_ref']: a for a in attachments},
         settings.max_model_requests, settings.max_tool_actions, settings.reserve_model_requests)
+    if (state['task_id'] != task_id or state.get('model_requests') != 0
+            or state.get('pending_tool_calls') or state.get('finished')):
+        raise ValueError('REFLECTION_PROGRAMMATIC_READ_STATE_INVALID')
     inherit_execution_policy(state, db.execution_policy(task_id), db.budget_summary(task_id))
     state.update(coverage_required=True, evidence_ids=evidence_ids,
         pending_tool_scope=['review_research'],
@@ -239,14 +243,17 @@ def _validate_runtime(root, settings, execution_kind='substitute'):
 def execute_case(case_path, runtime_dir, *, expected_input_sha256, settings,
                  provider_factory, resource_factory, stop_state=lambda: None,
                  execution_kind='substitute', expected_material_identity=None,
-                 authorize=None, freeze_sha256=None, on_task_created=lambda task_id, db: None) -> dict:
+                 authorize=None, freeze_sha256=None, on_task_created=lambda task_id, db: None,
+                 recovery_policy=None) -> dict:
     """经当前Worker执行冻结稿；真实模式在创建目录前校验完整新授权。
 
     资格回归使用MockTransport或包裹它的共享预算传输。真实模式必须使用
     QualificationTransport且逐次重验冻结合同；本模块不自行创建HTTP连接。
     """
+    from experiments.mechanism_pilot.recovery import FailedActionGate
     from experiments.mechanism_pilot.contract import authorize_execution
     authorize_execution(settings, execution_kind, authorize, freeze_sha256)
+    failures = FailedActionGate(recovery_policy)
     case = load_case(case_path, expected_input_sha256)
     root = _validate_runtime(runtime_dir, settings, execution_kind)
     stopped = stop_state()
@@ -259,21 +266,11 @@ def execute_case(case_path, runtime_dir, *, expected_input_sha256, settings,
     from research_loop.services.tasks import TaskService
     from research_loop.storage.mysql import Database
     from research_loop.workers.executor import TaskExecutor
-    gate = {'stop': None, 'first_failed_action': None}
+    gate = {'stop': None}
 
     def failed_action_stop():
-        """从实验根任务及子任务读回首个失败动作，保持最先捕获的原始错误。"""
-        if db is not None and task_id and gate['first_failed_action'] is None:
-            rows = db.fetchall('SELECT a.* FROM actions a JOIN tasks t ON t.task_id=a.task_id '
-                "WHERE (t.task_id=? OR t.root_task_id=?) AND a.status='failed' "
-                'ORDER BY a.created_at,a.sequence_no,a.action_id LIMIT 1', (task_id, task_id))
-            if rows:
-                failed = dict(rows[0])
-                failed['arguments'] = json.loads(failed.pop('arguments_json'))
-                failed['observation'] = json.loads(failed.pop('observation_json'))
-                gate['first_failed_action'] = failed
-                gate['stop'] = gate['stop'] or 'failed_action:' + failed['tool_name']
-        return gate['stop']
+        """参数更正只停止本格，资格/计费错误仍停止整批。"""
+        return failures.poll(db, task_id)
 
     class GuardedProvider:
         def __init__(self, original):
@@ -283,7 +280,7 @@ def execute_case(case_path, runtime_dir, *, expected_input_sha256, settings,
             return getattr(self.original, name)
 
         def _invoke(self, method, *args, **kwargs):
-            reason = failed_action_stop() or stop_state()
+            reason = gate['stop'] or failed_action_stop() or stop_state()
             if reason:
                 raise RequestNotSent(str(reason))
             try:
@@ -338,7 +335,8 @@ def execute_case(case_path, runtime_dir, *, expected_input_sha256, settings,
             bound = resources.bind(task_id, db)
             material_identity = _validate_bound_material(db, task_id, case, attachments, bound,
                 expected_material_identity)
-            origin = _seed_review(db, task_id, case, prompt, attachments, bound['evidence_ids'], settings)
+            origin = _seed_review(db, task_id, case, prompt, attachments, bound['evidence_ids'], settings,
+                read_state=bound.get('programmatic_read_state'))
             executor = TaskExecutor(settings, db, factory, resources.pdf_factory)
             executor.retrieval = resources.retrieval_factory(db, settings)
             executor.execute(task_id, 'reflection-' + execution_kind)
@@ -373,8 +371,9 @@ def execute_case(case_path, runtime_dir, *, expected_input_sha256, settings,
         'reflection_snapshot': snapshot, 'programmatic_review_origin': origin,
         'physical_receipts': rows, 'strict_usage_audit': usage_audit, 'strict_usage_summary': strict_usage_summary,
         'bound_material_identity': material_identity, 'delivery_audit': audit, 'error': error,
-        'first_failed_action': gate['first_failed_action'],
-        'global_stop': gate['stop'] or stop_state() or ('case_exception:' + error['type'] if error else None),
+        'first_failed_action': failures.first_failed_action,
+        **failures.audit(),
+        'global_stop': gate['stop'] or failures.global_stop or stop_state() or ('case_exception:' + error['type'] if error else None),
         'qualification_scope': ('synthetic_worker_chain_only_not_real_semantic_validation'
                                 if execution_kind == 'substitute' else 'frozen_authorized_execution_not_semantic_score')}
     with (root/'result.json').open('x') as output:

@@ -22,6 +22,7 @@ from research_loop.domain.retrieval import RetrievalQuery
 from research_loop.domain.tasks import TaskCreate
 from research_loop.providers.deepseek import DeepSeekProvider
 from research_loop.services.memory import MemoryService
+from research_loop.services.coverage import CoverageService
 from research_loop.services.retrieval import RetrievalRuntime
 from research_loop.services.tasks import TaskService
 from research_loop.storage.files import FileStore
@@ -83,6 +84,15 @@ class FrozenResourceTests(unittest.TestCase):
         self.assertEqual(bound['material_identity']['source_sha256'],entry['pdf_sha256'])
         self.assertEqual(bound['read_observation']['returned_pages'],[2])
         self.assertEqual(bound['read_observation']['acquisition']['executed_pdf_parse'],False)
+        actions=db.list_actions(task)
+        self.assertEqual([(a['tool_name'],a['status']) for a in actions],[('read_paper','succeeded')])
+        self.assertEqual(actions[0]['arguments'],{'target_ref':'frozen-R01','start_page':2,'page_count':1})
+        self.assertEqual(actions[0]['observation']['data'],bound['read_observation'])
+        self.assertEqual(len(CoverageService(db).source_coverage(task)),1)
+        self.assertEqual(bound['programmatic_read_state']['action_sequence'],1)
+        self.assertEqual(bound['programmatic_read_state']['model_requests'],0)
+        self.assertFalse(db.fetchall('SELECT * FROM model_calls'))
+        self.assertFalse(bound['programmatic_read_origin']['model_generated'])
         self.assertEqual(before,{p:file_sha256(p) for p in before})
         self.assertNotEqual(Path(db.get_page(pages[1]['evidence_id'])['document_id']).name,'')
         provider=resources.pdf_factory(settings,resources.files)

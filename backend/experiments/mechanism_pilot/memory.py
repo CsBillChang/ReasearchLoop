@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import httpx
 
+from experiments.mechanism_pilot.recovery import FailedActionGate
 from experiments.mechanism_pilot.reflection import deny_network, _strict_actual_usage
 from experiments.mechanism_pilot.resources import validate_runtime
 from experiments.mechanism_pilot.transport import QualificationTransport
@@ -81,7 +82,7 @@ def install_history(db, settings, case):
 
 def execute_memory_case(case_path, runtime_dir, *, expected_input_sha256, settings,
                         provider_factory, stop_state=lambda: None, execution_kind='substitute',
-                        authorize=None, freeze_sha256=None, on_task_created=None):
+                        authorize=None, freeze_sha256=None, on_task_created=None, recovery_policy=None):
     """通过TaskService和TaskExecutor执行本格，真实资格在建目录/任务前核对。
 
     A/B需分别由固定源码的独立Python进程调用，禁止同进程更换已导入业务模块。
@@ -89,6 +90,7 @@ def execute_memory_case(case_path, runtime_dir, *, expected_input_sha256, settin
     """
     from experiments.mechanism_pilot.contract import authorize_execution
     authorize_execution(settings, execution_kind, authorize, freeze_sha256)
+    failures = FailedActionGate(recovery_policy)
     case = load_memory_case(case_path, expected_input_sha256)
     root = validate_runtime(runtime_dir, settings)
     stopped = stop_state()
@@ -96,20 +98,11 @@ def execute_memory_case(case_path, runtime_dir, *, expected_input_sha256, settin
         return {'created': False, 'case_id': case['case_id'], 'global_stop': stopped}
     root.mkdir(parents=True, exist_ok=False)
     db, task_id, seeds, error = None, None, [], None
-    gate = {'stop': None, 'first_failed_action': None}
+    gate = {'stop': None}
 
     def failed_action_stop():
-        if db is not None and task_id and gate['first_failed_action'] is None:
-            rows = db.fetchall('SELECT a.* FROM actions a JOIN tasks t ON t.task_id=a.task_id '
-                "WHERE (t.task_id=? OR t.root_task_id=?) AND a.status='failed' "
-                'ORDER BY a.created_at,a.sequence_no,a.action_id LIMIT 1', (task_id, task_id))
-            if rows:
-                row = dict(rows[0])
-                row['arguments'] = json.loads(row.pop('arguments_json'))
-                row['observation'] = json.loads(row.pop('observation_json'))
-                gate['first_failed_action'] = row
-                gate['stop'] = gate['stop'] or 'failed_action:' + row['tool_name']
-        return gate['stop']
+        """参数更正只停止本格，资格/计费错误仍停止整批。"""
+        return failures.poll(db, task_id)
 
     class GuardedProvider:
         def __init__(self, original):
@@ -119,7 +112,7 @@ def execute_memory_case(case_path, runtime_dir, *, expected_input_sha256, settin
             return getattr(self.original, name)
 
         def _invoke(self, method, *args, **kwargs):
-            reason = failed_action_stop() or stop_state()
+            reason = gate['stop'] or failed_action_stop() or stop_state()
             if reason:
                 raise RequestNotSent(str(reason))
             if execution_kind == 'real':
@@ -203,7 +196,8 @@ def execute_memory_case(case_path, runtime_dir, *, expected_input_sha256, settin
             'unknown_receipts': unknown, 'raw_view_usage_is_not_qualified_for_billing': True},
         'synthetic_history_seeds': seeds, 'route_preselected': False, 'actual_plan': plan,
         'history_read_actions': history_actions, 'semantic_quality': 'not_automatically_evaluated',
-        'first_failed_action': gate['first_failed_action'],
-        'global_stop': gate['stop'] or stop_state() or ('case_exception:' + error['type'] if error else None)}
+        'first_failed_action': failures.first_failed_action,
+        **failures.audit(),
+        'global_stop': gate['stop'] or failures.global_stop or stop_state() or ('case_exception:' + error['type'] if error else None)}
     (root / 'result.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
     return report
