@@ -85,6 +85,18 @@ class FailedActionGateTests(unittest.TestCase):
         self.assertIsNone(gate.observe([action]))
         self.assertIsNone(gate.global_stop)
 
+    def test_native_retryable_review_contract_feedback_can_recover(self):
+        gate = FailedActionGate(BOUNDED_PARAMETER_RECOVERY)
+        action = failed(observation={'ok': False, 'kind': 'execution_error', 'data': {},
+            'message': 'existing target uses its stored snapshot; use revise_research for changes',
+            'retryable': True})
+        action['tool_name'] = 'review_research'
+        self.assertIsNone(gate.observe([action]))
+        action['action_id'] = 'actual-version-failure'
+        action['observation']['message'] = 'source version mismatch'
+        self.assertIsNotNone(gate.observe([action]))
+        self.assertIsNotNone(gate.global_stop)
+
     def test_unknown_policy_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'RECOVERY_POLICY'):
             FailedActionGate({**BOUNDED_PARAMETER_RECOVERY, 'max_recoverable_failures': 99})
