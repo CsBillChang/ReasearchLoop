@@ -206,10 +206,17 @@ class ConversationService:
         if not link or not task:
             return
         cid = link['conversation_id']
-        for question in tx.all('SELECT * FROM clarifications WHERE task_id=? ORDER BY created_at', (task_id,)):
-            self.add_message(tx,cid,task_id,'question:'+question['clarification_id'],'assistant',question['question'])
+        answered_clarifications = []
+        for question in tx.all('SELECT * FROM clarifications WHERE task_id=? ORDER BY created_at,clarification_id', (task_id,)):
+            question_mid = self.add_message(tx,cid,task_id,'question:'+question['clarification_id'],'assistant',question['question'])
             if question['answer'] is not None:
-                self.add_message(tx,cid,task_id,'clarified:'+question['clarification_id'],'user',question['answer'])
+                answer_mid = self.add_message(tx,cid,task_id,'clarified:'+question['clarification_id'],'user',question['answer'])
+                if question['status'] == 'answered':
+                    answered_clarifications.append({'clarification_id': question['clarification_id'],
+                        'task_id': task_id, 'conversation_id': cid, 'question': question['question'],
+                        'answer': question['answer'], 'question_message_id': question_mid,
+                        'answer_message_id': answer_mid, 'created_at': question['created_at'],
+                        'answered_at': question['answered_at']})
         if task['status'] not in TERMINAL:
             return
         result = json.loads(task['result_json'] or '{}')
@@ -226,7 +233,14 @@ class ConversationService:
         progress = [stage.retained(row['task_id']) for row in tx.all('SELECT task_id FROM tasks WHERE root_task_id=?', (task_id,))]
         progress = [item for item in progress if item['revision']]
         record = {'research_progress': progress, 'source_type':'research_history','task_id':task_id,'conversation_id':cid,'prompt':task['prompt'],'status':task['status'],'answer':answer,'papers':papers,'paper_ids':paper_ids,'evidence_ids':evidence_ids,'gaps':result.get('gaps',[]),'note_artifacts':result.get('note_artifacts',[]),'created_at':task['created_at']}
-        tx.execute('INSERT INTO research_memories(task_id,conversation_id,record_json,search_text,created_at) VALUES(?,?,?,?,?)', (task_id,cid,dump(record), task['prompt']+'\n'+answer+'\n'+dump(papers), _now()))
+        search_text = task['prompt']+'\n'+answer+'\n'+dump(papers)
+        if answered_clarifications:
+            # 原句保留用户实际补充条件，避免跨会话只剩未复述参数的最终摘要。
+            # 不把建议值当回答，不改写已有历史记录，也不授予原文或保存权限。
+            record['answered_clarifications'] = answered_clarifications
+            search_text += '\n'+'\n'.join(item['question']+'\n'+item['answer']
+                for item in answered_clarifications)
+        tx.execute('INSERT INTO research_memories(task_id,conversation_id,record_json,search_text,created_at) VALUES(?,?,?,?,?)', (task_id,cid,dump(record),search_text,_now()))
 
     def view(self, cid: str, offset: int = 0, limit: int = 100) -> dict:
         """按消息顺序读回；先补投影，服务重启后也可修复终态后的中断窗口。"""
