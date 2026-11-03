@@ -133,9 +133,9 @@ Reflection 与 Memory 采用有界核验、角色交接和跨会话使用场景�
 
 以下按 **Apple Silicon macOS 的默认 FP16 检索环境**说明。应用在本机运行，MySQL 与 Qdrant 通过 Docker Compose 启动；模型权重、论文来源和 API 凭据需要自行准备。
 
-### 1. 准备依赖与配置
+### 1. 获取源码与安装依赖
 
-需要 Python **3.14**、uv、Node.js/npm，以及可用的 Docker Compose。Python 和前端依赖分别由仓库锁文件管理。
+需要 Python **3.14**、uv、Node.js/npm 和 Docker Compose v2；先启动 Docker。Python 和前端依赖分别由仓库锁文件管理。若从 GitHub 下载 ZIP，解压后进入项目目录，再从 `cp .env.example .env` 开始执行。
 
 ```bash
 git clone https://github.com/CsBillChang/ReasearchLoop.git
@@ -180,19 +180,30 @@ cp config/paper-sources.example.json data/config/paper-sources.json
 
 编辑复制后的文件，填写自己可访问的 Supabase URL、只读凭据和对应 BM25 RPC 名称，并启用所需来源。模板列出 17 个来源适配项，默认全部禁用且连接信息为空，仓库不提供现成论文库或共享凭据。
 
-### 3. 启动本地应用
+### 3. Start：初始化并启动
 
-以下命令均在仓库根目录执行。`make infra` 启动 MySQL 8.4 和 Qdrant 1.19.1；先确认 MySQL 显示 `healthy`，再执行迁移。
+完成前面的 `.env`、模型文件及所需来源配置后，在项目根目录执行：
 
 ```bash
-make infra
-docker compose ps
+# 启动 MySQL、Qdrant，并等待基础设施就绪
+docker compose up -d --wait
 
-# 等待 MySQL healthy 后继续
+# 初始化数据库、检查配置，然后启动应用
 make migrate
 make diagnose
 make start
 make status
+```
+
+日常再次启动使用以下命令，无需重新安装依赖：
+
+```bash
+docker compose up -d --wait
+make start
+
+# 查看状态 / 停止应用进程
+make status
+make stop
 ```
 
 `make start` 一并启动 API、前端、Worker 与 Scheduler。打开 **http://127.0.0.1:4173**，即可从聊天入口提交研究任务。
