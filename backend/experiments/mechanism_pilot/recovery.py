@@ -33,6 +33,17 @@ class FailedActionGate:
         code = data.get('error_code')
         blocker = (data.get('coverage_blocker') or {}).get('code')
         message = observation.get('message', '').lower()
+        if code == 'MEMORY_SCOPE_DENIED':
+            # 只有业务确认未泄露、未写入的拒绝可改走合法入口；不放宽其他权限错误。
+            if (action.get('tool_name') == 'read_memory'
+                    and observation.get('ok') is False
+                    and observation.get('kind') == 'execution_error'
+                    and observation.get('retryable') is False
+                    and data.get('scope_denied') is True
+                    and data.get('data_disclosed') is False
+                    and data.get('state_changed') is False):
+                return 'recoverable_memory_scope'
+            return 'global_stop'
         if (observation.get('kind') == 'validation_error' and observation.get('retryable')
                 and re.match(r'^\d+ validation errors? for [a-z]', message)):
             # Pydantic拒绝时handler尚未执行；漏填hash与实际版本校验失败不同。
@@ -74,6 +85,12 @@ class FailedActionGate:
                 self.global_stop = reason
             elif classification == 'case_stop':
                 self.case_stop = self.case_stop or reason
+            elif classification == 'recoverable_memory_scope':
+                # 独立计数：一次机会用于换入口，第二次越界即停止本格，参数不同也不追加。
+                denials = sum(row['classification'] == 'recoverable_memory_scope'
+                              for row in self.failed_actions)
+                if denials > 1:
+                    self.case_stop = self.case_stop or 'memory_scope_recovery_exhausted:read_memory'
             else:
                 signature = json.dumps([action.get('task_id'), action['tool_name'],
                     action.get('arguments')], sort_keys=True, ensure_ascii=False)
@@ -103,4 +120,7 @@ class FailedActionGate:
     def audit(self):
         """失败原件和分级一并交付，局部停止不伪装成完成。"""
         return {'recovery_policy': self.policy, 'failed_action_history': self.failed_actions,
-                'case_stop': self.case_stop}
+                'case_stop': self.case_stop,
+                'memory_scope_recovery': {'allowed_denials': 1 if self.policy else 0,
+                    'observed_denials': sum(row['classification'] == 'recoverable_memory_scope'
+                                           for row in self.failed_actions)}}

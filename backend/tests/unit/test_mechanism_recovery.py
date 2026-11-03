@@ -25,7 +25,81 @@ def failed(identity='a1', *, arguments=None, observation=None):
                 'message': 'goal missing subtask_ids', 'retryable': False}}
 
 
+def scope_denied(identity='scope-1', source_id='other-conversation'):
+    """合成未泄露数据且无状态变更的跨会话读取拒绝。"""
+    action = failed(identity, arguments={'source_type': 'conversation', 'source_id': source_id},
+        observation={'ok': False, 'kind': 'execution_error', 'retryable': False,
+            'data': {'error_code': 'MEMORY_SCOPE_DENIED', 'scope_denied': True,
+                     'data_disclosed': False, 'state_changed': False, 'legal_readbacks': []},
+            'message': 'conversation outside task scope; use an already permitted history record'})
+    action['tool_name'] = 'read_memory'
+    return action
+
+
 class FailedActionGateTests(unittest.TestCase):
+    def test_scope_denial_preserves_failure_and_allows_one_alternate_route(self):
+        gate = FailedActionGate(BOUNDED_PARAMETER_RECOVERY)
+        action = scope_denied()
+        self.assertIsNone(gate.observe([action]))
+        self.assertIsNone(gate.observe([action]))
+        self.assertEqual(gate.first_failed_action, action)
+        audit = gate.audit()
+        self.assertEqual(audit['failed_action_history'][0]['classification'], 'recoverable_memory_scope')
+        self.assertEqual(audit['memory_scope_recovery'], {'allowed_denials': 1, 'observed_denials': 1})
+        self.assertIsNone(gate.global_stop)
+
+    def test_second_scope_denial_stops_case_even_for_a_different_conversation(self):
+        for source_id in ('other-conversation', 'another-conversation'):
+            with self.subTest(source_id=source_id):
+                gate = FailedActionGate(BOUNDED_PARAMETER_RECOVERY)
+                gate.observe([scope_denied()])
+                self.assertEqual(gate.observe([scope_denied('scope-2', source_id)]),
+                                 'memory_scope_recovery_exhausted:read_memory')
+                self.assertIsNone(gate.global_stop)
+                self.assertEqual(gate.audit()['memory_scope_recovery']['observed_denials'], 2)
+
+    def test_scope_recovery_does_not_consume_or_extend_parameter_allowance(self):
+        gate = FailedActionGate(BOUNDED_PARAMETER_RECOVERY)
+        self.assertIsNone(gate.observe([failed('parameter-1', arguments={'attempt': 1})]))
+        self.assertIsNone(gate.observe([scope_denied()]))
+        self.assertIsNone(gate.observe([failed('parameter-2', arguments={'attempt': 2})]))
+        self.assertEqual(gate.observe([failed('parameter-3', arguments={'attempt': 3})]),
+                         'parameter_recovery_exhausted:finish_task')
+        self.assertIsNone(gate.global_stop)
+
+    def test_scope_denial_requires_complete_safe_failure_markers(self):
+        changes = [('ok', True), ('kind', 'validation_error'), ('retryable', True),
+                   ('scope_denied', False), ('data_disclosed', True), ('state_changed', True)]
+        for key, value in changes:
+            for missing in (False, True):
+                with self.subTest(key=key, missing=missing):
+                    action = scope_denied()
+                    target = action['observation'] if key in {'ok', 'kind', 'retryable'} else action['observation']['data']
+                    if missing:
+                        target.pop(key)
+                    else:
+                        target[key] = value
+                    gate = FailedActionGate(BOUNDED_PARAMETER_RECOVERY)
+                    self.assertEqual(gate.observe([action]), 'failed_action:read_memory')
+                    self.assertIsNotNone(gate.global_stop)
+
+    def test_scope_marker_on_another_tool_cannot_bypass_global_stop(self):
+        action = scope_denied()
+        action['tool_name'] = 'forget_preference'
+        gate = FailedActionGate(BOUNDED_PARAMETER_RECOVERY)
+        self.assertEqual(gate.observe([action]), 'failed_action:forget_preference')
+        self.assertIsNotNone(gate.global_stop)
+
+    def test_untyped_scope_denial_and_legacy_still_stop_globally(self):
+        action = scope_denied()
+        gate = FailedActionGate()
+        self.assertEqual(gate.observe([action]), 'failed_action:read_memory')
+        self.assertEqual(gate.audit()['memory_scope_recovery']['allowed_denials'], 0)
+        action['observation']['data'].pop('error_code')
+        gate = FailedActionGate(BOUNDED_PARAMETER_RECOVERY)
+        self.assertEqual(gate.observe([action]), 'failed_action:read_memory')
+        self.assertIsNotNone(gate.global_stop)
+
     def test_legacy_still_stops_at_first_action(self):
         gate = FailedActionGate()
         self.assertEqual(gate.observe([failed()]), 'failed_action:finish_task')
@@ -199,6 +273,39 @@ class RecoveryWorkerTests(unittest.TestCase):
         self.assertEqual(failure['kind'], 'execution_error')
         feedback = [json.loads(m['content']) for m in self.requests[1]['messages'] if m['role'] == 'tool']
         self.assertIn(failure, feedback)
+
+    def test_native_scope_denial_can_switch_to_permitted_profile_and_finish(self):
+        result = self.run_calls([
+            ('set_research_plan', self.plan()),
+            ('read_memory', {'source_type': 'conversation', 'source_id': 'outside-conversation'}),
+            ('get_profile', {}),
+            ('finish_task', {'answer_markdown': '当前没有有效的长期偏好；无法直接读取其他会话。',
+                'goals': [{'goal_id': 'derive', 'status': 'satisfied', 'reason': '已读取当前真实画像'}]}),
+        ])
+        self.assertEqual(result['view']['status'], 'completed', result)
+        self.assertIsNone(result['global_stop'], result)
+        self.assertIsNone(result['case_stop'], result)
+        self.assertEqual(len(self.requests), 4)
+        failure = result['first_failed_action']['observation']
+        self.assertFalse(failure['ok'])
+        self.assertEqual(failure['data']['error_code'], 'MEMORY_SCOPE_DENIED')
+        feedback = [json.loads(m['content']) for m in self.requests[2]['messages'] if m['role'] == 'tool']
+        self.assertIn(failure, feedback)
+        self.assertEqual(result['failed_action_history'][0]['classification'], 'recoverable_memory_scope')
+        self.assertEqual(result['real_model_calls'], 0)
+
+    def test_native_second_scope_denial_stops_before_another_model_send(self):
+        result = self.run_calls([
+            ('set_research_plan', self.plan()),
+            ('read_memory', {'source_type': 'conversation', 'source_id': 'outside-conversation'}),
+            ('read_memory', {'source_type': 'conversation', 'source_id': 'another-conversation'}),
+        ])
+        self.assertEqual(result['case_stop'], 'memory_scope_recovery_exhausted:read_memory', result)
+        self.assertIsNone(result['global_stop'], result)
+        self.assertEqual(len(self.requests), 3)
+        self.assertEqual(len(result['failed_action_history']), 2)
+        self.assertNotEqual(result['view']['status'], 'completed')
+        self.assertTrue(any(row['sent_state'] == 'not_sent' for row in result['physical_receipts']))
 
     def test_driver_keeps_next_independent_cell_after_local_stop(self):
         from experiments.mechanism_pilot.contract import RunContract
