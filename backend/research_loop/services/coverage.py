@@ -266,14 +266,14 @@ class CoverageService:
             # min_papers计不同材料，不要求为了修改旧稿去找“新论文”。
             # strategy可未完成，不能单独承担必需材料门而使零取材被判completed。
             if not any(g.min_papers > 0 and g.origin != "strategy" for g in active):
-                raise ValueError("研究计划至少需要一个active user/legacy且min_papers>0的材料目标；纯历史回顾使用memory")
+                raise ValueError("研究计划至少需要一个active user/legacy且min_papers>0的材料目标；若整体仅为会话澄清确认、历史回顾或偏好管理且无需论文证据，改用task_kind=memory且目标min_papers=0，不要虚构论文数量。研究任务中的澄清仍保留原研究类型和材料要求。")
             if any(g.min_papers == 0 and g.requires_fulltext for g in active):
                 raise ValueError("要求全文核对的目标需min_papers>0；零篇只用于不额外取材的汇总目标")
         if brief.task_kind == "memory":
             if not self.db.fetchone("SELECT task_id FROM conversation_links WHERE task_id=?", (task_id,)):
                 raise ValueError("memory plan requires a conversation")
             if brief.requested_count or brief.deep_reading_requested or brief.save_requested:
-                raise ValueError("新检索、精读或生成保存仍走原研究计划，不使用memory计划")
+                raise ValueError("请求数量、精读或生成保存仍走原研究计划；memory仅用于整体无需论文证据的纯会话任务，不得用它降低已有研究要求。")
         task = self.db.get_task(task_id)
         value = brief.model_dump(mode="json")
         value["save_policy"] = task["save_policy"]

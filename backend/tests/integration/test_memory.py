@@ -15,7 +15,7 @@ from research_loop.domain.tasks import TaskCreate, TaskStatus, TaskResult, SaveP
 from research_loop.domain.memory import RememberInput, ProfileSet, NoteUpdate, HistoryRead
 from research_loop.domain.notes import CreateNoteInput
 from research_loop.storage.mysql import Database
-from research_loop.storage.memory import dump
+from research_loop.storage.memory import dump, digest
 from research_loop.storage.files import FileStore
 from research_loop.storage.checkpoints import CheckpointStore
 from research_loop.services.tasks import TaskService
@@ -127,6 +127,59 @@ class MemoryTests(unittest.TestCase):
         self.assertIn(entry,self.memory.profile()['inferred_interests'])
         self.memory.forget(entry['memory_id'],1)
         self.assertNotIn(entry['memory_id'],dump(self.context.history(tid)))
+
+    def test_explicit_content_is_verbatim_and_rejection_is_atomic(self):
+        """新偏好拒绝改写扩充，失败不覆盖现有版本或写入操作回执。"""
+        quote = '请长期记住：先给结论，再列两条依据。'
+        tid = self.task(quote+'不要保存笔记文件。')
+        args = RememberInput(slot=self.prefix, kind='explicit',
+            content='先给结论，再列两条依据', source_quote=quote)
+        entry = self.memory.remember(tid, args)
+        before = self.db.fetchall('SELECT * FROM memory_operations ORDER BY request_key')
+        for bad in ['先给结论；再列两条依据；不保存笔记文件', '先给结论两条依据', '   ']:
+            with self.subTest(content=bad), self.assertRaisesRegex(ValueError, 'MEMORY_CONTENT_SOURCE'):
+                self.memory.remember(tid, args.model_copy(update={
+                    'content':bad, 'expected_version':1}))
+        self.assertEqual(self.memory.active(), [entry])
+        self.assertEqual(self.db.fetchall('SELECT * FROM memory_operations ORDER BY request_key'), before)
+        self.assertEqual(self.db.get_task(tid)['save_policy'], 'deny')
+
+    def test_explicit_condition_and_negation_can_be_preserved(self):
+        """允许逐字保留完整条件和否定，不靠关键词过滤合法偏好。"""
+        quote = '以后讲解算法时不要省略复杂度；本轮只给结论。'
+        tid = self.task(quote)
+        entry = self.memory.remember(tid, RememberInput(slot=self.prefix, kind='explicit',
+            content='以后讲解算法时不要省略复杂度', source_quote='以后讲解算法时不要省略复杂度'))
+        self.assertEqual(entry['content'], '以后讲解算法时不要省略复杂度')
+        self.assertNotIn('本轮', dump(entry))
+
+    def test_new_verbatim_rule_does_not_reject_old_receipt_or_revive_it(self):
+        """模拟升级前已成功改写回执，升级后重放返回当前撤销状态。"""
+        tid = self.task('以后默认使用中文解释技术问题。')
+        args = RememberInput(slot=self.prefix, kind='explicit', content='偏好中文技术解释',
+            source_quote='以后默认使用中文解释技术问题。')
+        source = {'type':'user_message', 'task_id':tid, 'quote':args.source_quote,
+            'task_created_at':self.db.get_task(tid)['created_at']}
+        key = 'remember:'+tid+':'+digest(args.model_dump())[:48]
+        old = self.memory._put(args.slot, args.kind, args.content, source, 0, key)
+        self.memory.forget(old['memory_id'], 1)
+        self.assertEqual(self.memory.remember(tid, args)['status'], 'revoked')
+        self.assertEqual(len(self.db.fetchall('SELECT * FROM memory_entries')), 1)
+        claimed = self.db.claim_task('worker', task_id=tid)
+        fenced = MemoryService(self.db, actor=(tid, 'worker', claimed['lease_token']))
+        self.db.update_task(tid, cancel_requested=1)
+        with self.assertRaisesRegex(PermissionError, 'MEMORY_LEASE_LOST'):
+            fenced.remember(tid, args)
+
+    def test_inferred_content_and_profile_edit_keep_existing_contract(self):
+        """推断可单独归纳；人工画像编辑不要求content包含于用户任务原句。"""
+        tid = self.task('这次想了解目标检测。')
+        inferred = self.memory.remember(tid, RememberInput(slot=self.prefix, kind='inferred',
+            content='可能关注计算机视觉中的检测研究', source_quote='目标检测'))
+        self.assertEqual(inferred['kind'], 'inferred')
+        explicit = self.memory.set_profile(ProfileSet(slot=self.prefix+'-manual',
+            content='条件不明时先询问再保存', idempotency_key=uuid4().hex))
+        self.assertEqual(explicit['source']['type'], 'profile_edit')
 
     def test_real_api_worker_receipts_and_cross_conversation(self):
         """真实API→DB→Worker；替身只代替供应商，消息注入和工具写入真实执行。"""

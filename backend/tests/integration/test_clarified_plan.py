@@ -14,8 +14,11 @@ from fastapi.testclient import TestClient
 from research_loop.config import Settings
 from research_loop.domain.tasks import FinishTaskInput, ResearchBrief, TaskCreate
 from research_loop.services.coverage import CoverageService
+from research_loop.services.conversations import ConversationService
 from research_loop.services.tasks import TaskService
 from research_loop.storage.mysql import Database
+from research_loop.tools.base import ToolContext, execute_spec
+from research_loop.tools.delegation import specs as delegation_specs
 from research_loop.workers.executor import TaskExecutor
 from integration.test_adaptive_research import AdaptiveScenario
 from integration.test_collaboration_contract import FixturePDF
@@ -192,3 +195,71 @@ class ClarifiedPlanTests(unittest.TestCase):
         plan["count_confirmed"] = True
         with self.assertRaisesRegex(ValueError, "weakened"):
             CoverageService(self.db).prepare_plan(tid, ResearchBrief.model_validate(plan))
+
+    def test_conversation_plan_can_correct_route_without_inventing_papers(self):
+        """零论文会话先走错路由时，真实工具反馈能支持无副作用地更正。"""
+        cid = ConversationService(self.db, self.settings).create("口径确认", uuid4().hex)["conversation_id"]
+        prompt = "请先确认合格率口径，确认后只回复口径已确认，不要保存文件。"
+        tid = TaskService(self.db, self.settings).create(TaskCreate(
+            prompt=prompt, conversation_id=cid, idempotency_key=uuid4().hex)).task_id
+        service = CoverageService(self.db)
+        context = ToolContext(task_id=tid, save_policy="deny", services={"coverage": service})
+        spec = next(s for s in delegation_specs() if s.name == "set_research_plan")
+        brief = {"goal": "确认口径", "task_kind": "survey", "goals": [{
+            "goal_id": "confirm", "description": "确认口径", "origin": "user",
+            "source_quote": prompt, "min_papers": 0}]}
+        refused = execute_spec(spec, brief, context)
+        self.assertFalse(refused.ok)
+        self.assertTrue(refused.retryable)
+        self.assertIn("task_kind=memory", refused.message)
+        self.assertIn("不要虚构论文数量", refused.message)
+        self.assertIsNone(service.plan(tid))
+        accepted = execute_spec(spec, {**brief, "task_kind": "memory"}, context)
+        self.assertTrue(accepted.ok, accepted)
+        plan = accepted.data["research_plan"]
+        self.assertEqual(plan["goals"][0]["min_papers"], 0)
+        self.assertIsNone(plan["requested_count"])
+        self.assertFalse(plan["count_confirmed"])
+        self.assertEqual(plan["save_policy"], "deny")
+        self.assertEqual(self.db.list_subtasks(tid), [])
+        self.assertEqual(self.db.fetchall("SELECT * FROM model_calls WHERE task_id=?", (tid,)), [])
+
+    def test_clarification_inside_research_cannot_remove_paper_requirements(self):
+        """混合任务保留论文目标；一次确认步骤不授予整体降级为memory的权利。"""
+        cid = ConversationService(self.db, self.settings).create("比较前澄清", uuid4().hex)["conversation_id"]
+        prompt = "比较两篇论文的方法，先确认比较维度，不要保存文件。"
+        tid = TaskService(self.db, self.settings).create(TaskCreate(
+            prompt=prompt, conversation_id=cid, idempotency_key=uuid4().hex)).task_id
+        service = CoverageService(self.db)
+        brief = ResearchBrief(goal="比较论文前确认维度", task_kind="compare", requested_count=2,
+            count_confirmed=True, goals=[
+                {"goal_id": "papers", "description": "比较两篇论文的方法", "origin": "user",
+                 "source_quote": "比较两篇论文的方法", "min_papers": 2, "requires_fulltext": True},
+                {"goal_id": "clarify", "description": "先确认比较维度", "origin": "user",
+                 "source_quote": "先确认比较维度", "min_papers": 0}])
+        plan = service.prepare_plan(tid, brief)
+        self.db.save_action({"action_id": uuid4().hex, "task_id": tid, "sequence": 1,
+            "tool_name": "set_research_plan", "arguments": brief.model_dump(mode="json"),
+            "status": "succeeded", "observation": {"ok": True, "kind": "success",
+                "data": {"research_plan": plan}}})
+        downgraded = copy.deepcopy(plan)
+        downgraded.update(task_kind="memory", requested_count=None, count_confirmed=False)
+        downgraded["goals"] = [downgraded["goals"][1]]
+        with self.assertRaisesRegex(ValueError, "existing goals"):
+            service.prepare_plan(tid, ResearchBrief.model_validate(downgraded))
+        self.assertEqual(service.plan(tid), plan)
+        self.assertEqual(plan["goals"][0]["min_papers"], 2)
+        self.assertTrue(plan["goals"][0]["requires_fulltext"])
+
+    def test_memory_route_still_rejects_research_delivery_flags(self):
+        """纯会话路由不能承接用户论文数量、精读和生成保存要求。"""
+        cid = ConversationService(self.db, self.settings).create("记忆路由", uuid4().hex)["conversation_id"]
+        tid = TaskService(self.db, self.settings).create(TaskCreate(prompt="回顾历史",
+            conversation_id=cid, idempotency_key=uuid4().hex)).task_id
+        base = {"goal": "回顾历史", "task_kind": "memory", "goals": [{
+            "goal_id": "history", "description": "回顾历史", "min_papers": 0}]}
+        service = CoverageService(self.db)
+        for flags in ({"requested_count": 2}, {"deep_reading_requested": True}, {"save_requested": True}):
+            with self.subTest(flags=flags), self.assertRaisesRegex(ValueError, "仍走原研究计划"):
+                service.prepare_plan(tid, ResearchBrief.model_validate({**base, **flags}))
+        self.assertIsNone(service.plan(tid))
