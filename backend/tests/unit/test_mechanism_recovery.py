@@ -67,6 +67,15 @@ class FailedActionGateTests(unittest.TestCase):
                 self.assertEqual(gate.observe([failed(observation=observation)]), 'failed_action:finish_task')
                 self.assertIsNone(gate.case_stop)
 
+    def test_material_goal_parameter_feedback_can_recover(self):
+        action = failed(observation={'ok': False, 'kind': 'execution_error', 'data': {},
+            'message': '研究计划至少需要一个active user/legacy且min_papers>0的材料目标；纯历史回顾使用memory',
+            'retryable': True})
+        action['tool_name'] = 'set_research_plan'
+        gate = FailedActionGate(BOUNDED_PARAMETER_RECOVERY)
+        self.assertIsNone(gate.observe([action]))
+        self.assertEqual(gate.failed_actions[0]['classification'], 'recoverable_parameter')
+
     def test_unknown_policy_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'RECOVERY_POLICY'):
             FailedActionGate({**BOUNDED_PARAMETER_RECOVERY, 'max_recoverable_failures': 99})
@@ -152,6 +161,23 @@ class RecoveryWorkerTests(unittest.TestCase):
         self.assertEqual(len(result['failed_action_history']), 3)
         self.assertEqual(result['strict_usage_summary']['total_tokens'], 45)
         self.assertTrue(any(r['sent_state'] == 'not_sent' for r in result['physical_receipts']))
+
+    def test_native_material_goal_error_reaches_next_model_call(self):
+        invalid = {**self.plan(), 'task_kind': 'search'}
+        result = self.run_calls([
+            ('set_research_plan', invalid),
+            ('get_profile', {}),
+            ('set_research_plan', self.plan()),
+            ('finish_task', {'answer_markdown': '保留6条。', 'goals': [
+                {'goal_id': 'derive', 'status': 'satisfied', 'reason': '按本条数据'}]}),
+        ])
+        self.assertEqual(result['view']['status'], 'completed')
+        self.assertIsNone(result['global_stop'])
+        self.assertEqual(len(self.requests), 4)
+        failure = result['first_failed_action']['observation']
+        self.assertEqual(failure['kind'], 'execution_error')
+        feedback = [json.loads(m['content']) for m in self.requests[1]['messages'] if m['role'] == 'tool']
+        self.assertIn(failure, feedback)
 
     def test_driver_keeps_next_independent_cell_after_local_stop(self):
         from experiments.mechanism_pilot.contract import RunContract

@@ -44,6 +44,10 @@ class FailedActionGate:
             return 'recoverable_parameter'
         if code in {'INVALID_TOOL_JSON', 'TOOL_DEPENDENCY_UNRESOLVED'}:
             return 'recoverable_parameter'
+        if (action.get('tool_name') == 'set_research_plan' and observation.get('retryable')
+                and message.startswith('研究计划至少需要一个active user/legacy且min_papers>0的材料目标')):
+            # 计划服务用 execution_error 返回该明确参数反馈，不能按异常类别误停整批。
+            return 'recoverable_parameter'
         if observation.get('kind') == 'validation_error' and observation.get('retryable'):
             return 'recoverable_parameter'
         return 'global_stop'
