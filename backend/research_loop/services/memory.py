@@ -7,6 +7,14 @@ from research_loop.storage.indexes import rank
 from research_loop.storage.mysql import _now
 
 
+class MemoryScopeDenied(KeyError):
+    """读取范围已拒绝；仅携带当前任务此前实际读回过的合法入口。"""
+
+    def __init__(self, legal_readbacks):
+        super().__init__('conversation outside task scope')
+        self.legal_readbacks = legal_readbacks
+
+
 class MemoryService:
     """单用户记忆服务；当前指令优先，保存授权永不从记忆继承。"""
 
@@ -41,7 +49,7 @@ class MemoryService:
         if not any(args.source_quote in text for text in texts):
             raise ValueError('MEMORY_SOURCE: 引用必须来自当前用户指令或澄清')
         source = {'type':'user_message', 'task_id':task_id, 'quote':args.source_quote, 'task_created_at':task['created_at']}
-        return self._put(args.slot,args.kind,args.content,source,args.expected_version,'remember:'+task_id+':'+digest(args.model_dump())[:48])
+        return self._put(args.slot,args.kind,args.content,source,args.expected_version,'remember:'+task_id+':'+digest(args.model_dump())[:48], validate_explicit=True)
 
     def set_profile(self, args) -> dict:
         """个人面板的显式编辑；相同请求可重放，版本过期则拒绝。"""
@@ -77,13 +85,16 @@ class MemoryService:
             record_operation(tx, key, args.content, {'memory_id': identity})
             return self._entry(row)
 
-    def _put(self, slot, kind, content, source, expected_version, key) -> dict:
+    def _put(self, slot, kind, content, source, expected_version, key, *, validate_explicit=False) -> dict:
         """在串行事务中建立新版本；被撤销的旧调用仅返回现状，不复活记录。"""
         payload = [slot,kind,content,source,expected_version]
         with self.store.transaction() as tx:
             check_owner(tx,self.actor)
             if old := operation(tx,key,payload):
                 return self._entry(tx.one('SELECT * FROM memory_entries WHERE memory_id=?', (old['memory_id'],)))
+            # 旧成功回执仍可重放；新校验只约束本次尚未执行的显式偏好写入。
+            if validate_explicit and kind == 'explicit' and (not content.strip() or content not in source['quote']):
+                raise ValueError('MEMORY_CONTENT_SOURCE: 显式偏好content须逐字连续摘取source_quote中的完整偏好；保留长期范围、条件和否定，不混入本轮指令；有歧义先澄清')
             latest = tx.one('SELECT * FROM memory_entries WHERE slot=? ORDER BY version DESC LIMIT 1', (slot,))
             version = latest['version'] if latest else 0
             if expected_version != version:
@@ -189,7 +200,7 @@ class MemoryService:
         elif kind == 'conversation':
             link = self.db.fetchone('SELECT conversation_id FROM conversation_links WHERE task_id=?', (task_id,))
             if not link or sid != link['conversation_id']:
-                raise KeyError('conversation outside task scope')
+                raise MemoryScopeDenied(self._history_readbacks(task_id))
             content = dump(self.db.fetchall('SELECT message_id,role,content,sequence_no FROM conversation_messages WHERE conversation_id=? ORDER BY sequence_no',(sid,)))
         elif kind == 'message':
             link = self.db.fetchone('SELECT conversation_id FROM conversation_links WHERE task_id=?', (task_id,))
@@ -201,6 +212,22 @@ class MemoryService:
             raise KeyError('memory source not found in permitted scope')
         text = content[args.offset:args.offset+args.limit]
         return {'source_type':kind,'source_id':sid,'content':text,'content_hash':digest(content),'offset':args.offset,'total_chars':len(content),'next_offset':args.offset+len(text) if args.offset+len(text)<len(content) else None,'is_original_paper_evidence':False}
+
+    def _history_readbacks(self, task_id: str) -> list[dict]:
+        """复述当前任务已成功收到的历史入口，不搜索新记录或自动读数据。"""
+        readbacks = {}
+        for action in self.db.list_actions(task_id):
+            if action['status'] != 'succeeded' or action['tool_name'] != 'read_memory':
+                continue
+            observation = action['observation'] or {}
+            data = observation.get('data') or {}
+            arguments = action['arguments']
+            if (observation.get('ok') is True and data.get('source_type') == 'research_history'
+                    and data.get('source_id') == arguments.get('source_id')
+                    and arguments.get('source_type') == 'research_history'):
+                readbacks[data['source_id']] = {'source_type': 'research_history',
+                    'source_id': data['source_id'], 'next_offset': data.get('next_offset')}
+        return list(readbacks.values())
 
     def profile(self) -> dict:
         """从成功精读子任务统计不同论文；不把下载量、重试或用户已读混为一谈。"""

@@ -17,6 +17,8 @@ from research_loop.services.memory import MemoryService
 from research_loop.services.tasks import TaskService
 from research_loop.storage.checkpoints import CheckpointStore
 from research_loop.storage.mysql import Database
+from research_loop.tools.base import ToolContext, execute_spec
+from research_loop.tools.memory import specs as memory_specs
 
 
 class ClarificationHistoryTests(unittest.TestCase):
@@ -173,3 +175,54 @@ class ClarificationHistoryTests(unittest.TestCase):
         self.assertEqual(result['content'], original)
         self.assertNotIn('answered_clarifications', recovered)
         self.assertEqual(recovered['task_id'], task_id)
+
+    def test_scope_denied_feedback_only_repeats_successful_legal_readbacks(self):
+        """正常工具拒绝跨会话读取；只复述本任务成功观察，不泄露新ID或内容。"""
+        old = self.new_task()
+        self.answer(old, '合成口径是什么？', '合成事实 SECRET-SIX。')
+        self.finish(old)
+        target = self.new_task(self.new_conversation(), '继续历史口径，不保存。')
+        context = ToolContext(task_id=target, save_policy='deny', services={'memory':self.memory})
+        spec = next(s for s in memory_specs() if s.name == 'read_memory')
+        args = {'source_type':'research_history', 'source_id':old, 'limit':16000}
+        allowed = execute_spec(spec, args, context)
+        self.assertTrue(allowed.ok)
+        self.db.save_action({'action_id':uuid4().hex, 'task_id':target, 'sequence':1,
+            'tool_name':'read_memory', 'arguments':args, 'status':'succeeded',
+            'observation':allowed.model_dump(mode='json')})
+        # 失败读回和其他工具的ID不能冒充已成功合法入口。
+        for sequence, tool, status in [(2, 'read_memory', 'failed'), (3, 'search_memory', 'succeeded')]:
+            self.db.save_action({'action_id':uuid4().hex, 'task_id':target, 'sequence':sequence,
+                'tool_name':tool, 'arguments':{'source_type':'research_history','source_id':'UNSEEN'},
+                'status':status, 'observation':{'ok':status=='succeeded', 'data':{
+                    'source_type':'research_history','source_id':'UNSEEN'}}})
+        tables = ['conversation_messages','research_memories','memory_entries','memory_operations','task_inputs']
+        before = {table:self.db.fetchall('SELECT * FROM '+table) for table in tables}
+        denied = execute_spec(spec, {'source_type':'conversation', 'source_id':self.cid}, context)
+        self.assertFalse(denied.ok)
+        self.assertFalse(denied.retryable)
+        self.assertEqual(denied.kind, 'execution_error')
+        self.assertEqual(denied.data, {'error_code':'MEMORY_SCOPE_DENIED','scope_denied':True,
+            'data_disclosed':False,'state_changed':False,'legal_readbacks':[
+                {'source_type':'research_history','source_id':old,'next_offset':None}]})
+        self.assertNotIn('SECRET-SIX', denied.model_dump_json())
+        self.assertNotIn('UNSEEN', denied.model_dump_json())
+        self.assertEqual(before, {table:self.db.fetchall('SELECT * FROM '+table) for table in tables})
+        self.assertEqual(self.db.get_task(target)['save_policy'], 'deny')
+        # 同一个工具仍能按原历史入口取得事实，不能直接读取旧消息。
+        self.assertIn('SECRET-SIX', execute_spec(spec,args,context).data['content'])
+        message = self.db.fetchone("SELECT message_id FROM conversation_messages WHERE task_id=? AND role='user' ORDER BY sequence_no DESC", (old,))
+        missing = execute_spec(spec, {'source_type':'message','source_id':message['message_id']},context)
+        self.assertFalse(missing.ok)
+        self.assertNotIn('error_code', missing.data)
+
+    def test_scope_denied_without_prior_success_has_no_suggested_ids(self):
+        """无先前成功观察时只反馈拒绝，不扫描或透露历史记录身份。"""
+        old = self.new_task()
+        self.finish(old)
+        target = self.new_task(self.new_conversation())
+        spec = next(s for s in memory_specs() if s.name == 'read_memory')
+        context = ToolContext(task_id=target, save_policy='deny', services={'memory':self.memory})
+        denied = execute_spec(spec, {'source_type':'conversation','source_id':self.cid},context)
+        self.assertEqual(denied.data['legal_readbacks'], [])
+        self.assertNotIn(old, denied.model_dump_json())

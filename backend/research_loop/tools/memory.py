@@ -2,6 +2,7 @@
 from research_loop.domain.memory import RememberInput, ForgetInput, RecallInput, HistoryRead, ProfileRead, NoteToolUpdate, NoteUpdate
 from research_loop.domain.tasks import Observation, SavePolicy
 from research_loop.tools.base import ToolSpec
+from research_loop.services.memory import MemoryScopeDenied
 
 
 def _remember(args, ctx):
@@ -21,7 +22,14 @@ def _search(args, ctx):
 
 def _read(args, ctx):
     """根据稳定ID分页补读历史细节。"""
-    return Observation(ok=True,kind='success',data=ctx.services['memory'].read(ctx.task_id,args))
+    try:
+        return Observation(ok=True,kind='success',data=ctx.services['memory'].read(ctx.task_id,args))
+    except MemoryScopeDenied as exc:
+        return Observation(ok=False,kind='execution_error',retryable=False,
+            data={'error_code':'MEMORY_SCOPE_DENIED', 'scope_denied':True,
+                  'data_disclosed':False, 'state_changed':False,
+                  'legal_readbacks':exc.legal_readbacks},
+            message='当前conversation读取入口不在任务范围，已拒绝且未读取数据或改变状态。不要重试相同越界请求；使用此前合法读回的research_history记录，必要时按已返回的next_offset补读；没有依据就说明缺失。')
 
 
 def _profile(args, ctx):
@@ -38,7 +46,7 @@ def _update(args, ctx):
 def specs():
     """统一注册schema/实现；只给会话Supervisor开放。"""
     return [ToolSpec(name,description,model,handler,('supervisor',)) for name,description,model,handler in [
-        ('remember_preference','Persist explicit LONG-TERM user preference, or separately labeled inferred interest. Current user quote required. Never turn a one-off instruction or file permission into a preference.',RememberInput,_remember),
+        ('remember_preference','Persist explicit LONG-TERM user preferences, or separately labeled inferred interests, with current-user provenance. For new explicit preferences, select the smallest semantically complete source_quote preserving enduring scope, conditions and negations; copy content verbatim as a contiguous span that preserves the complete preference. Exclude current-task instructions and exceptions; clarify ambiguous enduring scope before writing. Inferred interests remain separately labeled and do not require verbatim content. Preferences never grant file-save permission. Example: "Always answer in Chinese; use English for this task" stores only "Always answer in Chinese".',RememberInput,_remember),
         ('forget_preference','Revoke a current preference/inference by its ID and version. Do not revive old records.',ForgetInput,_forget),
         ('get_profile','Read current preferences, inferred interests and distinct successful deep-reading statistics.',ProfileRead,_profile),
         ('search_memory','Search previous research and saved project notes. These are history, not original paper evidence.',RecallInput,_search),
