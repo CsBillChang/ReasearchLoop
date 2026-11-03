@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 
 BOUNDED_PARAMETER_RECOVERY = {
@@ -32,6 +33,10 @@ class FailedActionGate:
         code = data.get('error_code')
         blocker = (data.get('coverage_blocker') or {}).get('code')
         message = observation.get('message', '').lower()
+        if (observation.get('kind') == 'validation_error' and observation.get('retryable')
+                and re.match(r'^\d+ validation errors? for [a-z]', message)):
+            # Pydantic拒绝时handler尚未执行；漏填hash与实际版本校验失败不同。
+            return 'recoverable_parameter'
         # 业务观察未保留异常类型，因此先保守识别权限和当前身份约束。
         sensitive = ('permission', 'unauthorized', 'not authorized', 'forbidden', 'denied',
                      'outside', 'mismatch', 'hash', 'version', 'lease', 'budget', 'ledger',

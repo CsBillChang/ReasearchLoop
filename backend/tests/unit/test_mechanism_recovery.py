@@ -76,6 +76,15 @@ class FailedActionGateTests(unittest.TestCase):
         self.assertIsNone(gate.observe([action]))
         self.assertEqual(gate.failed_actions[0]['classification'], 'recoverable_parameter')
 
+    def test_missing_hash_schema_feedback_is_not_source_version_failure(self):
+        gate = FailedActionGate(BOUNDED_PARAMETER_RECOVERY)
+        action = failed(observation={'ok': False, 'kind': 'validation_error', 'data': {},
+            'message': '1 validation error for ResearchReviewInput\nValue error, target_id and content_hash must be supplied together',
+            'retryable': True})
+        action['tool_name'] = 'review_research'
+        self.assertIsNone(gate.observe([action]))
+        self.assertIsNone(gate.global_stop)
+
     def test_unknown_policy_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'RECOVERY_POLICY'):
             FailedActionGate({**BOUNDED_PARAMETER_RECOVERY, 'max_recoverable_failures': 99})
