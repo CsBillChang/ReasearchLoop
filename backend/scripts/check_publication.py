@@ -12,6 +12,8 @@ import subprocess
 ROOT_FILES = {".gitignore", ".env.example", ".python-version",
               "README.md", "Makefile", "compose.yaml"}
 SOURCE_ROOTS = {"backend", "frontend", "config"}
+# Markdown/RST 说明仅发布根 README；源码内许可与配置中的模型文件名不受影响。
+DOCUMENT_SUFFIXES = {".md", ".markdown", ".rst"}
 BLOCKED_PARTS = {"node_modules", "__pycache__", ".venv", ".vscode", ".idea",
                  "archive", "backups", "data-restores", ".pytest_cache"}
 BLOCKED_SUFFIXES = {".pdf", ".onnx", ".sqlite", ".db", ".log", ".pem", ".key",
@@ -56,6 +58,7 @@ def check_file(name: str, content: bytes, mode: str = "100644") -> list[dict]:
     if (not allowed or path.is_absolute() or ".." in path.parts
             or any(part in BLOCKED_PARTS for part in path.parts)
             or (path.name.startswith(".env") and name != ".env.example")
+            or (path.suffix.lower() in DOCUMENT_SUFFIXES and name != "README.md")
             or (path.suffix.lower() in BLOCKED_SUFFIXES and name not in REVIEWED_IMAGES)):
         findings.append({"path": name, "rule": "excluded_path"})
     if mode not in {"100644", "100755"}:
