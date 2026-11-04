@@ -34,3 +34,9 @@ data-restores/
 *.log
 *.pdf
 *.onnx
+
+# 公开文档只保留根 README；本机说明继续留存。
+*.[mM][dD]
+*.[mM][aA][rR][kK][dD][oO][wW][nN]
+*.[rR][sS][tT]
+!/README.md

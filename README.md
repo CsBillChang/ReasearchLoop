@@ -127,111 +127,23 @@
 
 Reflection 与 Memory 采用有界核验、角色交接和跨会话使用场景的小样本验证；目前不宣称它们各自带来独立的准确率、时延或 Token 百分比收益。原始论文、用户对话、模型响应及实验账本不随公开仓库分发。
 
+## 运行前提
+
+需要 Python **3.14**、uv、Node.js/npm，以及 MySQL、Qdrant（可通过 Docker Compose 运行）。复制 [.env.example](.env.example) 为 `.env`，填写自己的 API Key、模型名、数据库连接和本地模型清单路径。
+
+本地检索资源按 [模型清单模板](config/model-manifest.example.json) 准备，论文来源按 [来源模板](config/paper-sources.example.json) 配置。模型权重、论文库和凭据不随源码分发；页面可启动不代表检索资源或论文来源已经就绪。
+
 <a id="quick-start"></a>
 
 ## Quick Start
 
-以下按 **Apple Silicon macOS 的默认 FP16 检索环境**说明。应用在本机运行，MySQL 与 Qdrant 通过 Docker Compose 启动；模型权重、论文来源和 API 凭据需要自行准备。
-
-### 1. 获取源码与安装依赖
-
-需要 Python **3.14**、uv、Node.js/npm 和 Docker Compose v2；先启动 Docker。Python 和前端依赖分别由仓库锁文件管理。若从 GitHub 下载 ZIP，解压后进入项目目录，再从 `cp .env.example .env` 开始执行。
+依赖、`.env` 和数据库已准备好后，在项目根目录执行：
 
 ```bash
-git clone https://github.com/CsBillChang/ReasearchLoop.git
-cd ReasearchLoop
-
-cp .env.example .env
-make sync-gpu
-npm --prefix frontend ci
-
-mkdir -p data/config
-cp config/model-manifest.example.json data/config/model-manifest.json
-```
-
-编辑 `.env`，填写 `DEEPSEEK_API_KEY`，并将 `DEEPSEEK_MODEL` 设置为账户实际可用的模型。真实研究任务会调用外部模型接口；API Key 不应提交到 Git。
-
-默认检索需要按 [模型清单模板](config/model-manifest.example.json) 的仓库、revision、文件名和 SHA256 准备本地文件：
-
-| 清单条目 | 用途 | 模板目录 |
-|---|---|---|
-| `embedding` | multilingual-e5-small 的 ONNX 编码器及分词配置 | `data/local-models/embedding` |
-| `reranker` | mmarco-mMiniLMv2-L12-H384-v1 的分词配置及原 ONNX 权重 | `data/local-models/reranker` |
-| `reranker_fp16` | 同 revision 的 FP16 重排权重和配置 | `data/local-models/reranker-fp16` |
-
-复制清单不会下载权重。文件目录可自行调整，须与清单一致；相对路径按仓库根目录解释。FP16 路线会复用 `reranker` 条目的 tokenizer/config。准备好文件后，在 `.env` 中添加：
-
-```dotenv
-RESEARCHLOOP_RETRIEVAL_MODEL_MANIFEST=data/config/model-manifest.json
-RESEARCHLOOP_RETRIEVAL_ROUTE=located_fp16
-RESEARCHLOOP_RERANKER_BACKEND=mps_fp16
-PYTORCH_ENABLE_MPS_FALLBACK=0
-```
-
-模型缺失或不匹配时会显示检索降级，不会自动下载模型或转为 CPU。其他设备可以显式选择 `make sync-index`、`hybrid_rrf` 与 `onnx_cpu`；需要适配对应设备的 ONNX 文件及清单，当前模板的量化重排权重为 ARM64 版本。CPU 路线不代表上述 FP16 实验配置或性能。
-
-### 2. 按需配置论文来源
-
-可以从上传 PDF 开始使用。若要按主题搜索论文或生成来源驱动的简报，需要配置可用的来源服务：
-
-```bash
-cp config/paper-sources.example.json data/config/paper-sources.json
-```
-
-编辑复制后的文件，填写自己可访问的 Supabase URL、只读凭据和对应 BM25 RPC 名称，并启用所需来源。模板列出 17 个来源适配项，默认全部禁用且连接信息为空，仓库不提供现成论文库或共享凭据。
-
-### 3. Start：初始化并启动
-
-完成前面的 `.env`、模型文件及所需来源配置后，在项目根目录执行：
-
-```bash
-# 启动 MySQL、Qdrant，并等待基础设施就绪
-docker compose up -d --wait
-
-# 初始化数据库、检查配置，然后启动应用
-make migrate
-make diagnose
 make start
-make status
 ```
 
-日常再次启动使用以下命令，无需重新安装依赖：
-
-```bash
-docker compose up -d --wait
-make start
-
-# 查看状态 / 停止应用进程
-make status
-make stop
-```
-
-`make start` 一并启动 API、前端、Worker 与 Scheduler。打开 **http://127.0.0.1:4173**，即可从聊天入口提交研究任务。
-
-| 服务 | 默认地址 |
-|---|---|
-| 前端 | `http://127.0.0.1:4173` |
-| API | `http://127.0.0.1:18082` |
-| MySQL | `127.0.0.1:33316` |
-| Qdrant HTTP / gRPC | `127.0.0.1:6339` / `127.0.0.1:6340` |
-
-默认端口仅绑定本机。若调整数据库密码，需保持 Compose 环境配置与 `.env` 中的 `DATABASE_URL` 一致。数据库迁移由 `make migrate` 显式执行，应用启动不会自动代替迁移。
-
-`make diagnose` 检查配置、基础设施、依赖与本地模型文件身份，不调用生成模型。`/api/health` 用于查看进程与配置状态，`/api/ready` 检查数据库及迁移就绪；它们不代替真实研究任务验收。
-
-## Operations & Development
-
-```bash
-make status    # 查看受管进程状态
-make diagnose  # 查看启动条件与组件缺项
-make stop      # 请求应用进程有序停止，保留数据
-make start     # 再次启动应用进程
-
-make check     # Python / JavaScript 语法检查
-make test      # 默认测试入口，不调用 DeepSeek
-```
-
-`make stop` 管理应用进程，Docker 基础设施另由 Compose 管理。停止结果仍显示任务或进程在收尾时，应先检查状态，避免重复启动。当前默认测试中存在历史夹具与现行合同不一致导致的既有失败，`make test` 不作为启动前必须全绿的门槛；因缺少隔离数据库或本机材料而跳过的项目，也不代表相应真实场景已经通过。
+一次启动 API、前端、Worker 和 Scheduler。前端：**http://127.0.0.1:4173**；API：`http://127.0.0.1:18082`。
 
 ## Project Layout
 
@@ -250,4 +162,4 @@ frontend/              对话、个人面板及成果展示
 config/                论文来源与本地模型清单模板
 ```
 
-更多实现说明见 [后端说明](backend/README.md) 与 [前端说明](frontend/README.md)。本项目面向单用户本地研究，不包含公网多租户部署或 Obsidian 同步；Checkpoint 为项目自实现快照。公开仓库保留源码、依赖锁文件、迁移、测试和配置模板，私有数据与实验材料保存在仓库外。
+本项目面向单用户本地研究，不包含公网多租户部署；Checkpoint 为项目自实现执行快照。公开仓库保留源码、依赖锁文件、迁移、测试和配置模板。

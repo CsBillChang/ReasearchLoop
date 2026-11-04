@@ -13,6 +13,24 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(check_file("backend/research_loop/example.py", b'"""module"""'), [])
         self.assertEqual(check_file(".env.example", b"DEEPSEEK_API_KEY=\n"), [])
 
+    def test_only_root_readme_is_publishable(self):
+        """仅根目录标准名称README可发布，子文档及扩展名大小写变体均拒绝。"""
+        self.assertEqual(check_file("README.md", b"# ResearchLoop"), [])
+        for name in ("backend/README.md", "frontend/README.MD", "backend/readme.md",
+                     "config/guide.MarkDown", "backend/guide.RsT", "README.MD"):
+            with self.subTest(name=name):
+                self.assertIn({"path": name, "rule": "excluded_path"},
+                              check_file(name, b"# local documentation"))
+
+    def test_runtime_templates_and_license_text_remain_publishable(self):
+        """模型清单里的README文件名、运行配置及源码许可文本不当作文档路径拒绝。"""
+        for name, content in (("config/model-manifest.example.json", b'{"files":{"README.md":{}}}'),
+                              ("backend/pyproject.toml", b'[project]\nname="example"\n'),
+                              ("backend/LICENSE.txt", b"MIT License"),
+                              ("backend/tests/fixtures/input.txt", b"synthetic fixture")):
+            with self.subTest(name=name):
+                self.assertEqual(check_file(name, content), [])
+
     def test_private_locations_and_attachments_are_rejected(self):
         """运行数据、历史说明、依赖目录和论文不进入公开树。"""
         for name in (".env", "docs/archive/old.md", "docs/status.md", "docs/evidence/retrieval.json",
