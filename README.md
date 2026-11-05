@@ -18,7 +18,6 @@
   <a href="#preview">Interface Preview</a> ·
   <a href="#features">Core Features</a> ·
   <a href="#architecture">Workflow Architecture</a> ·
-  <a href="#evaluation">Evaluation</a> ·
   <a href="#quick-start">Quick Start</a>
 </p>
 
@@ -93,46 +92,6 @@
 
 **Tech Stack:** Python / FastAPI / LangGraph / MySQL / Qdrant / ONNX Runtime / PyTorch MPS / JavaScript / Markdown / KaTeX / SSE。
 
-<a id="evaluation"></a>
-
-## Evaluation
-
-### Agent：端到端执行耗时与任务 Token
-
-正式 A/B 基于 **54 篇论文、24 个固定任务、每题每版重复 2 次，共 96 次运行**，比较 V1.5.5 部署等价版本 A 与联合提示词候选 B。B 的设计被 V1.6.0 采用，V1.6.1 继续沿用；以下是历史实验结果，并非对 V1.6.1 重新进行的整套性能测量。
-
-为了在有可用交付的运行间比较成本，从原正式观测中事后筛选出 **双方均至少部分可用的 43 对、覆盖 22 题**。先在每道题内对有效重复取均值，再对题目等权汇总，避免部分题目保留两次、部分仅保留一次导致权重不同。
-
-| 指标（按题等权均值） | A：V1.5.5 部署等价版 | B：联合提示词候选 | 变化 |
-|---|---:|---:|---:|
-| 端到端执行耗时 | 204.78 秒 | 139.28 秒 | **降低 31.99%** |
-| 任务总 Token | 877,351.34 | 503,518.98 | **降低 42.61%** |
-
-端到端执行耗时使用任务运行的墙钟时间，任务总 Token 汇总任务及子任务的实际输入与输出用量。均值可能包含小数；百分比使用未四舍五入的数据计算。
-
-“部分可用”允许提供有依据的已有成果并说明材料或执行限制，样本中包含部分停止的运行，不等同全部完整交付。因此，这组数字描述的是事后可用配对子集，不能解释为全部 96 次的质量等价收益或成功率。工程修复后的补测另行保留，没有回填替换此表中的原始观测。
-
-### RAG：检索质量与本机耗时
-
-在固定 **112 道正样本检索题**上，对比 BM25 与标题/章节定位、通用概念扩展及 FP16 重排路线；另有 2 道缺证题，不计入检索质量分母。热查询每题运行 3 轮，先取题内中位数，再统计题目间 P50/P95：
-
-| 指标 | BM25 | 定位＋FP16 重排 |
-|---|---:|---:|
-| Recall@10 | 59.82% | **78.13%** |
-| MRR@24 | 0.2703 | **0.5400** |
-| 本机检索组件热查询 P50 | 39.71 毫秒 | 631.52 毫秒 |
-| 本机检索组件热查询 P95 | 56.77 毫秒 | 757.23 毫秒 |
-
-该路线以更多本机计算换取更好的召回与排序，不能表述为相对 BM25 更快。热查询覆盖本机检索组件，不包含在线 SQL/来源授权回读、首次建索引或整个 Agent 的交付；这些耗时也不应与上面的 Agent 端到端执行耗时直接相加或归因。
-
-Reflection 与 Memory 采用有界核验、角色交接和跨会话使用场景的小样本验证；目前不宣称它们各自带来独立的准确率、时延或 Token 百分比收益。原始论文、用户对话、模型响应及实验账本不随公开仓库分发。
-
-## 运行前提
-
-需要 Python **3.14**、uv、Node.js/npm，以及 MySQL、Qdrant（可通过 Docker Compose 运行）。复制 [.env.example](.env.example) 为 `.env`，填写自己的 API Key、模型名、数据库连接和本地模型清单路径。
-
-本地检索资源按 [模型清单模板](config/model-manifest.example.json) 准备，论文来源按 [来源模板](config/paper-sources.example.json) 配置。模型权重、论文库和凭据不随源码分发；页面可启动不代表检索资源或论文来源已经就绪。
-
 <a id="quick-start"></a>
 
 ## Quick Start
@@ -144,22 +103,3 @@ make start
 ```
 
 一次启动 API、前端、Worker 和 Scheduler。前端：**http://127.0.0.1:4173**；API：`http://127.0.0.1:18082`。
-
-## Project Layout
-
-```text
-backend/research_loop/
-  api/                 HTTP、上传、任务与 SSE 入口
-  agents/              角色编排、提示词与上下文管理
-  tools/               工具接口与参数合同
-  services/            研究、记忆、检索与成果业务逻辑
-  providers/           模型、论文来源与本地检索适配
-  storage/  workers/   持久化、任务领取与执行
-backend/migrations/    数据库迁移
-backend/scripts/       运行管理、诊断与显式评测入口
-backend/tests/         单元、集成及验收测试
-frontend/              对话、个人面板及成果展示
-config/                论文来源与本地模型清单模板
-```
-
-本项目面向单用户本地研究，不包含公网多租户部署；Checkpoint 为项目自实现执行快照。公开仓库保留源码、依赖锁文件、迁移、测试和配置模板。
